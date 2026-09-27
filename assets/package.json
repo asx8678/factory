@@ -1,0 +1,14 @@
+{
+  "name": "factory-assets",
+  "private": true,
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch"
+  },
+  "devDependencies": {
+    "@xyflow/svelte": "^1.7.0",
+    "esbuild": "^0.28.2",
+    "esbuild-svelte": "^0.9.5",
+    "svelte": "^5.57.1"
+  }
+}
