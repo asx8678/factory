@@ -3,7 +3,8 @@ defmodule FactoryWeb.SettingsLive do
 
   @tabs [{"general", "General"}, {"models", "Models"}, {"keys", "API keys"}]
 
-  def mount(_params, _session, socket), do: {:ok, assign(socket, page_title: "Settings", tabs: @tabs)}
+  def mount(_params, _session, socket),
+    do: {:ok, assign(socket, page_title: "Settings", tabs: @tabs)}
 
   def handle_params(params, _uri, socket) do
     {:noreply, assign(socket, tab: Map.get(params, "tab", "general"))}
@@ -41,12 +42,22 @@ defmodule FactoryWeb.SettingsLive do
                   <option>claude-haiku-4-5</option>
                 </select>
               </.field>
-              <.field label="Daily spending limit" hint="Agents pause when today's cost reaches this amount.">
-                <label class="input w-full"><span class="text-base-content/50">$</span><input type="number" value="25" /></label>
+              <.field
+                label="Daily spending limit"
+                hint="Agents pause when today's cost reaches this amount."
+              >
+                <label class="input w-full"><span class="text-base-content/50">$</span><input
+                  type="number"
+                  value="25"
+                /></label>
               </.field>
             <% "keys" -> %>
               <.field label="Anthropic API key" hint="Used by every agent to call Claude.">
-                <input type="password" placeholder="sk-ant-…" class="input w-full font-mono text-sm" />
+                <input
+                  type="password"
+                  placeholder="sk-ant-…"
+                  class="input w-full font-mono text-sm"
+                />
               </.field>
               <.field label="GitHub token" hint="Lets agents read issues and open pull requests.">
                 <input type="password" placeholder="ghp_…" class="input w-full font-mono text-sm" />
@@ -57,7 +68,8 @@ defmodule FactoryWeb.SettingsLive do
               </.field>
               <.field label="Merging" hint="Agents open pull requests but a person merges them.">
                 <label class="flex items-center gap-3 text-sm">
-                  <input type="checkbox" class="toggle toggle-primary toggle-sm" checked /> Ask me before merging
+                  <input type="checkbox" class="toggle toggle-primary toggle-sm" checked />
+                  Ask me before merging
                 </label>
               </.field>
           <% end %>

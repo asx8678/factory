@@ -28,6 +28,10 @@ defmodule FactoryWeb.Layouts do
   attr :flash, :map, required: true, doc: "the map of flash messages"
   attr :active, :atom, default: nil, doc: "the active menu item"
 
+  attr :full, :boolean,
+    default: false,
+    doc: "fill the window below the header, without page padding"
+
   attr :current_scope, :map,
     default: nil,
     doc: "the current [scope](https://phoenix.hexdocs.pm/scopes.html)"
@@ -35,29 +39,29 @@ defmodule FactoryWeb.Layouts do
   slot :inner_block, required: true
 
   @menu [
-    {:dashboard, "Dashboard", "/"},
-    {:graph, "Graph", "/graph"},
-    {:agents, "Agents", "/agents"},
+    {:chat, "Chat", "/"},
+    {:workflows, "Workflows", "/workflows"},
     {:runs, "Runs", "/runs"},
     {:settings, "Settings", "/settings"}
   ]
 
   def app(assigns) do
-    agents = Factory.Agents.list_agents()
-
-    assigns =
-      assign(assigns,
-        menu: @menu,
-        running: Enum.count(agents, &(&1.status == "running")),
-        failing: Enum.filter(agents, &(&1.status == "error"))
-      )
+    assigns = assign(assigns, menu: @menu, active_runs: Factory.Runs.count_active())
 
     ~H"""
     <header class="sticky top-0 z-30 border-b border-base-300 bg-base-100/85 backdrop-blur">
       <div class="mx-auto flex h-14 max-w-7xl items-stretch gap-3 px-4 sm:gap-6 sm:px-6">
-        <.link navigate={~p"/"} class="flex items-center gap-2 text-[15px] font-semibold tracking-tight">
+        <.link
+          navigate={~p"/"}
+          class="flex items-center gap-2 text-[15px] font-semibold tracking-tight"
+        >
           <svg viewBox="0 0 20 20" class="size-5" aria-hidden="true">
-            <path d="M10 4 L4 15 M10 4 L16 15 M4 15 L16 15" class="stroke-primary" stroke-width="1.5" fill="none" />
+            <path
+              d="M10 4 L4 15 M10 4 L16 15 M4 15 L16 15"
+              class="stroke-primary"
+              stroke-width="1.5"
+              fill="none"
+            />
             <circle cx="10" cy="4" r="2.6" class="fill-primary" />
             <circle cx="4" cy="15" r="2.6" class="fill-primary" />
             <circle cx="16" cy="15" r="2.6" class="fill-primary" />
@@ -83,22 +87,25 @@ defmodule FactoryWeb.Layouts do
         </nav>
 
         <div class="flex items-center gap-4 text-sm">
-          <.link navigate={~p"/runs"} class="hidden items-center gap-2 text-base-content/70 hover:text-base-content md:flex">
-            <span class="size-2 rounded-full bg-info"></span> {@running} running
-          </.link>
           <.link
-            :for={a <- @failing}
-            navigate={~p"/graph/#{a.id}"}
-            class="hidden items-center gap-2 text-error hover:underline md:flex"
+            :if={@active_runs > 0}
+            navigate={~p"/runs"}
+            class="hidden items-center gap-2 text-base-content/70 hover:text-base-content md:flex"
           >
-            <span class="size-2 rounded-full bg-error"></span> {a.name} failed
+            <span class="size-2 rounded-full bg-info"></span> {@active_runs} active {if @active_runs ==
+                                                                                          1,
+                                                                                        do: "run",
+                                                                                        else: "runs"}
           </.link>
           <.theme_toggle />
         </div>
       </div>
     </header>
 
-    <main class="mx-auto max-w-7xl px-4 py-8 sm:px-6 sm:py-10">
+    <main :if={@full} class="h-[calc(100dvh-3.5rem)] overflow-hidden">
+      {render_slot(@inner_block)}
+    </main>
+    <main :if={!@full} class="mx-auto max-w-7xl px-4 py-8 sm:px-6 sm:py-10">
       {render_slot(@inner_block)}
     </main>
 
@@ -118,21 +125,31 @@ defmodule FactoryWeb.Layouts do
     """
   end
 
-  def status_label("running"), do: "Running"
-  def status_label("done"), do: "Done"
-  def status_label("waiting"), do: "Waiting"
-  def status_label("error"), do: "Failed"
-  def status_label(_), do: "Idle"
+  # Covers agent statuses (idle, running, waiting, error, done), run statuses
+  # (draft, queued, running, paused, done, cancelled) and task statuses (pending, ...).
+  @labels %{
+    "running" => "Running",
+    "done" => "Done",
+    "waiting" => "Waiting",
+    "error" => "Failed",
+    "draft" => "Draft",
+    "queued" => "Queued",
+    "paused" => "Paused",
+    "cancelled" => "Cancelled",
+    "pending" => "Pending"
+  }
 
-  def status_text("running"), do: "text-info"
+  def status_label(status), do: Map.get(@labels, status, "Idle")
+
+  def status_text(s) when s in ["running", "queued"], do: "text-info"
   def status_text("done"), do: "text-success"
-  def status_text("waiting"), do: "text-warning"
+  def status_text(s) when s in ["waiting", "paused"], do: "text-warning"
   def status_text("error"), do: "text-error"
   def status_text(_), do: "text-base-content/50"
 
-  def status_dot("running"), do: "bg-info"
+  def status_dot(s) when s in ["running", "queued"], do: "bg-info"
   def status_dot("done"), do: "bg-success"
-  def status_dot("waiting"), do: "bg-warning"
+  def status_dot(s) when s in ["waiting", "paused"], do: "bg-warning"
   def status_dot("error"), do: "bg-error"
   def status_dot(_), do: "bg-base-content/30"
 
@@ -144,7 +161,9 @@ defmodule FactoryWeb.Layouts do
     ~H"""
     <div class="mb-8 flex flex-wrap items-end justify-between gap-4">
       <div>
-        <h1 class="text-3xl font-semibold tracking-tight font-stretch-semi-condensed sm:text-4xl">{@title}</h1>
+        <h1 class="text-3xl font-semibold tracking-tight font-stretch-semi-condensed sm:text-4xl">
+          {@title}
+        </h1>
         <p :if={@subtitle} class="mt-1.5 text-[15px] text-base-content/60">{@subtitle}</p>
       </div>
       <div :if={@actions != []} class="flex items-center gap-3">{render_slot(@actions)}</div>
@@ -157,7 +176,10 @@ defmodule FactoryWeb.Layouts do
 
   def back_link(assigns) do
     ~H"""
-    <.link navigate={@to} class="mb-3 inline-flex items-center gap-1 text-sm text-base-content/55 hover:text-base-content">
+    <.link
+      navigate={@to}
+      class="mb-3 inline-flex items-center gap-1 text-sm text-base-content/55 hover:text-base-content"
+    >
       <.icon name="hero-chevron-left-mini" class="size-4" /> {render_slot(@inner_block)}
     </.link>
     """

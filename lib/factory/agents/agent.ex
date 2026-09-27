@@ -10,6 +10,7 @@ defmodule Factory.Agents.Agent do
     field :role, :string, default: ""
     field :model, :string, default: "claude-sonnet-5"
     field :status, :string, default: "idle"
+    field :activity, :string
     field :x, :float, default: 0.0
     field :y, :float, default: 0.0
 
@@ -20,7 +21,7 @@ defmodule Factory.Agents.Agent do
 
   def changeset(agent, attrs) do
     agent
-    |> cast(attrs, [:name, :role, :model, :status, :x, :y])
+    |> cast(attrs, [:name, :role, :model, :status, :activity, :x, :y])
     |> update_change(:name, &String.trim/1)
     |> validate_required([:name])
     |> validate_length(:name, max: 40)

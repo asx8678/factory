@@ -22,7 +22,8 @@ defmodule Factory.Agents do
 
   defp insert_agent(attrs), do: %Agent{} |> Agent.changeset(attrs) |> Repo.insert()
 
-  def update_agent(%Agent{} = agent, attrs), do: agent |> Agent.changeset(attrs) |> Repo.update() |> changed()
+  def update_agent(%Agent{} = agent, attrs),
+    do: agent |> Agent.changeset(attrs) |> Repo.update() |> changed()
 
   def change_agent(%Agent{} = agent, attrs \\ %{}), do: Agent.changeset(agent, attrs)
 
@@ -71,7 +72,9 @@ defmodule Factory.Agents do
   def unlink(source_id, target_id), do: delete_link(source_id, target_id) |> changed()
 
   defp delete_link(source_id, target_id) do
-    Repo.delete_all(from l in Link, where: l.source_id == ^source_id and l.target_id == ^target_id)
+    Repo.delete_all(
+      from l in Link, where: l.source_id == ^source_id and l.target_id == ^target_id
+    )
   end
 
   @doc "Moves one end of a link to a different agent."
