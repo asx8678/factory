@@ -290,39 +290,43 @@ defmodule Factory.Specs do
 
       write ->
         run = home_run(spec)
-        workflow = Factory.Workflows.for_run(run || %{})
-        type = Factory.Runs.Types.get(Factory.Workflows.kind(workflow))
 
-        agents =
-          workflow.id
-          |> Factory.Engine.workflow_steps()
-          |> Enum.reject(&(&1.kind == "action"))
-          |> Enum.map_join(" → ", & &1.name)
+        with %Factory.Agents.Workflow{} = workflow <- Factory.Workflows.for_run(run || %{}) do
+          type = Factory.Runs.Types.get(Factory.Workflows.kind(workflow))
 
-        prompt = Planner.run_prompt(type, kiro_files(spec), write: write, agents: agents)
-        {:ok, spec} = set_write(spec, %{"status" => "running", "writing" => write})
-        dir = project_dir(spec)
+          agents =
+            workflow.id
+            |> Factory.Engine.workflow_steps()
+            |> Enum.reject(&(&1.kind == "action"))
+            |> Enum.map_join(" → ", & &1.name)
 
-        Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
-          result =
-            with {:ok, reply} <-
-                   Factory.Kiro.ask(prompt,
-                     workdir: dir,
-                     allow: ["read", "search"],
-                     on_tool:
-                       &broadcast(
-                         "spec:#{spec.id}",
-                         {:plan_activity, Planner.describe_tool(&1, dir)}
-                       ),
-                     usage: %{source: "plan_run", spec_id: spec.id, run_id: run && run.id}
-                   ) do
-              Planner.parse_run_plan(reply, write)
-            end
+          prompt = Planner.run_prompt(type, kiro_files(spec), write: write, agents: agents)
+          {:ok, spec} = set_write(spec, %{"status" => "running", "writing" => write})
+          dir = project_dir(spec)
 
-          if spec = get_spec(spec.id), do: wrote(spec, write, result)
-        end)
+          Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
+            result =
+              with {:ok, reply} <-
+                     Factory.Kiro.ask(prompt,
+                       workdir: dir,
+                       allow: ["read", "search"],
+                       on_tool:
+                         &broadcast(
+                           "spec:#{spec.id}",
+                           {:plan_activity, Planner.describe_tool(&1, dir)}
+                         ),
+                       usage: %{source: "plan_run", spec_id: spec.id, run_id: run && run.id}
+                     ) do
+                Planner.parse_run_plan(reply, write)
+              end
 
-        {:ok, spec}
+            if spec = get_spec(spec.id), do: wrote(spec, write, result)
+          end)
+
+          {:ok, spec}
+        else
+          nil -> wrote(spec, write, {:error, "This run's workflow no longer exists."})
+        end
     end
   end
 

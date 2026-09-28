@@ -38,13 +38,40 @@ defmodule Factory.Engine do
     :ok
   end
 
+  @doc "Whether a worker still owns this run, including while its current step finishes."
+  def running?(run_id) when is_binary(run_id), do: running?(String.to_integer(run_id))
+  def running?(run_id), do: Registry.lookup(Factory.Kiro.Registry, {__MODULE__, run_id}) != []
+
   @doc """
   The run's steps in the order they run: its workflow's canvas cards,
   `[%{id:, kind:, name:, does:, after: [ids], loops: [ids], notes:, agent:}]`.
   `after` are the steps it waits for; `loops` the earlier steps it can send the work
   back to (an arrow pointing back, see `canvas_steps/1`).
   """
-  def steps(%Run{} = run), do: canvas_steps(Workflows.for_run(run).id)
+  def steps(%Run{} = run) do
+    case Workflows.for_run(run) do
+      nil -> []
+      workflow -> canvas_steps(workflow.id)
+    end
+  end
+
+  @doc "Checks that the run's workflow exists and has steps to execute."
+  def executable_steps(%Run{} = run) do
+    case Workflows.for_run(run) do
+      nil ->
+        {:error,
+         "This run's workflow no longer exists. Choose an existing workflow for a new run."}
+
+      workflow ->
+        case canvas_steps(workflow.id) do
+          [] ->
+            {:error, "The workflow has no steps yet. Add agents under Workflows, then try again."}
+
+          steps ->
+            {:ok, steps}
+        end
+    end
+  end
 
   @doc "A workflow's steps in the order they'd run, as `steps/1` gives them for a run on it."
   def workflow_steps(workflow_id), do: canvas_steps(workflow_id)
@@ -154,18 +181,60 @@ defmodule Factory.Engine do
   end
 
   @doc "Runs the run's remaining steps, in the calling process."
+  def run(run_id) when is_binary(run_id), do: run(String.to_integer(run_id))
+
   def run(run_id) do
-    with %Run{status: status} = run when status in ["queued", "running"] <- Runs.get_run(run_id) do
-      steps = steps(run)
-      progress = Map.merge(%{"done" => [], "outputs" => %{}}, run.progress || %{})
+    key = {__MODULE__, run_id}
 
-      {:ok, run} =
-        Runs.update_run(run, %{status: "running", progress: Map.delete(progress, "error")})
+    case Registry.register(Factory.Kiro.Registry, key, nil) do
+      {:ok, _} ->
+        try do
+          execute(run_id)
+        after
+          Registry.unregister(Factory.Kiro.Registry, key)
+        end
 
-      case Enum.reject(steps, &(&1.id in progress["done"])) do
-        [] -> finish(run, steps)
-        left -> walk(run, steps, left)
-      end
+      {:error, {:already_registered, _}} ->
+        {:error, :already_running}
+    end
+  end
+
+  defp execute(run_id) do
+    result =
+      Runs.with_locked_run(run_id, fn run ->
+        if run.status in ["queued", "running"] do
+          with {:ok, steps} <- executable_steps(run) do
+            progress = Map.merge(%{"done" => [], "outputs" => %{}}, run.progress || %{})
+
+            {:ok, run} =
+              Runs.update_run(run, %{status: "running", progress: Map.delete(progress, "error")})
+
+            {:ok, {run, steps}}
+          else
+            {:error, reason} ->
+              {:ok, run} =
+                Runs.update_run(run, %{
+                  status: "paused",
+                  progress: Map.put(run.progress, "error", reason)
+                })
+
+              Runs.post(run, "factory", reason <> " The run is paused.")
+              {:ok, {:invalid_workflow, reason}}
+          end
+        else
+          {:ok, run}
+        end
+      end)
+
+    case result do
+      {:ok, {%Run{} = run, steps}} ->
+        walk(run, steps, Enum.reject(steps, &(&1.id in run.progress["done"])))
+
+      {:ok, {:invalid_workflow, reason}} ->
+        {:error, reason}
+
+      other ->
+        other
     end
   end
 
@@ -465,30 +534,42 @@ defmodule Factory.Engine do
   end
 
   defp finish(run, steps) do
-    Factory.Repo.update_all(Ecto.assoc(run, :tasks), set: [status: "done"])
+    Runs.with_locked_run(run.id, fn run ->
+      if run.status == "running" do
+        Factory.Repo.update_all(Ecto.assoc(run, :tasks), set: [status: "done"])
 
-    {:ok, run} =
-      Runs.update_run(run, %{status: "done", progress: Map.delete(run.progress, "current")})
+        {:ok, run} =
+          Runs.update_run(run, %{status: "done", progress: Map.delete(run.progress, "current")})
 
-    Runs.post(
-      run,
-      "factory",
-      "Done: all #{length(steps)} #{if length(steps) == 1, do: "step", else: "steps"} of the workflow ran."
-    )
+        Runs.post(
+          run,
+          "factory",
+          "Done: all #{length(steps)} #{if length(steps) == 1, do: "step", else: "steps"} of the workflow ran."
+        )
 
-    {:ok, run}
+        {:ok, run}
+      else
+        {:ok, run}
+      end
+    end)
   end
 
   defp fail(run, step, reason) do
-    progress = run.progress |> Map.put("error", reason) |> Map.put("current", step.id)
-    {:ok, run} = Runs.update_run(run, %{status: "paused", progress: progress})
+    Runs.with_locked_run(run.id, fn run ->
+      if run.status == "running" do
+        progress = run.progress |> Map.put("error", reason) |> Map.put("current", step.id)
+        {:ok, run} = Runs.update_run(run, %{status: "paused", progress: progress})
 
-    Runs.post(
-      run,
-      "factory",
-      "#{step.name} failed: #{reason}\nThe run is paused at this step. Fix the cause, then /resume to try it again.",
-      meta: meta(step)
-    )
+        Runs.post(
+          run,
+          "factory",
+          "#{step.name} failed: #{reason}\nThe run is paused at this step. Fix the cause, then /resume to try it again.",
+          meta: meta(step)
+        )
+      end
+
+      {:ok, run}
+    end)
 
     {:error, reason}
   end

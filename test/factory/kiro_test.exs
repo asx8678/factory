@@ -292,4 +292,227 @@ defmodule Factory.KiroTest do
     assert run_id == other.id
     assert :sys.get_state(Kiro.whereis(agent.id)).workdir == dir
   end
+
+  test "denying permission cancels when Kiro offers only allow or no options", %{
+    agent: agent,
+    run: run
+  } do
+    {:ok, agent} = Agents.update_agent(agent, %{kind: "reviewer"})
+
+    for options <- ["allow-only", "no-options"] do
+      text = "write [test:#{options}]"
+      assert {:ok, "[cancelled] echo: " <> ^text} = Kiro.ask(text)
+      assert :ok = Kiro.prompt(agent, run.id, text)
+      assert_receive {:message, %{author: "Coder", body: body}}, 5_000
+      assert body =~ "[cancelled] echo: #{text}"
+      assert body =~ "Denied: Write notes.md"
+      state = :sys.get_state(Kiro.whereis(agent.id))
+      assert Enum.any?(state.log, &(&1.kind == :tool and &1.outcome == "denied"))
+    end
+  end
+
+  test "an allowed tool with no allow option is cancelled and logged as denied", %{
+    agent: agent,
+    run: run
+  } do
+    assert {:ok, "[cancelled] echo: write [test:reject-only]"} =
+             Kiro.ask("write [test:reject-only]", allow: ["edit"])
+
+    assert :ok = Kiro.prompt(agent, run.id, "write [test:reject-only]")
+    assert_receive {:message, %{author: "Coder", body: body}}, 5_000
+    assert body =~ "[cancelled]"
+    assert body =~ "Denied: Write notes.md"
+    state = :sys.get_state(Kiro.whereis(agent.id))
+    assert Enum.any?(state.log, &(&1.kind == :tool and &1.outcome == "denied"))
+  end
+
+  @tag :tmp_dir
+  test "concurrent prompts accept jobs for only the session's folder", %{
+    agent: agent,
+    run: run,
+    tmp_dir: dir
+  } do
+    {:ok, other} = Runs.create_run()
+    {:ok, other} = Runs.update_run(other, %{settings: %{"project_dir" => dir}})
+    supervisor = start_supervised!(Task.Supervisor)
+    parent = self()
+
+    tasks =
+      for run <- List.duplicate(run, 4) ++ List.duplicate(other, 4) do
+        Task.Supervisor.async_nolink(supervisor, fn ->
+          send(parent, {:ready, self()})
+
+          receive do
+            :go -> {Kiro.workdir(run), Kiro.prompt(agent, run.id, "[test:wait]")}
+          end
+        end)
+      end
+
+    for _ <- tasks, do: assert_receive({:ready, _}, 5_000)
+    for task <- tasks, do: send(task.pid, :go)
+    results = Enum.map(tasks, &Task.await(&1, 5_000))
+    state = :sys.get_state(Kiro.whereis(agent.id))
+
+    for {dir, result} <- results do
+      assert result == if(dir == state.workdir, do: :ok, else: {:error, :busy})
+    end
+
+    assert Enum.count(results, &(elem(&1, 1) == :ok)) == 4
+  end
+
+  @tag :tmp_dir
+  test "enqueue rejects a run belonging to a different folder", %{
+    agent: agent,
+    run: run,
+    tmp_dir: dir
+  } do
+    pid = start_supervised!({Kiro.Session, {agent.id, dir}})
+    assert {:error, :busy} = Kiro.Session.prompt(pid, agent, run.id, "wrong project")
+    assert %{turn: nil, queue: []} = :sys.get_state(pid)
+  end
+
+  test "timeout restarts the transport and stale traffic cannot finish the next turn", %{
+    agent: agent,
+    run: run
+  } do
+    assert :ok = Kiro.prompt(agent, run.id, "first [test:wait]")
+    assert_receive {:agent_stream, %{text: "waiting"}}, 5_000
+    pid = Kiro.whereis(agent.id)
+    old = :sys.get_state(pid)
+    assert :ok = Kiro.prompt(agent, run.id, "second [test:wait]")
+
+    send(pid, {:request_timeout, old.turn.request_id})
+    assert_receive {:message, %{author: "Coder", body: "waiting"}}, 5_000
+    assert_receive {:agent_stream, %{text: "waiting"}}, 5_000
+    current = :sys.get_state(pid)
+    refute current.port == old.port
+    refute current.turn.request_id == old.turn.request_id
+
+    late_chunk = %{
+      method: "session/update",
+      params: %{
+        sessionId: old.session_id,
+        update: %{sessionUpdate: "agent_message_chunk", content: %{type: "text", text: "late"}}
+      }
+    }
+
+    late_response = %{id: old.turn.request_id, result: %{stopReason: "end_turn"}}
+    send_rpc(pid, old.port, late_chunk)
+    send_rpc(pid, old.port, late_response)
+    send_rpc(pid, current.port, late_response)
+    send_rpc(pid, current.port, %{id: old.turn.request_id, error: %{message: "late error"}})
+    send_rpc(pid, current.port, late_chunk)
+    send(pid, {:request_timeout, old.turn.request_id})
+    assert :sys.get_state(pid).turn.request_id == current.turn.request_id
+    assert :sys.get_state(pid).turn.text == "waiting"
+
+    send_rpc(pid, current.port, %{id: current.turn.request_id, result: %{stopReason: "end_turn"}})
+    assert_receive {:message, %{author: "Coder", body: "waiting", meta: meta}}, 5_000
+    assert meta["stop_reason"] == "end_turn"
+    assert Kiro.Session.idle?(pid)
+    assert Agents.get_agent(agent.id).usage["turns"] == 2
+  end
+
+  test "a prompt deadline fires and the queued job runs in the restarted session", %{
+    agent: agent,
+    run: run
+  } do
+    configure(:kiro, prompt_timeout: 200)
+    assert :ok = Kiro.prompt(agent, run.id, "[test:wait]")
+    assert :ok = Kiro.prompt(agent, run.id, "next")
+    assert_receive {:message, %{author: "Coder", body: "waiting"}}, 5_000
+    assert_receive {:message, %{author: "Coder", body: body}}, 5_000
+    assert String.ends_with?(body, "\n\nnext")
+    assert body =~ "Stopped after waiting"
+    assert Kiro.Session.idle?(Kiro.whereis(agent.id))
+  end
+
+  for method <- ["initialize", "session/new", "session/set_config_option"] do
+    @tag :tmp_dir
+    test "#{method} has a deadline and fails all waiting jobs", %{
+      agent: agent,
+      run: run,
+      tmp_dir: dir
+    } do
+      method = unquote(method)
+      configure(:kiro, rpc_timeout: 500)
+      File.write!(Path.join(dir, ".fake-kiro-stall"), method)
+      {:ok, run} = Runs.update_run(run, %{settings: %{"project_dir" => dir}})
+      agent = %{agent | model: "claude-haiku-4.5"}
+      assert :ok = Kiro.prompt(agent, run.id, "first")
+      pid = Kiro.whereis(agent.id)
+      ref = Process.monitor(pid)
+      assert :ok = Kiro.prompt(agent, run.id, "second")
+
+      for _ <- 1..2 do
+        assert_receive {:message, %{body: body}}, 5_000
+        assert body == "Coder couldn't start: Kiro didn't answer #{method} before its deadline."
+      end
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 5_000
+      assert Agents.get_agent(agent.id).status == "error"
+      assert Kiro.whereis(agent.id) == nil
+    end
+  end
+
+  test "completed RPC deadlines cannot fail a later turn", %{agent: agent, run: run} do
+    assert :ok = Kiro.prompt(agent, run.id, "[test:wait]")
+    assert_receive {:agent_stream, %{text: "waiting"}}, 5_000
+    pid = Kiro.whereis(agent.id)
+    state = :sys.get_state(pid)
+    assert map_size(state.pending) == 1
+
+    for id <- 1..(state.turn.request_id - 1), do: send(pid, {:request_timeout, id})
+    assert :sys.get_state(pid).turn.request_id == state.turn.request_id
+  end
+
+  test "the resident log keeps a bounded suffix and reports dropped entries", %{
+    agent: agent,
+    run: run
+  } do
+    configure(:context, max_log_entries: 4)
+
+    for n <- 1..4 do
+      assert :ok = Kiro.prompt(agent, run.id, "turn #{n}")
+      assert_receive {:message, %{author: "Coder"}}, 5_000
+    end
+
+    state = :sys.get_state(Kiro.whereis(agent.id))
+    assert Enum.map(state.log, & &1.id) == ["e8", "e7", "e6", "e5"]
+    assert state.log_dropped == 4
+    assert :ok = Kiro.compact(agent)
+    assert :ok = Kiro.prompt(agent, run.id, "next")
+    assert_receive {:message, %{author: "Coder", body: body}}, 5_000
+    assert body =~ "[omitted 4 older log entries due to the session retention limit]"
+    assert body =~ "turn 4"
+    refute body =~ "turn 1"
+  end
+
+  test "the resident log also enforces its byte limit", %{agent: agent, run: run} do
+    configure(:context, max_log_bytes: 1600)
+
+    for _ <- 1..3 do
+      assert :ok = Kiro.prompt(agent, run.id, String.duplicate("x", 500))
+      assert_receive {:message, %{author: "Coder"}}, 5_000
+    end
+
+    state = :sys.get_state(Kiro.whereis(agent.id))
+    assert state.log != []
+    assert state.log_dropped > 0
+    assert Enum.sum(Enum.map(state.log, &(:erlang.external_size(&1) + 8))) <= 1600
+  end
+
+  defp send_rpc(pid, port, message),
+    do: send(pid, {port, {:data, {:eol, JSON.encode!(message)}}})
+
+  defp configure(key, values) do
+    previous = Application.get_env(:factory, key)
+    Application.put_env(:factory, key, Keyword.merge(previous || [], values))
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:factory, key, previous),
+        else: Application.delete_env(:factory, key)
+    end)
+  end
 end

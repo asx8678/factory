@@ -13,6 +13,7 @@ defmodule FactoryWeb.ActionParts do
     doc: "{:plan, lines} | {:ok, text} | {:error, text} | :running"
 
   attr :new, :boolean, default: false, doc: "just added from the palette, not yet added for good"
+  attr :running, :boolean, default: false
   attr :changed, :boolean, default: false, doc: "has settings that aren't saved yet"
 
   def panel(assigns) do
@@ -20,7 +21,12 @@ defmodule FactoryWeb.ActionParts do
     config = assigns.action.action["config"] || %{}
 
     assigns =
-      assign(assigns, type: type, config: config, missing: Actions.missing(assigns.action))
+      assign(assigns,
+        type: type,
+        config: config,
+        missing: Actions.missing(assigns.action),
+        result: if(assigns.running, do: :running, else: assigns.result)
+      )
 
     ~H"""
     <aside
@@ -157,14 +163,20 @@ defmodule FactoryWeb.ActionParts do
         </div>
 
         <div class="flex items-center gap-2">
-          <button id="action-plan" type="button" phx-click="action_plan" class="btn btn-ghost btn-sm">
+          <button
+            id="action-plan"
+            type="button"
+            phx-click="action_plan"
+            disabled={@running}
+            class="btn btn-ghost btn-sm"
+          >
             <.icon name="hero-eye-mini" class="size-4" /> Dry run
           </button>
           <button
             id="action-run"
             type="button"
             phx-click="action_run"
-            disabled={@missing != [] or @result == :running}
+            disabled={@missing != [] or @running}
             data-confirm={"Run “#{@action.name}” now? It really does it (#{@type && String.downcase(@type.label)}), with sample values for {{run}} and the like."}
             class="btn btn-sm border-warning/50 bg-warning/15 hover:bg-warning/25"
           >

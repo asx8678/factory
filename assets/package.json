@@ -3,6 +3,7 @@
   "private": true,
   "scripts": {
     "build": "node build.mjs",
+    "test": "node --test test/*.test.mjs",
     "watch": "node build.mjs --watch"
   },
   "devDependencies": {

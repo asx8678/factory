@@ -41,6 +41,7 @@ defmodule FactoryWeb.WorkflowsLive do
        source_agents: [],
        attached: MapSet.new(),
        action_result: nil,
+       running_actions: MapSet.new(),
        action_draft: nil,
        new_action_id: nil,
        # The window choosing the base specs this workflow's runs start with.
@@ -60,9 +61,18 @@ defmodule FactoryWeb.WorkflowsLive do
   # and leave a workflow that was deleted there.
   # An action run from its panel finished.
   def handle_info({:action_result, id, result}, socket) do
+    socket = update(socket, :running_actions, &MapSet.delete(&1, id))
+
     if socket.assigns.selected && socket.assigns.selected.id == id,
       do: {:noreply, socket |> assign(action_result: result) |> refresh()},
       else: {:noreply, refresh(socket)}
+  end
+
+  # An agent's status or usage moved: only the open workflow's map needs redrawing.
+  def handle_info({:agent_activity, %{workflow_id: id}}, socket) do
+    if socket.assigns.workflow && socket.assigns.workflow.id == id,
+      do: {:noreply, refresh(socket)},
+      else: {:noreply, socket}
   end
 
   def handle_info({:graph_changed}, socket) do
@@ -199,6 +209,8 @@ defmodule FactoryWeb.WorkflowsLive do
   # A new action is a draft until Add; Cancel (or leaving it) removes it. Changes to
   # an existing action are kept in `action_draft` until Save.
   def handle_event("add_action", %{"type" => type, "x" => x, "y" => y}, socket) do
+    socket = discard_new_action(socket, nil)
+
     case Actions.get(type) && Agents.add_action(socket.assigns.workflow.id, type, x / 1, y / 1) do
       {:ok, card} ->
         {:noreply,
@@ -241,32 +253,15 @@ defmodule FactoryWeb.WorkflowsLive do
     {:noreply, push_patch(socket, to: ~p"/workflows/#{socket.assigns.workflow.id}")}
   end
 
-  def handle_event("action_plan", _, socket) do
-    result =
-      case Actions.plan(socket.assigns.action_draft || socket.assigns.selected) do
-        {:ok, lines} -> {:plan, lines}
-        error -> error
-      end
-
-    {:noreply, assign(socket, action_result: result)}
-  end
-
-  def handle_event("action_run", _, socket) do
+  def handle_event(event, _, socket) when event in ["action_plan", "action_run"] do
     card = socket.assigns.action_draft || socket.assigns.selected
-    lv = self()
-    Agents.set_activity(card.id, "running", "Running")
 
-    Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
-      result = Actions.run(card)
-
-      {status, text} =
-        if match?({:ok, _}, result), do: {"done", "Done"}, else: {"error", elem(result, 1)}
-
-      Agents.set_activity(card.id, status, String.slice(text, 0, 200))
-      send(lv, {:action_result, card.id, result})
-    end)
-
-    {:noreply, assign(socket, action_result: :running)}
+    cond do
+      is_nil(card) or card.kind != "action" -> {:noreply, socket}
+      MapSet.member?(socket.assigns.running_actions, card.id) -> {:noreply, socket}
+      event == "action_plan" -> plan_action(socket, card)
+      true -> run_action(socket, card)
+    end
   end
 
   # Data source cards: an arrow from one to an agent attaches it; deleting the arrow
@@ -302,14 +297,17 @@ defmodule FactoryWeb.WorkflowsLive do
   end
 
   def handle_event("reconnect", %{"old" => old, "new" => new}, socket) do
-    Agents.relink(
-      {int(old["source"]), int(old["target"])},
-      {int(new["source"]), int(new["target"])},
-      handles(new)
-    )
+    with {:ok, old_pair} <- connection_ids(old),
+         {:ok, new_pair} <- connection_ids(new),
+         ids = Tuple.to_list(old_pair) ++ Tuple.to_list(new_pair),
+         true <- Enum.all?(ids, &workflow_agent?(socket, &1)) do
+      Agents.relink(old_pair, new_pair, handles(new))
+    end
 
     {:noreply, refresh(socket)}
   end
+
+  def handle_event("reconnect", _, socket), do: {:noreply, socket}
 
   def handle_event("delete", %{"nodes" => nodes, "edges" => edges}, socket) do
     for %{"source" => s, "target" => t} <- edges, do: Agents.unlink(int(s), int(t))
@@ -409,6 +407,10 @@ defmodule FactoryWeb.WorkflowsLive do
       {:ok, w} ->
         {:noreply,
          socket |> put_flash(:info, "Deleted “#{w.name}”.") |> push_navigate(to: ~p"/workflows")}
+
+      {:error, :in_use} ->
+        {:noreply,
+         put_flash(socket, :error, "Runs still use this workflow. Finish or cancel them first.")}
 
       {:error, _} ->
         {:noreply, put_flash(socket, :error, "Standard workflows can be restored, not deleted.")}
@@ -798,6 +800,36 @@ defmodule FactoryWeb.WorkflowsLive do
     end
   end
 
+  defp plan_action(socket, card) do
+    result =
+      case Actions.plan(card) do
+        {:ok, lines} -> {:plan, lines}
+        error -> error
+      end
+
+    {:noreply, assign(socket, action_result: result)}
+  end
+
+  defp run_action(socket, card) do
+    lv = self()
+    Agents.set_activity(card.id, "running", "Running")
+
+    Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
+      result = Actions.run(card)
+
+      {status, text} =
+        if match?({:ok, _}, result), do: {"done", "Done"}, else: {"error", elem(result, 1)}
+
+      Agents.set_activity(card.id, status, String.slice(text, 0, 200))
+      send(lv, {:action_result, card.id, result})
+    end)
+
+    {:noreply,
+     socket
+     |> update(:running_actions, &MapSet.put(&1, card.id))
+     |> assign(action_result: :running)}
+  end
+
   # The card with the form's unsaved values (name and settings).
   defp draft(card, params, base \\ nil) do
     base = base || card
@@ -869,6 +901,37 @@ defmodule FactoryWeb.WorkflowsLive do
 
   defp source_id("source-" <> id), do: String.to_integer(id)
   defp source_id(id), do: int(id)
+
+  defp connection_ids(%{"source" => source, "target" => target}) do
+    with {:ok, source} <- node_id(source),
+         {:ok, target} <- node_id(target),
+         true <- source != target do
+      {:ok, {source, target}}
+    else
+      _ -> :error
+    end
+  end
+
+  defp connection_ids(_), do: :error
+
+  defp node_id(id) when is_integer(id) and id > 0 and id <= 9_223_372_036_854_775_807,
+    do: {:ok, id}
+
+  defp node_id(id) when is_binary(id) do
+    case Integer.parse(id) do
+      {id, ""} -> node_id(id)
+      _ -> :error
+    end
+  end
+
+  defp node_id(_), do: :error
+
+  defp workflow_agent?(socket, id) do
+    case Agents.get_agent(id) do
+      %Agent{workflow_id: workflow_id} -> workflow_id == socket.assigns.workflow.id
+      _ -> false
+    end
+  end
 
   defp reload_sources(socket),
     do: assign(socket, sources: Sources.list(socket.assigns.workflow.id))
@@ -993,6 +1056,7 @@ defmodule FactoryWeb.WorkflowsLive do
               :if={@selected && @selected.kind == "action"}
               action={@action_draft || @selected}
               result={@action_result}
+              running={MapSet.member?(@running_actions, @selected.id)}
               new={@new_action_id == @selected.id}
               changed={@action_draft != nil}
             />

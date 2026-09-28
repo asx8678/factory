@@ -10,7 +10,7 @@ defmodule Factory.ChatPlanner do
   (`Factory.Specs.for_run/1`), which opens on the Spec page to edit. While it works,
   the planner's live bubble shows what it's reading (`{:agent_stream, …}` on `"run:ID"`).
   """
-  alias Factory.{Agents, Kiro, Runs, Specs}
+  alias Factory.{Agents, Kiro, Repo, Runs, Specs}
   alias Factory.Runs.Run
   alias Factory.Specs.Planner
 
@@ -22,25 +22,44 @@ defmodule Factory.ChatPlanner do
 
   @doc "Plans in the background; the reply is posted to the run."
   def start(%Run{} = run, planner) do
+    with {:ok, {run, files, prompt}} <- prepare(run, planner) do
+      start_request(run, planner, files, prompt)
+    end
+  end
+
+  defp prepare(run, planner) do
+    Runs.with_locked_run(run.id, fn run ->
+      if run.status == "draft" do
+        requests =
+          for m <- Runs.list_messages(run.id),
+              m.role == "user",
+              text = String.trim(m.body),
+              text != "" and not String.starts_with?(text, "/"),
+              do: text
+
+        spec = Specs.for_run(run)
+        # Base specs are rules, not part of the run's own files.
+        files = Enum.reject(Specs.files(spec), &(elem(&1, 0) == "tasks.md"))
+        base = Specs.base_files_for_run(run)
+        current = if Specs.tasks(spec) == [], do: nil, else: spec.tasks
+        prompt = Planner.chat_prompt(planner.name, requests, base ++ files, current)
+
+        run =
+          Runs.get_run(run.id)
+          |> Ecto.Changeset.change(planner_generation: Ecto.UUID.generate())
+          |> Repo.update!()
+
+        {:ok, run} = Runs.update_run(run, %{description: Enum.join(requests, "\n\n")})
+        {:ok, {run, files, prompt}}
+      else
+        {:error, :not_draft}
+      end
+    end)
+  end
+
+  defp start_request(run, planner, files, prompt) do
     topic = "run:#{run.id}"
     dir = run.settings["project_dir"] || Kiro.config(:workspace)
-
-    requests =
-      for m <- Runs.list_messages(run.id),
-          m.role == "user",
-          text = String.trim(m.body),
-          text != "" and not String.starts_with?(text, "/"),
-          do: text
-
-    spec = Specs.for_run(run)
-    # The spec's own text, and the base specs (company rules), which aren't the run's own.
-    files = Enum.reject(Specs.files(spec), &(elem(&1, 0) == "tasks.md"))
-    base = Specs.base_files_for_run(run)
-    current = if Specs.tasks(spec) == [], do: nil, else: spec.tasks
-    prompt = Planner.chat_prompt(planner.name, requests, base ++ files, current)
-
-    # The engine's agents are told the job is what was asked.
-    {:ok, run} = Runs.update_run(run, %{description: Enum.join(requests, "\n\n")})
 
     Agents.set_activity(planner.id, "running", "Planning “#{run.title}”")
     say_live(topic, planner, "_Reading the project…_")
@@ -57,10 +76,24 @@ defmodule Factory.ChatPlanner do
           Planner.parse_chat_plan(reply)
         end
 
-      if run = Runs.get_run(run.id), do: finish(run, planner, files, result)
+      finish(run.id, run.planner_generation, planner, files, result)
     end)
 
     :ok
+  end
+
+  @doc false
+  def finish(run_id, generation, planner, files, result) do
+    Runs.with_locked_run(run_id, fn run ->
+      if run.status == "draft" and not is_nil(generation) and
+           run.planner_generation == generation do
+        finish(run, planner, files, result)
+        run |> Ecto.Changeset.change(planner_generation: nil) |> Repo.update!()
+        {:ok, :applied}
+      else
+        {:ok, :stale}
+      end
+    end)
   end
 
   # Not clear enough to plan: no tasks, but what's missing and the questions to answer.

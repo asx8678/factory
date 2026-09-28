@@ -1,7 +1,7 @@
 defmodule Factory.EngineTest do
   # Not async: steps talk to the fake kiro-cli.
   use Factory.DataCase, async: false
-  alias Factory.{Agents, Engine, Runs, Sources, Workflows}
+  alias Factory.{Agents, Chat, Engine, Runs, Sources, Workflows}
 
   # Planner → Coder → Tester → "Run a command", with the Tester drawn above the Coder
   # so reading order and the arrows disagree; a rules file is attached to the Coder.
@@ -217,5 +217,111 @@ defmodule Factory.EngineTest do
     assert sent["bytes"] <= 3000
     assert sent["omitted_bytes"] > 0
     assert sent["sha256"] =~ ~r/\A[0-9a-f]{64}\z/
+  end
+
+  test "an empty workflow pauses without completing any tasks" do
+    {:ok, workflow} = Workflows.create("Empty workflow")
+    run = workflow |> queued_run() |> with_task()
+
+    assert {:error, reason} = Engine.run(run.id)
+    assert reason =~ "no steps"
+    assert %{status: "paused", tasks: [%{status: "pending"}]} = Runs.get_run(run.id)
+    refute Enum.any?(Runs.list_messages(run.id), &String.starts_with?(&1.body, "Done:"))
+  end
+
+  test "a missing explicit workflow pauses instead of using the current workflow" do
+    %{w: current} = workflow("true")
+    {:ok, _} = Workflows.set_current(current)
+    {:ok, missing} = Workflows.create("Deleted workflow")
+    {:ok, _} = Workflows.delete(missing)
+    run = missing |> queued_run() |> with_task()
+
+    assert {:error, reason} = Engine.run(run.id)
+    assert reason =~ "no longer exists"
+    assert %{status: "paused", tasks: [%{status: "pending"}]} = Runs.get_run(run.id)
+  end
+
+  test "one worker owns a run until its in-flight step exits, including after pause" do
+    run = action_run()
+    parent = self()
+
+    Req.Test.stub(Factory.Actions, fn conn ->
+      send(parent, {:step_started, self()})
+
+      receive do
+        :finish_step -> Plug.Conn.send_resp(conn, 200, "done")
+      end
+    end)
+
+    worker =
+      start_supervised!(
+        {Task,
+         fn ->
+           receive do
+             :start -> send(parent, {:finished, Engine.run(run.id)})
+           end
+         end}
+      )
+
+    ref = Process.monitor(worker)
+    Req.Test.allow(Factory.Actions, self(), worker)
+    send(worker, :start)
+    assert_receive {:step_started, ^worker}, 5_000
+    assert Engine.running?(run.id)
+    assert {:error, :already_running} = Engine.run(run.id)
+    assert {:error, :already_running} = Engine.run(to_string(run.id))
+
+    Chat.handle(Runs.get_run(run.id), "/pause")
+    Chat.handle(Runs.get_run(run.id), "/resume")
+    assert %{status: "paused"} = Runs.get_run(run.id)
+    assert List.last(Runs.list_messages(run.id)).body =~ "still finishing"
+
+    send(worker, :finish_step)
+    assert_receive {:finished, {:ok, %{status: "paused"}}}, 5_000
+    assert_receive {:DOWN, ^ref, :process, ^worker, :normal}
+    refute Engine.running?(run.id)
+    assert [%{status: "pending"}] = Runs.get_run(run.id).tasks
+  end
+
+  for response_status <- [200, 400] do
+    test "cancelling during the final step survives HTTP #{response_status}" do
+      run = action_run()
+
+      Req.Test.stub(Factory.Actions, fn conn ->
+        {:ok, _} = Runs.update_run(Runs.get_run(run.id), %{status: "cancelled"})
+        Plug.Conn.send_resp(conn, unquote(response_status), "finished after cancellation")
+      end)
+
+      Engine.run(run.id)
+      assert %{status: "cancelled", tasks: [%{status: "pending"}]} = Runs.get_run(run.id)
+
+      refute Enum.any?(Runs.list_messages(run.id), fn message ->
+               String.starts_with?(message.body, "Done:") or message.body =~ "The run is paused"
+             end)
+
+      refute Engine.running?(run.id)
+    end
+  end
+
+  defp with_task(run) do
+    {:ok, run} =
+      Runs.attach_spec(run, [{"tasks.md", "- [ ] 1. Ship it"}], [%{ref: "1", title: "Ship it"}])
+
+    run
+  end
+
+  defp action_run do
+    {:ok, workflow} = Workflows.create("One action")
+    {:ok, action} = Agents.add_action(workflow.id, "api_request", 0.0, 0.0)
+
+    {:ok, _} =
+      Agents.update_agent(action, %{
+        action: %{
+          "type" => "api_request",
+          "config" => %{"url" => "https://example.test/step", "method" => "get"}
+        }
+      })
+
+    workflow |> queued_run() |> with_task()
   end
 end

@@ -95,7 +95,13 @@ defmodule Factory.MixProject do
         "cmd --cd assets node build.mjs --deploy",
         "phx.digest"
       ],
-      precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"]
+      precommit: [
+        "compile --warnings-as-errors",
+        "deps.unlock --unused",
+        "format",
+        "assets.build",
+        "test"
+      ]
     ]
   end
 end

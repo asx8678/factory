@@ -112,7 +112,7 @@ defmodule FactoryWeb.RunLive do
           <section :if={@steps != []} id="run-workflow">
             <div class="mb-3 flex items-baseline justify-between gap-3">
               <h2 class="text-lg font-medium">Workflow</h2>
-              <span class="text-sm text-base-content/55">{@workflow.name}</span>
+              <span :if={@workflow} class="text-sm text-base-content/55">{@workflow.name}</span>
             </div>
             <div class="overflow-x-auto rounded-xl border border-base-300/70 bg-base-200/30 px-5 py-5">
               <WorkflowMap.map
@@ -190,11 +190,13 @@ defmodule FactoryWeb.RunLive do
                 <dt class="text-base-content/55">Workflow</dt>
                 <dd class="truncate">
                   <.link
+                    :if={@workflow}
                     navigate={~p"/workflows/#{@workflow.id}"}
                     class="hover:underline"
                   >
                     {@workflow.name}
                   </.link>
+                  <span :if={!@workflow} class="text-base-content/55">Deleted</span>
                 </dd>
               </div>
               <div class="flex flex-col gap-0.5">

@@ -5,7 +5,7 @@ defmodule Factory.Chat do
   the workflow's planner before the run starts, it's planned into the run's spec
   (`Factory.ChatPlanner`). Spec files dropped in go into the run's spec too.
   """
-  alias Factory.{Agents, Kiro, Runs, Spec, Specs}
+  alias Factory.{Agents, Engine, Kiro, Runs, Spec, Specs, Workflows}
   alias Factory.Runs.Run
 
   @commands [
@@ -34,6 +34,7 @@ defmodule Factory.Chat do
   (`Factory.ChatPlanner`), and files attached with it are its spec.
   """
   def handle(%Run{} = run, text, files \\ [], opts \\ []) do
+    run = Runs.get_run(run.id)
     text = String.trim(text)
     agent = opts[:to]
     # "/ask Coder …" from the All view also belongs in Coder's own chat.
@@ -42,17 +43,25 @@ defmodule Factory.Chat do
     Runs.post(run, "user", text, attachments: Enum.map(files, &elem(&1, 0)), meta: to_meta)
 
     tagged(agent, fn ->
-      if planning?(run, agent, text) do
-        run = if files != [], do: Factory.ChatPlanner.keep_files(run, files), else: run
-        Factory.ChatPlanner.start(run, agent)
-      else
-        run = if files != [], do: attach(run, files), else: run
+      cond do
+        ((not is_nil(agent) and not String.starts_with?(text, "/")) or
+           String.starts_with?(text, ["/ask", "/compact", "/workflow"])) and
+            is_nil(Workflows.for_run(run)) ->
+          {:error, reason} = Engine.executable_steps(run)
+          say(run, reason)
 
-        cond do
-          text == "" -> :ok
-          agent && not String.starts_with?(text, "/") -> ask_agent(run, agent, text)
-          true -> command(run, text)
-        end
+        planning?(run, agent, text) ->
+          run = if files != [], do: Factory.ChatPlanner.keep_files(run, files), else: run
+          Factory.ChatPlanner.start(run, agent)
+
+        true ->
+          run = if files != [], do: attach(run, files), else: run
+
+          cond do
+            text == "" -> :ok
+            agent && not String.starts_with?(text, "/") -> ask_agent(run, agent, text)
+            true -> command(run, text)
+          end
       end
     end)
 
@@ -66,7 +75,7 @@ defmodule Factory.Chat do
   defp planning?(_run, _agent, _text), do: false
 
   @doc "Runs a button action shown under a factory message."
-  def action(%Run{} = run, "start"), do: command(run, "/run")
+  def action(%Run{} = run, "start"), do: command(Runs.get_run(run.id), "/run")
 
   @doc """
   Gives a run exactly these spec files (`[{name, content}]`) and the tasks in them,
@@ -134,16 +143,7 @@ defmodule Factory.Chat do
   end
 
   defp run_command(%Run{status: "draft"} = run, "run", _) do
-    {:ok, run} = Runs.update_run(run, %{status: "queued", progress: %{}})
-
-    order =
-      case Factory.Engine.steps(run) do
-        [] -> "The workflow has no steps yet. Add agents under Workflows, then /resume."
-        steps -> "Following the workflow: " <> Enum.map_join(steps, " → ", & &1.name) <> "."
-      end
-
-    say(run, "Queued #{length(run.tasks)} #{plural(run.tasks, "task")}. #{order}")
-    Factory.Engine.start(run)
+    queue(run, "draft")
   end
 
   defp run_command(run, "run", _),
@@ -188,9 +188,7 @@ defmodule Factory.Chat do
     do: say(run, "Only a queued or running run can be paused. This one is #{run.status}.")
 
   defp run_command(%Run{status: "paused"} = run, "resume", _) do
-    {:ok, run} = Runs.update_run(run, %{status: "queued"})
-    say(run, "Resumed.")
-    Factory.Engine.start(run)
+    queue(run, "paused")
   end
 
   defp run_command(run, "resume", _),
@@ -285,6 +283,46 @@ defmodule Factory.Chat do
   defp run_command(run, name, _),
     do: say(run, "There's no /#{name} command. Type /help to see them.")
 
+  defp queue(run, expected_status) do
+    result =
+      Runs.with_locked_run(run.id, fn run ->
+        cond do
+          run.status != expected_status ->
+            {:error, "This run is already #{run.status}. Use /status to see progress."}
+
+          Engine.running?(run.id) ->
+            {:error,
+             "The previous worker is still finishing its step. Try /resume once it stops."}
+
+          true ->
+            with {:ok, steps} <- Engine.executable_steps(run) do
+              attrs =
+                if expected_status == "draft",
+                  do: %{status: "queued", progress: %{}},
+                  else: %{status: "queued"}
+
+              {:ok, run} = Runs.update_run(run, attrs)
+              {:ok, {run, steps}}
+            end
+        end
+      end)
+
+    case result do
+      {:ok, {run, steps}} ->
+        if expected_status == "draft" do
+          order = "Following the workflow: " <> Enum.map_join(steps, " → ", & &1.name) <> "."
+          say(run, "Queued #{length(run.tasks)} #{plural(run.tasks, "task")}. #{order}")
+        else
+          say(run, "Resumed.")
+        end
+
+        Engine.start(run)
+
+      {:error, reason} ->
+        say(run, reason)
+    end
+  end
+
   # Sends a question to an agent's Kiro session; its reply is posted by the session.
   defp ask_agent(run, agent, question) do
     tagged(agent, fn ->
@@ -306,9 +344,15 @@ defmodule Factory.Chat do
   # The agents this run's chat talks to: its workflow's (see Factory.Workflows.for_run/1).
   # Action cards (commit, open a PR…) aren't agents to talk to.
   defp agents(run) do
-    Factory.Workflows.for_run(run).id
-    |> Agents.list_agents()
-    |> Enum.reject(&Factory.Agents.Agent.action?/1)
+    case Workflows.for_run(run) do
+      nil ->
+        []
+
+      workflow ->
+        workflow.id
+        |> Agents.list_agents()
+        |> Enum.reject(&Factory.Agents.Agent.action?/1)
+    end
   end
 
   defp asked_agent(run, "/ask " <> rest) do

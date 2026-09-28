@@ -36,11 +36,19 @@ defmodule FactoryWeb.Usage do
   @doc "Context use at which a Kiro session compacts before its next message (`Factory.Context`)."
   def compact_at, do: Factory.Context.config(:compact_at)
 
+  @doc "Context percentages where severity becomes mid or high, for meters and graph data."
+  def thresholds do
+    high = compact_at()
+    %{mid: high * 0.6, high: high}
+  end
+
   @doc ~s{How full a context is: "low", "mid" (from 60% of the way to compacting) or "high" (compacts next).}
   def level(pct) when is_number(pct) do
+    thresholds = thresholds()
+
     cond do
-      pct >= compact_at() -> "high"
-      pct >= compact_at() * 0.6 -> "mid"
+      pct >= thresholds.high -> "high"
+      pct >= thresholds.mid -> "mid"
       true -> "low"
     end
   end

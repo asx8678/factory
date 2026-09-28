@@ -31,7 +31,11 @@ defmodule Factory.Kiro do
   @doc "Queues a message for the agent's session, starting it if needed. The reply is posted to the run."
   def prompt(agent, run_id, text) do
     dir = workdir(Factory.Runs.get_run(run_id))
-    with {:ok, pid} <- ensure_started(agent, dir), do: Session.prompt(pid, agent, run_id, text)
+    key = session_key(agent)
+
+    locked(key, fn ->
+      with {:ok, pid} <- ensure_session(key, dir), do: Session.prompt(pid, agent, run_id, text)
+    end)
   end
 
   @doc """
@@ -41,7 +45,10 @@ defmodule Factory.Kiro do
   """
   def ensure_started(agent, dir) do
     key = session_key(agent)
+    locked(key, fn -> ensure_session(key, dir) end)
+  end
 
+  defp ensure_session(key, dir) do
     case Registry.lookup(Factory.Kiro.Registry, key) do
       [] ->
         start(key, dir)
@@ -51,7 +58,7 @@ defmodule Factory.Kiro do
 
       [{pid, _elsewhere}] ->
         if Session.idle?(pid) do
-          stop(key)
+          stop_session(key)
           start(key, dir)
         else
           {:error, :busy}
@@ -61,9 +68,16 @@ defmodule Factory.Kiro do
 
   defp start(key, dir) do
     case DynamicSupervisor.start_child(Factory.Kiro.Supervisor, {Session, {key, dir}}) do
-      {:ok, pid} -> {:ok, pid}
-      {:error, {:already_started, pid}} -> {:ok, pid}
-      other -> other
+      {:ok, pid} ->
+        {:ok, pid}
+
+      {:error, {:already_started, pid}} ->
+        if Registry.lookup(Factory.Kiro.Registry, key) == [{pid, dir}],
+          do: {:ok, pid},
+          else: {:error, :busy}
+
+      other ->
+        other
     end
   end
 
@@ -79,11 +93,19 @@ defmodule Factory.Kiro do
 
   @doc "Stops a session (`:shared` or an agent id). The next message starts a fresh one."
   def stop(key) do
+    locked(key, fn -> stop_session(key) end)
+  end
+
+  defp stop_session(key) do
     if pid = whereis(key),
       do: DynamicSupervisor.terminate_child(Factory.Kiro.Supervisor, pid)
 
     :ok
   end
+
+  # Include enqueue in the lock so an idle session cannot be replaced between lookup
+  # and accepting its first job. Different session keys can still start independently.
+  defp locked(key, fun), do: :global.trans({{__MODULE__, key}, self()}, fun, [node()])
 
   @doc """
   Compacts the conversation of the session this agent talks in (see

@@ -7,6 +7,7 @@ import path from "node:path"
 const watch = process.argv.includes("--watch")
 const deploy = process.argv.includes("--deploy")
 const mixEnv = process.env.MIX_ENV || "dev"
+const mixBuildPath = process.env.MIX_BUILD_PATH || `_build/${mixEnv}`
 
 const options = {
   entryPoints: ["js/app.js"],
@@ -15,7 +16,7 @@ const options = {
   outdir: "../priv/static/assets/js",
   external: ["/fonts/*", "/images/*"],
   alias: { "@": "." },
-  nodePaths: [path.resolve("../deps"), path.resolve(`../_build/${mixEnv}`)],
+  nodePaths: [path.resolve("../deps"), path.resolve("..", mixBuildPath)],
   conditions: ["svelte", "browser"],
   mainFields: ["svelte", "browser", "module", "main"],
   minify: deploy,

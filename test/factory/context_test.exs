@@ -94,6 +94,31 @@ defmodule Factory.ContextTest do
     assert summary(c.text) =~ "Message to Coder [entry e40]"
   end
 
+  test "the cutoff uses the full suffix size, including separators and Unicode" do
+    events = [
+      %{kind: :user, id: "e1", at: nil, who: "Coder", text: "żółw 👩‍💻\r"},
+      %{kind: :assistant, id: "e2", at: nil, who: "Coder", text: "é👩‍💻"},
+      %{kind: :error, id: "e3", at: nil, who: "Coder", text: "failed"}
+    ]
+
+    entries = [
+      "[entry e1] Message to Coder:\nżółw 👩‍💻\r",
+      "[entry e2] Reply from Coder:\né👩‍💻",
+      "[entry e3] Coder's turn failed: failed"
+    ]
+
+    for budget <- 0..Context.tokens(Enum.join(entries, "\n\n")) do
+      expected =
+        Enum.find([0, 1], 3, fn i ->
+          Context.tokens(Enum.join(Enum.drop(entries, i), "\n\n")) <= budget
+        end)
+
+      assert {:ok, compacted} = Context.compact(events, keep_recent_tokens: budget)
+      assert compacted.summarized == expected
+      assert compacted.kept == 3 - expected
+    end
+  end
+
   test "the summary stays within 32 KiB however long the conversation" do
     events = log(600, big: 2)
     assert {:ok, c} = Context.compact(events, keep_recent_tokens: 2000)
@@ -182,6 +207,32 @@ defmodule Factory.ContextTest do
 
       assert result.bytes <= 200
       assert result.text =~ "[omitted"
+    end
+
+    test "part and whole ceilings omit bytes from the original body only once" do
+      original = String.duplicate("żółw ", 200)
+
+      result =
+        Context.fit(
+          [
+            %{head: "<spec>", body: original, tail: "</spec>", max: 700},
+            %{head: "", body: "short", tail: "", max: 100}
+          ],
+          250
+        )
+
+      assert result.bytes <= 250
+      assert String.valid?(result.text)
+
+      assert [_, kept, count] =
+               Regex.run(
+                 ~r/\A<spec>(.*?)\n\[omitted (\d+) UTF-8 bytes\]<\/spec>\n\nshort\z/s,
+                 result.text
+               )
+
+      assert String.starts_with?(original, kept)
+      assert String.to_integer(count) == byte_size(original) - byte_size(kept)
+      assert result.omitted_bytes == String.to_integer(count)
     end
   end
 

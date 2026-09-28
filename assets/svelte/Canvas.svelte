@@ -17,6 +17,7 @@
   import ActionNode from "./ActionNode.svelte"
   import ActionsPalette from "./ActionsPalette.svelte"
   import FloatingEdge from "./FloatingEdge.svelte"
+  import { reconcileNodes, reconcileEdges, isSource, sourceEdge, validConnection } from "../js/canvas_state.js"
 
   // graph: {nodes, edges, selected} from Factory.Agents.graph/1
   // push(event, payload): sends an event to the LiveView
@@ -56,9 +57,6 @@
   let actionTypes = $state(graph.action_types ?? null)
   // Agents and actions are the steps of a workflow; data sources aren't.
   const isAgent = (n) => n.type === "agent" || n.type === "action"
-  const isAction = (id) => nodes.some((n) => n.id === id && n.type === "action")
-  const isSource = (id) => typeof id === "string" && id.startsWith("source-")
-  const sourceEdge = (e) => isSource(e.source) || isSource(e.target)
 
   const toNodes = (g) => {
     const attached = new Map()
@@ -113,13 +111,12 @@
   // svelte-ignore state_referenced_locally
   let edges = $state.raw(toEdges(graph))
   let container
-  let reconnecting = false
+  let reconnecting = null
 
-  // Keep each node's measured size so a refresh from the server doesn't make nodes flicker.
+  // Preserve local selection, measurements and positions while dragging.
   export function setGraph(g) {
-    const measured = new Map(nodes.map((n) => [n.id, n.measured]))
-    nodes = toNodes(g).map((n) => (measured.get(n.id) ? { ...n, measured: measured.get(n.id) } : n))
-    edges = toEdges(g)
+    nodes = reconcileNodes(nodes, toNodes(g))
+    edges = reconcileEdges(edges, toEdges(g))
     sources = g.sources ?? null
     actionTypes = g.action_types ?? null
   }
@@ -182,12 +179,7 @@
         ? { source: c.target, agent: c.source }
         : null
 
-  const isValidConnection = (c) => {
-    if (c.source === c.target || (isSource(c.source) && isSource(c.target))) return false
-    const a = attachment(c)
-    if (a) return !isAction(a.agent) && !edges.some((e) => e.source === a.source && e.target === a.agent)
-    return !edges.some((e) => e.source === c.source && e.target === c.target)
-  }
+  const isValidConnection = (c) => validConnection(c, nodes, edges, reconnecting)
 
   // Dropping a source's arrow on empty canvas offers the agents to attach it to.
   let picker = $state(null)
@@ -291,15 +283,16 @@
       a ? push("attach_source", a) : push("connect", withHandles(c))
     }}
     {onconnectend}
-    onreconnectstart={() => (reconnecting = true)}
+    onreconnectstart={(_event, edge) => (reconnecting = edge)}
     onreconnect={(old, c) => {
+      if (!validConnection(c, nodes, edges, old)) return
       if (sourceEdge(old)) {
         const a = attachment(c)
         push("detach_source", { source: old.source, agent: old.target })
         if (a) push("attach_source", a)
       } else push("reconnect", { old: pair(old), new: withHandles(c) })
     }}
-    onreconnectend={() => (reconnecting = false)}
+    onreconnectend={() => (reconnecting = null)}
     ondelete={({ nodes: n, edges: e }) => {
       for (const x of e.filter(sourceEdge)) push("detach_source", { source: x.source, agent: x.target })
       const cards = n.filter((x) => x.type === "source").map((x) => x.id)
@@ -310,7 +303,7 @@
     <Background variant={BackgroundVariant.Dots} gap={22} size={1.2} />
     {#if !readonly && actionTypes}
       <!-- Beside the side panel when a card is selected, so it stays usable. -->
-      <Panel position="top-right" style={anySelected ? "right: 356px" : ""}>
+      <Panel position="top-right" class={anySelected ? "md:!right-[356px]" : ""}>
         <ActionsPalette types={actionTypes} onadd={addAction} />
       </Panel>
     {/if}

@@ -1,7 +1,13 @@
 defmodule FactoryWeb.ChatLive do
   use FactoryWeb, :live_view
+  import Ecto.Query, only: [from: 2]
   alias Factory.{Agents, Chat, Engine, FileBrowser, Kiro, Runs, Workflows}
+  alias Factory.Repo
+  alias Factory.Runs.Message
   alias FactoryWeb.WorkflowMap
+
+  @message_limit 200
+  @message_page 50
 
   def mount(_params, _session, socket) do
     if connected?(socket) do
@@ -17,6 +23,7 @@ defmodule FactoryWeb.ChatLive do
      |> assign(runs: Runs.list_runs(), run: nil, focus: nil, count: 0)
      |> assign(run_usage: %{turns: 0, credits: 0})
      |> assign(draft: "", view: "chat", streaming: %{})
+     |> assign(message_ids: [], earlier?: false, history?: false)
      |> assign(commands: Chat.commands())
      |> assign(workflows: Workflows.list(), browser: nil, folder_warn: false, to: nil)
      |> assign(pick: Workflows.picked())
@@ -47,7 +54,8 @@ defmodule FactoryWeb.ChatLive do
          |> assign(page_title: (focus && focus.name) || "Chat", run: nil, focus: focus, count: 0)
          |> assign(run_usage: %{turns: 0, credits: 0})
          |> assign(streaming: %{})
-         |> stream(:messages, [], reset: true)}
+         |> assign(message_ids: [], earlier?: false, history?: false)
+         |> stream(:messages, [], reset: true, limit: -@message_limit)}
 
       id ->
         case Runs.get_run(id) do
@@ -78,7 +86,10 @@ defmodule FactoryWeb.ChatLive do
   # agent the chat is focused on.
   defp load_agents(socket) do
     run = socket.assigns[:run]
-    workflow = if run, do: Workflows.for_run(run), else: socket.assigns.pick
+    # A finished run can outlive its workflow; show the current one (Chat refuses to run it).
+    workflow =
+      if run, do: Workflows.for_run(run) || Workflows.current(), else: socket.assigns.pick
+
     agents = workflow.id |> Agents.list_agents() |> Enum.reject(&Factory.Agents.Agent.action?/1)
 
     to =
@@ -152,11 +163,44 @@ defmodule FactoryWeb.ChatLive do
   end
 
   defp load_messages(socket) do
-    messages = socket.assigns.run.id |> Runs.list_messages() |> Enum.filter(&visible?(&1, socket))
+    {messages, earlier?} = message_page(socket, @message_limit)
 
     socket
-    |> assign(count: length(messages), run_usage: Runs.usage(socket.assigns.run.id))
-    |> stream(:messages, messages, reset: true)
+    |> assign(
+      count: length(messages),
+      message_ids: Enum.map(messages, & &1.id),
+      earlier?: earlier?,
+      history?: false,
+      run_usage: Runs.usage(socket.assigns.run.id)
+    )
+    |> stream(:messages, messages, reset: true, limit: -@message_limit)
+  end
+
+  defp message_page(socket, limit, before_id \\ nil) do
+    query = from m in Message, where: m.run_id == ^socket.assigns.run.id
+
+    query =
+      if agent = socket.assigns.focus do
+        from m in query,
+          where:
+            fragment("?->>'agent_id'", m.meta) == ^to_string(agent.id) or
+              fragment("?->>'to_agent_id'", m.meta) == ^to_string(agent.id)
+      else
+        query
+      end
+
+    query = if before_id, do: from(m in query, where: m.id < ^before_id), else: query
+    messages = Repo.all(from m in query, order_by: [desc: m.id], limit: ^(limit + 1))
+    {messages |> Enum.take(limit) |> Enum.reverse(), length(messages) > limit}
+  end
+
+  defp refresh_messages(socket) do
+    messages =
+      Repo.all(from m in Message, where: m.id in ^socket.assigns.message_ids, order_by: m.id)
+
+    socket
+    |> assign(run_usage: Runs.usage(socket.assigns.run.id))
+    |> stream(:messages, messages, limit: -@message_limit)
   end
 
   # In an agent's view, show only what was sent to it and what it (or the factory about it) replied.
@@ -172,6 +216,27 @@ defmodule FactoryWeb.ChatLive do
 
   def handle_event("validate", params, socket) do
     {:noreply, assign(socket, draft: get_in(params, ["chat", "body"]) || "")}
+  end
+
+  def handle_event("load_earlier", _, socket) do
+    if socket.assigns.earlier? do
+      {messages, earlier?} =
+        message_page(socket, @message_page, List.first(socket.assigns.message_ids))
+
+      ids = Enum.take(Enum.map(messages, & &1.id) ++ socket.assigns.message_ids, @message_limit)
+
+      {:noreply,
+       socket
+       |> assign(message_ids: ids, count: length(ids), earlier?: earlier?, history?: true)
+       |> stream(:messages, Enum.reverse(messages), at: 0, limit: @message_limit)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_event("latest", _, socket) do
+    socket = if socket.assigns.run, do: load_messages(socket), else: socket
+    {:noreply, push_event(socket, "chat:latest", %{})}
   end
 
   # Commands work anywhere; anything for the agents needs the folder they work in.
@@ -195,7 +260,13 @@ defmodule FactoryWeb.ChatLive do
   # The workflow the chat plans for, and the folder its agents work in.
 
   def handle_event("pick_workflow", %{"id" => id}, socket) do
-    case Workflows.get(id) do
+    # Read the run again so an event queued before its status update cannot change it.
+    run = socket.assigns.run && Runs.get_run(socket.assigns.run.id)
+
+    case settable?(run) && Workflows.get(id) do
+      false ->
+        {:noreply, socket}
+
       nil ->
         {:noreply, socket}
 
@@ -401,9 +472,21 @@ defmodule FactoryWeb.ChatLive do
         do: assign(socket, run_usage: Runs.usage(socket.assigns.run.id)),
         else: socket
 
-    if visible?(message, socket),
-      do: {:noreply, socket |> update(:count, &(&1 + 1)) |> stream_insert(:messages, message)},
-      else: {:noreply, socket}
+    if visible?(message, socket) and not socket.assigns.history? do
+      ids = socket.assigns.message_ids
+      ids = if message.id in ids, do: ids, else: ids ++ [message.id]
+
+      {:noreply,
+       socket
+       |> assign(
+         count: min(length(ids), @message_limit),
+         message_ids: Enum.take(ids, -@message_limit),
+         earlier?: socket.assigns.earlier? or length(ids) > @message_limit
+       )
+       |> stream_insert(:messages, message, limit: -@message_limit)}
+    else
+      {:noreply, socket}
+    end
   end
 
   def handle_info({:agent_stream, %{agent_id: id} = chunk}, socket) do
@@ -421,8 +504,10 @@ defmodule FactoryWeb.ChatLive do
            Enum.map(old.tasks, & &1.title) != Enum.map(run.tasks, & &1.title))
 
     socket = assign(socket, run: run, page_title: run.title)
-    {:noreply, if(changed, do: load_messages(socket), else: socket)}
+    {:noreply, if(changed, do: refresh_messages(socket), else: socket)}
   end
+
+  def handle_info({:agent_activity, _agent}, socket), do: handle_info({:graph_changed}, socket)
 
   def handle_info({:graph_changed}, socket) do
     %{assigns: %{graph: graph, agents: agents}} = socket = load_agents(socket)
@@ -539,10 +624,21 @@ defmodule FactoryWeb.ChatLive do
           phx-drop-target={@uploads.spec.ref}
         >
           <div class={["min-h-0 flex-1 overflow-y-auto", @empty && "hidden"]} data-scroll>
+            <div :if={@earlier?} class="flex justify-center pt-4">
+              <button
+                id="load-earlier"
+                type="button"
+                phx-click="load_earlier"
+                class="rounded-full border border-base-300 px-3 py-1 text-xs transition-colors hover:bg-base-content/[0.06]"
+              >
+                Load earlier messages
+              </button>
+            </div>
             <div
               id="messages"
               phx-update="stream"
               phx-hook="ChatScroll"
+              data-history={to_string(@history?)}
               class="mx-auto flex max-w-3xl flex-col gap-7 px-5 pt-8"
             >
               <.message
@@ -560,6 +656,16 @@ defmodule FactoryWeb.ChatLive do
             <%!-- Room to scroll the last message above the floating message box. --%>
             <div class="h-48"></div>
           </div>
+
+          <button
+            id="jump-to-latest"
+            type="button"
+            phx-update="ignore"
+            hidden
+            class="absolute bottom-40 left-1/2 z-10 -translate-x-1/2 rounded-full border border-base-300 bg-surface px-3 py-1.5 text-xs shadow-md transition-colors hover:bg-base-200"
+          >
+            Jump to latest <.icon name="hero-arrow-down-mini" class="ml-1 size-3" />
+          </button>
 
           <div
             :if={@empty}
@@ -631,11 +737,16 @@ defmodule FactoryWeb.ChatLive do
         aria-label="Choose the project folder"
         phx-window-keydown="browse_cancel"
         phx-key="Escape"
+        phx-mounted={JS.push_focus(to: "#folder-button") |> JS.focus_first(to: "#folder-dialog")}
+        phx-remove={JS.pop_focus()}
       >
         <div class="absolute inset-0" phx-click="browse_cancel" aria-hidden="true"></div>
-        <div class="relative w-full max-w-xl overflow-hidden rounded-2xl border border-base-300 bg-base-100 shadow-2xl">
+        <.focus_wrap
+          id="folder-dialog"
+          class="relative w-full max-w-xl overflow-hidden rounded-2xl border border-base-300 bg-base-100 shadow-2xl"
+        >
           <FactoryWeb.SourceParts.browser browser={@browser} />
-        </div>
+        </.focus_wrap>
       </div>
     </Layouts.app>
     """
@@ -678,21 +789,28 @@ defmodule FactoryWeb.ChatLive do
   # The workflow the chat plans for: "Build a feature" unless another is picked.
   defp workflow_picker(assigns) do
     ~H"""
+    <div
+      :if={@locked}
+      id="workflow-picker"
+      aria-disabled="true"
+      class="flex items-center gap-1.5 rounded-full border border-base-300 px-2.5 py-0.5 text-[13px]"
+    >
+      <.icon name={FactoryWeb.RunParts.workflow_icon(@workflow, :micro)} class="size-4 text-primary" />
+      <span class="max-w-48 truncate">{@workflow.name}</span>
+    </div>
     <details
+      :if={!@locked}
       id="workflow-picker"
       class="relative"
       phx-click-away={JS.remove_attribute("open", to: "#workflow-picker")}
     >
-      <summary class={[
-        "flex cursor-pointer list-none items-center gap-1.5 rounded-full border border-base-300 px-2.5 py-0.5 text-[13px] hover:bg-base-content/[0.06]",
-        @locked && "pointer-events-none"
-      ]}>
+      <summary class="flex cursor-pointer list-none items-center gap-1.5 rounded-full border border-base-300 px-2.5 py-0.5 text-[13px] hover:bg-base-content/[0.06]">
         <.icon
           name={FactoryWeb.RunParts.workflow_icon(@workflow, :micro)}
           class="size-4 text-primary"
         />
         <span class="max-w-48 truncate">{@workflow.name}</span>
-        <.icon :if={!@locked} name="hero-chevron-down-mini" class="size-4 opacity-50" />
+        <.icon name="hero-chevron-down-mini" class="size-4 opacity-50" />
       </summary>
       <div class="absolute left-0 z-30 mt-1 w-72 rounded-2xl border border-base-content/10 bg-surface p-1.5 shadow-xl">
         <p class="px-3 pb-1 pt-1.5 text-xs text-base-content/45">Workflow</p>

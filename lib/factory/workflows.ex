@@ -11,9 +11,9 @@ defmodule Factory.Workflows do
   workflow it was started with.
   """
   import Ecto.Query
-  alias Factory.{Agents, Kiro, Repo}
+  alias Factory.{Agents, Kiro, Repo, Sources}
   alias Factory.Agents.{Agent, Link, Workflow}
-  alias Factory.Runs.Types
+  alias Factory.Runs.{Run, Types}
 
   @standard ~w(feature bug issue deps)
 
@@ -49,7 +49,7 @@ defmodule Factory.Workflows do
 
   @doc "The workflow plain chats use. Made (empty, \"My workflow\") if there's none yet."
   def current do
-    Repo.one(from w in Workflow, where: w.current, limit: 1) ||
+    Repo.one(from w in Workflow, where: w.current, order_by: w.id, limit: 1) ||
       Repo.one(from w in Workflow, where: is_nil(w.key), order_by: w.id, limit: 1)
       |> case do
         nil ->
@@ -78,9 +78,11 @@ defmodule Factory.Workflows do
     end
   end
 
-  @doc "The workflow a run's chat talks to: the run's own, else the current one."
+  @doc "The run's workflow (nil if deleted), or the current one when none was selected."
   def for_run(%{settings: %{"workflow_id" => id}}) when is_integer(id),
-    do: get(id) || current()
+    do: get(id)
+
+  def for_run(%{settings: %{"workflow_id" => id}}) when not is_nil(id), do: nil
 
   def for_run(_run), do: current()
 
@@ -89,7 +91,7 @@ defmodule Factory.Workflows do
     Repo.transact(fn ->
       Repo.update_all(from(w in Workflow, where: w.current), set: [current: false])
       Repo.update_all(from(w in Workflow, where: w.id == ^id), set: [current: true])
-      {:ok, get(id)}
+      if w = get(id), do: {:ok, w}, else: {:error, :not_found}
     end)
     |> changed()
   end
@@ -112,44 +114,106 @@ defmodule Factory.Workflows do
 
   @doc "Deletes a custom workflow and its agents. Standard ones can only be restored."
   def delete(%Workflow{key: nil} = w) do
-    stop_sessions(w)
-    result = Repo.delete(w)
-    changed(result)
+    agents = Agents.list_agents(w.id)
+
+    result =
+      Repo.transact(fn ->
+        workflow =
+          Repo.one!(from workflow in Workflow, where: workflow.id == ^w.id, lock: "FOR UPDATE")
+
+        referenced? =
+          Repo.exists?(
+            from r in Run,
+              where: r.status not in ["done", "cancelled"],
+              where: fragment("?->>'workflow_id' = ?", r.settings, ^to_string(w.id))
+          )
+
+        if referenced?, do: {:error, :in_use}, else: Repo.delete(workflow)
+      end)
+
+    case result do
+      {:ok, _} ->
+        for agent <- agents, do: Kiro.stop(agent.id)
+        changed(result)
+
+      error ->
+        error
+    end
   end
 
   def delete(%Workflow{}), do: {:error, :standard}
 
   @doc "Copies a workflow (agents, prompts, settings, hand-offs) as a new custom one."
   def clone(%Workflow{} = w, name \\ nil) do
-    Repo.transact(fn ->
-      with {:ok, copy} <- create(name || copy_name(w.name), w.description),
-           {:ok, copy} <- set_base_specs(copy, w.base_spec_ids) do
-        ids =
-          Map.new(Agents.list_agents(w.id), fn a ->
-            {:ok, new} =
-              Agents.create_agent(
-                a
-                |> Map.take(~w(name role kind prompt model kiro_mode session x y action)a)
-                |> Map.put(:workflow_id, copy.id)
-              )
+    result =
+      Repo.transact(fn ->
+        with {:ok, copy} <-
+               %Workflow{base_spec_ids: w.base_spec_ids}
+               |> Workflow.changeset(%{
+                 name: name || copy_name(w.name),
+                 description: w.description
+               })
+               |> Repo.insert() do
+          ids =
+            Map.new(Agents.list_agents(w.id), fn a ->
+              attrs = Map.take(a, ~w(name role kind prompt model kiro_mode session x y action)a)
+              new = %Agent{workflow_id: copy.id} |> Agent.changeset(attrs) |> insert_copy!()
 
-            {a.id, new.id}
-          end)
+              {a.id, new.id}
+            end)
 
-        for l <- links(w.id) do
-          Agents.link(ids[l.source_id], ids[l.target_id], %{
-            source: l.source_handle,
-            target: l.target_handle,
-            prompt: l.prompt
-          })
+          for l <- links(w.id) do
+            %Link{}
+            |> Link.changeset(%{
+              source_id: ids[l.source_id],
+              target_id: ids[l.target_id],
+              source_handle: l.source_handle,
+              target_handle: l.target_handle,
+              prompt: l.prompt
+            })
+            |> insert_copy!()
+          end
+
+          sources = copy_sources(w.id, copy.id, ids)
+
+          {:ok, {copy, sources}}
         end
+      end)
 
-        Factory.Sources.copy(w.id, copy.id, ids)
+    case result do
+      {:ok, {copy, sources}} ->
+        for source <- sources, Sources.repo?(source), do: Sources.sync(source)
+        changed({:ok, copy})
 
-        {:ok, copy}
+      error ->
+        error
+    end
+  end
+
+  # The public creation helpers broadcast and start syncs immediately. Insert copies
+  # without those effects so a rollback never exposes a partial workflow.
+  defp copy_sources(from_id, to_id, agent_ids) do
+    for source <- Sources.list(from_id) do
+      attrs = Map.take(source, ~w(kind name config content enabled x y)a)
+
+      copy =
+        %Sources.Source{workflow_id: to_id}
+        |> Sources.Source.changeset(attrs)
+        |> insert_copy!()
+
+      for id <- Sources.agent_ids(source), copied_id = agent_ids[id], not is_nil(copied_id) do
+        %Sources.Link{source_id: copy.id, agent_id: copied_id} |> Repo.insert!()
       end
-    end)
-    |> changed()
+
+      copy
+    end
+  end
+
+  defp insert_copy!(changeset) do
+    case Repo.insert(changeset) do
+      {:ok, record} -> record
+      {:error, changeset} -> Repo.rollback(changeset)
+    end
   end
 
   defp copy_name(name) do

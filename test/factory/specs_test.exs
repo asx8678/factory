@@ -55,6 +55,167 @@ defmodule Factory.SpecsTest do
     assert [%{body: "Found 2 tasks in tasks.md" <> _}] = Runs.list_messages(run.id)
   end
 
+  test "writing a run's spec reports its missing workflow", %{spec: spec} do
+    {:ok, workflow} = Factory.Workflows.create("Deleted workflow")
+    {:ok, _} = Factory.Workflows.delete(workflow)
+    {:ok, run} = Runs.create_run()
+
+    {:ok, _} =
+      Runs.update_run(run, %{spec_id: spec.id, settings: %{"workflow_id" => workflow.id}})
+
+    assert {:ok, %{plan: %{"write" => %{"status" => "error", "error" => message}}}} =
+             Specs.write_missing(Specs.get_spec(spec.id))
+
+    assert message =~ "workflow no longer exists"
+  end
+
+  test "attaching a spec uses the latest title rather than the caller's stale run" do
+    {:ok, stale} = Runs.create_run()
+    {:ok, _} = Runs.update_run(stale, %{title: "Renamed while editing"})
+
+    {:ok, run} =
+      Runs.attach_spec(stale, [{"tasks.md", "# Old heading\n1. Task"}], [
+        %{ref: "1", title: "Task"}
+      ])
+
+    assert run.title == "Renamed while editing"
+  end
+
+  test "concurrent spec attachments replace a complete task set under the parent lock" do
+    parent = self()
+    {creator, creator_ref} = unboxed_task(fn -> Runs.create_run("Concurrent attachments") end)
+    assert_receive {:unboxed, ^creator, {:ok, run}}, 5_000
+    assert_receive {:DOWN, ^creator_ref, :process, ^creator, :normal}
+
+    on_exit(fn ->
+      Ecto.Adapters.SQL.Sandbox.unboxed_run(Repo, fn -> Repo.delete!(run) end)
+    end)
+
+    {first, first_ref} =
+      unboxed_task(fn ->
+        Repo.transact(fn ->
+          {:ok, _} =
+            Runs.attach_spec(run, [{"tasks.md", "1. First"}], [%{ref: "1", title: "First"}])
+
+          send(parent, :first_attached)
+
+          receive do
+            :commit -> {:ok, :committed}
+          end
+        end)
+      end)
+
+    assert_receive :first_attached, 5_000
+    handler = {__MODULE__, make_ref()}
+
+    :telemetry.attach(
+      handler,
+      [:factory, :repo, :query],
+      fn _, _, metadata, parent ->
+        if Process.get(:attachment_writer) == :second and
+             metadata.query =~ ~s(DELETE FROM "tasks") do
+          send(parent, :second_deleted_tasks)
+        end
+      end,
+      parent
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    {second, second_ref} =
+      unboxed_task(fn ->
+        Process.put(:attachment_writer, :second)
+        send(parent, :second_started)
+        Runs.attach_spec(run, [{"tasks.md", "1. Second"}], [%{ref: "1", title: "Second"}])
+      end)
+
+    assert_receive :second_started, 5_000
+    refute_receive :second_deleted_tasks, 100
+    send(first, :commit)
+    assert_receive {:unboxed, ^first, {:ok, :committed}}, 5_000
+    assert_receive {:DOWN, ^first_ref, :process, ^first, :normal}
+    assert_receive {:unboxed, ^second, {:ok, attached}}, 5_000
+    assert_receive {:DOWN, ^second_ref, :process, ^second, :normal}
+    assert [%{title: "Second", position: 1}] = attached.tasks
+    assert attached.spec =~ "1. Second"
+  end
+
+  test "run list totals use one grouped usage query and include zero-use runs", %{spec: spec} do
+    {:ok, first} = Runs.create_run("Used")
+    {:ok, second} = Runs.create_run("Unused")
+    {:ok, _} = Runs.update_run(first, %{spec_id: spec.id})
+
+    for credits <- [0.25, 0.5] do
+      {:ok, _} =
+        Factory.Usage.record(%{
+          run_id: first.id,
+          credits: credits,
+          input_tokens: 10,
+          output_tokens: 5
+        })
+    end
+
+    handler = {__MODULE__, make_ref()}
+
+    :telemetry.attach(
+      handler,
+      [:factory, :repo, :query],
+      fn _, _, metadata, parent ->
+        if self() == parent and metadata.query =~ ~s("usage_events"),
+          do: send(parent, :usage_query)
+      end,
+      self()
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    listed = Runs.list_runs_with_usage()
+    assert_receive :usage_query
+    refute_received :usage_query
+
+    assert {loaded, %{credits: 0.75, tokens: 30, calls: 2}} =
+             Enum.find(listed, fn {r, _} -> r.id == first.id end)
+
+    assert loaded.spec_doc.id == spec.id
+
+    assert {_, %{credits: +0.0, tokens: 0, calls: 0}} =
+             Enum.find(listed, fn {r, _} -> r.id == second.id end)
+  end
+
+  test "active run counts have a partial status index" do
+    %{rows: [[definition]]} =
+      Repo.query!(
+        "SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'runs_active_status_index'"
+      )
+
+    assert definition =~ "(status) WHERE"
+    assert definition =~ "queued"
+    assert definition =~ "running"
+  end
+
+  defp unboxed_task(fun) do
+    parent = self()
+
+    worker =
+      start_supervised!(
+        Supervisor.child_spec(
+          {Task,
+           fn ->
+             receive do
+               :start ->
+                 result = Ecto.Adapters.SQL.Sandbox.unboxed_run(Repo, fun)
+                 send(parent, {:unboxed, self(), result})
+             end
+           end},
+          id: make_ref()
+        )
+      )
+
+    ref = Process.monitor(worker)
+    send(worker, :start)
+    {worker, ref}
+  end
+
   test "files go into the step their name says, and name the spec" do
     {:ok, spec} =
       Specs.create_from_files("", [

@@ -20,10 +20,48 @@ defmodule Factory.Runs do
     )
   end
 
+  @doc "Runs with their usage totals, fetched together rather than once per run."
+  def list_runs_with_usage do
+    totals =
+      from e in Factory.Usage.Event,
+        group_by: e.run_id,
+        select: %{
+          run_id: e.run_id,
+          credits: sum(e.credits),
+          tokens: type(sum(e.input_tokens + e.output_tokens), :integer),
+          calls: count(e.id)
+        }
+
+    Repo.all(
+      from r in Run,
+        left_join: t in subquery(totals),
+        on: t.run_id == r.id,
+        order_by: [desc: r.updated_at, desc: r.id],
+        preload: [:tasks, :spec_doc],
+        select:
+          {r,
+           %{
+             credits: coalesce(t.credits, 0.0),
+             tokens: coalesce(t.tokens, 0),
+             calls: coalesce(t.calls, 0)
+           }}
+    )
+  end
+
   def count_active,
     do: Repo.aggregate(from(r in Run, where: r.status in ["queued", "running"]), :count)
 
   def get_run(id), do: Run |> Repo.get(id) |> Repo.preload(:tasks)
+
+  @doc "Reads the latest run under a row lock and applies a transactional callback."
+  def with_locked_run(id, fun) do
+    Repo.transact(fn ->
+      case Repo.one(from r in Run, where: r.id == ^id, lock: "FOR UPDATE") do
+        nil -> {:error, :not_found}
+        run -> fun.(Repo.preload(run, :tasks))
+      end
+    end)
+  end
 
   def create_run(title \\ "New run") do
     with {:ok, run} <- %Run{} |> Run.changeset(%{title: title}) |> Repo.insert() do
@@ -82,7 +120,7 @@ defmodule Factory.Runs do
 
   @doc "Stores the spec files and replaces the run's tasks with the ones found in them."
   def attach_spec(%Run{} = run, files, tasks) do
-    Repo.transact(fn ->
+    with_locked_run(run.id, fn run ->
       Repo.delete_all(from t in Task, where: t.run_id == ^run.id)
       now = DateTime.utc_now(:second)
 

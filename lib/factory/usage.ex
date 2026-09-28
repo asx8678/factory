@@ -145,18 +145,29 @@ defmodule Factory.Usage do
     |> normalize()
   end
 
-  defp scoped(query, :today), do: where(query, [e], local_date(e.inserted_at) == ^today())
+  defp scoped(query, :today), do: scoped(query, today())
   defp scoped(query, {:run, id}), do: where(query, [e], e.run_id == ^id)
   defp scoped(query, {:spec, id}), do: where(query, [e], e.spec_id == ^id)
 
+  defp scoped(query, %Date{} = day), do: between_dates(query, day, Date.add(day, 1))
+
   defp scoped(query, {:month, %Date{} = date}) do
-    first = Date.beginning_of_month(date)
-    last = Date.end_of_month(date)
+    between_dates(query, Date.beginning_of_month(date), Date.add(Date.end_of_month(date), 1))
+  end
+
+  defp between_dates(query, first, next) do
+    # Use PostgreSQL's time zone database once for the two local midnights. Keep
+    # the indexed column bare, and convert both ends separately for DST changes.
+    %{rows: [[from, until]]} =
+      Repo.query!(
+        "SELECT $1::date::timestamp AT TIME ZONE $3, $2::date::timestamp AT TIME ZONE $3",
+        [first, next, timezone()]
+      )
 
     where(
       query,
       [e],
-      local_date(e.inserted_at) >= ^first and local_date(e.inserted_at) <= ^last
+      e.inserted_at >= ^from and e.inserted_at < ^until
     )
   end
 
@@ -196,7 +207,7 @@ defmodule Factory.Usage do
   def sessions(when_, filters \\ %{}) do
     query =
       case when_ do
-        %Date{} = day -> where(Event, [e], local_date(e.inserted_at) == ^day)
+        %Date{} = day -> scoped(Event, day)
         {:month, date} -> scoped(Event, {:month, date})
       end
 
@@ -217,7 +228,7 @@ defmodule Factory.Usage do
   def calls(key, when_) do
     query =
       case when_ do
-        %Date{} = day -> where(Event, [e], local_date(e.inserted_at) == ^day)
+        %Date{} = day -> scoped(Event, day)
         {:month, date} -> scoped(Event, {:month, date})
         :all -> Event
       end

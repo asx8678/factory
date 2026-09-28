@@ -19,6 +19,8 @@ defmodule Factory.Runs.Run do
     # The engine's way through the workflow (see Factory.Engine):
     # %{"done" => [step ids], "outputs" => %{step id => text}, "current" => id, "error" => text}.
     field :progress, :map, default: %{}
+    # Only the latest chat planner request may replace this run's draft tasks.
+    field :planner_generation, :binary_id
     belongs_to :spec_doc, Factory.Specs.Spec, foreign_key: :spec_id
     has_many :tasks, Factory.Runs.Task, preload_order: [asc: :position]
     has_many :messages, Factory.Runs.Message

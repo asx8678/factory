@@ -214,7 +214,12 @@ defmodule Factory.Actions do
   end
 
   defp steps(%Agent{action: %{"type" => type} = action} = card, ctx, mode) do
-    c = Map.new(action["config"] || %{}, fn {k, v} -> {k, render(v, ctx)} end)
+    # A command's script is kept as written: build/4 hands its values to the shell safely.
+    c =
+      Map.new(action["config"] || %{}, fn
+        {"command", v} when type == "command" -> {"command", to_string(v || "")}
+        {k, v} -> {k, render(v, ctx)}
+      end)
 
     case missing(card) do
       [] -> build(type, c, ctx, mode)
@@ -365,10 +370,28 @@ defmodule Factory.Actions do
     end
   end
 
-  defp build("command", c, ctx, _mode),
-    do: {:ok, [{:sh, folder(c, ctx), c["command"], "Run `#{c["command"]}` (must succeed)"}]}
+  defp build("command", c, ctx, _mode) do
+    shown = render(c["command"], ctx)
+
+    {:ok,
+     [
+       {:sh, folder(c, ctx), shell_script(c["command"], ctx), shell_env(ctx), shown}
+     ]}
+  end
 
   defp build(type, _c, _ctx, _mode), do: {:error, "Factory doesn't know the action “#{type}”."}
+
+  # Placeholders become shell variables, and their values travel in the environment, so a
+  # summary like `$(rm -rf ~)` is only ever text: the shell never re-reads expanded values.
+  defp shell_script(script, ctx) do
+    Regex.replace(~r/\{\{\s*(\w+)\s*\}\}/, script, fn whole, key ->
+      if Map.has_key?(ctx, key), do: "${#{env_name(key)}}", else: whole
+    end)
+  end
+
+  defp shell_env(ctx), do: for({k, v} <- ctx, do: {env_name(k), to_string(v)})
+
+  defp env_name(key), do: "FACTORY_" <> String.upcase(key)
 
   defp folder(c, ctx) do
     case blank(c["folder"]) do
@@ -432,7 +455,8 @@ defmodule Factory.Actions do
   defp describe({:cmd, folder, args, label}),
     do: "#{label}: git #{Enum.join(args, " ")} (in #{folder})"
 
-  defp describe({:sh, folder, _cmd, label}), do: "#{label} in #{folder}"
+  defp describe({:sh, folder, _cmd, _env, shown}),
+    do: "Run `#{shown}` (must succeed) in #{folder}"
 
   defp describe({:http, method, url, _h, _b, label}),
     do:
@@ -460,17 +484,19 @@ defmodule Factory.Actions do
     e -> {:error, "#{label} failed: #{Exception.message(e)}"}
   end
 
-  defp perform({:sh, folder, command, label}) do
+  defp perform({:sh, folder, command, env, shown}) do
     task =
-      Task.async(fn -> System.cmd("sh", ["-c", command], cd: folder, stderr_to_stdout: true) end)
+      Task.async(fn ->
+        System.cmd("sh", ["-c", command], cd: folder, env: env, stderr_to_stdout: true)
+      end)
 
     case Task.yield(task, 600_000) || Task.shutdown(task) do
-      {:ok, {out, 0}} -> {:ok, "#{label}: passed\n#{tail(out)}"}
-      {:ok, {out, code}} -> {:error, "`#{command}` failed (exit #{code}):\n#{tail(out)}"}
-      nil -> {:error, "`#{command}` took over 10 minutes and was stopped."}
+      {:ok, {out, 0}} -> {:ok, "Run `#{shown}` (must succeed): passed\n#{tail(out)}"}
+      {:ok, {out, code}} -> {:error, "`#{shown}` failed (exit #{code}):\n#{tail(out)}"}
+      nil -> {:error, "`#{shown}` took over 10 minutes and was stopped."}
     end
   rescue
-    e -> {:error, "#{label} failed: #{Exception.message(e)}"}
+    e -> {:error, "`#{shown}` failed: #{Exception.message(e)}"}
   end
 
   defp perform({:http, method, url, headers, body, label}) do

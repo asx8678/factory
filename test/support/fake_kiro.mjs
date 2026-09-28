@@ -2,6 +2,7 @@
 // Stands in for `kiro-cli acp` in tests: answers the ACP handshake and echoes prompts.
 // A prompt containing "write" first asks permission to write a file.
 import readline from "node:readline"
+import { existsSync, readFileSync } from "node:fs"
 const out = (msg) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...msg }) + "\n")
 const update = (sessionId, update) => out({ method: "session/update", params: { sessionId, update } })
 // What a turn cost, reported like Kiro does before the turn ends.
@@ -10,6 +11,8 @@ let waiting = null
 let sessions = 0
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const m = JSON.parse(line)
+  // Tests can leave a particular RPC unanswered without affecting other processes.
+  if (existsSync(".fake-kiro-stall") && readFileSync(".fake-kiro-stall", "utf8") === m.method) return
   if (m.id === 900 && waiting) return waiting(m)
   if (m.id === 901 && waiting) return waiting(m)
   if (m.method === "initialize") out({ id: m.id, result: { protocolVersion: 1 } })
@@ -27,6 +30,9 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   if (m.method === "session/prompt") {
     const { sessionId, prompt } = m.params
     const text = prompt[0].text
+    // Hold a turn open while tests deliver timeout and late-response messages.
+    if (text.endsWith("[test:wait]"))
+      return update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "waiting" } })
     // Task planning: step 1 reads a file (asking permission, which Factory should allow for
     // reads) and asks questions; step 2 suggests tasks.
     if (text.includes('<task-planning step="questions">')) {
@@ -115,8 +121,12 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       out({ id: m.id, result: { stopReason: "end_turn" } })
     }
     if (text.includes("write")) {
-      waiting = (reply) => { waiting = null; update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `[${reply.result.outcome.optionId}] ` } }); finish() }
-      out({ id: 900, method: "session/request_permission", params: { sessionId, toolCall: { title: "Write notes.md", kind: "edit" }, options: [{ optionId: "allow", kind: "allow_once" }, { optionId: "deny", kind: "reject_once" }] } })
+      let options = [{ optionId: "allow", kind: "allow_once" }, { optionId: "deny", kind: "reject_once" }]
+      if (text.includes("[test:allow-only]")) options = options.slice(0, 1)
+      if (text.includes("[test:reject-only]")) options = options.slice(1)
+      if (text.includes("[test:no-options]")) options = []
+      waiting = (reply) => { waiting = null; update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `[${reply.result.outcome.optionId || reply.result.outcome.outcome}] ` } }); finish() }
+      out({ id: 900, method: "session/request_permission", params: { sessionId, toolCall: { title: "Write notes.md", kind: "edit" }, options } })
     } else finish()
   }
 })

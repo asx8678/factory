@@ -12,14 +12,15 @@ defmodule Factory.Kiro.Session do
   is talking.
 
   Text streams to the run's chat as it arrives; a turn ends when Kiro answers the
-  prompt request with a `stopReason`.
+  prompt request with a `stopReason`. Other RPCs have a 30-second deadline, configurable
+  as `:rpc_timeout` in the `:kiro` settings; a timeout fails all waiting jobs.
 
   Permissions: when Kiro asks to use a tool, the answering agent's kind decides
   (`Factory.Agents.Agent.tools/1`, the same as in a run). A denied request is noted
   in the reply.
 
-  Context: the session keeps its own log of every turn (the message, the tools Kiro
-  used and how they went, the reply or error). When Kiro reports the context at
+  Context: the session keeps a bounded log of recent turns (the message, the tools
+  Kiro used and how they went, the reply or error). When Kiro reports the context at
   `Factory.Context.config(:compact_at)` percent or more, before the next message, or
   when asked (`compact/1`), the log is compacted by `Factory.Context.compact/2` (fixed
   rules, no model) and Kiro starts a fresh session with that in front of the next
@@ -62,7 +63,6 @@ defmodule Factory.Kiro.Session do
     :port,
     :session_id,
     :turn,
-    :timer,
     # a job whose model/mode is being switched before its prompt is sent
     :switching,
     buffer: "",
@@ -80,8 +80,9 @@ defmodule Factory.Kiro.Session do
     context: %{},
     # running totals per agent id, saved to the agent's usage after each turn
     usage: %{},
-    # every turn so far, newest first, as `Factory.Context.Projections` describes events
+    # recent turns, newest first, as `Factory.Context.Projections` describes events
     log: [],
+    log_dropped: 0,
     seq: 0,
     # the compacted conversation, to go in front of the next message
     carry: nil,
@@ -101,6 +102,7 @@ defmodule Factory.Kiro.Session do
       :run_id,
       :started,
       :ask,
+      :request_id,
       input_tokens: 0,
       text: "",
       denied: [],
@@ -145,14 +147,18 @@ defmodule Factory.Kiro.Session do
 
   @impl true
   def handle_call({:prompt, agent, run_id, text}, _from, state) do
-    busy = not state.ready or state.turn != nil or state.switching != nil or state.queue != []
+    if Kiro.workdir(Runs.get_run(run_id)) != state.workdir do
+      {:reply, {:error, :busy}, state}
+    else
+      busy = not state.ready or state.turn != nil or state.switching != nil or state.queue != []
 
-    if busy do
-      Agents.set_activity(agent.id, "waiting", "Waiting for its turn")
+      if busy do
+        Agents.set_activity(agent.id, "waiting", "Waiting for its turn")
+      end
+
+      job = %Job{agent: agent, run_id: run_id, text: text}
+      {:reply, :ok, next(%{state | queue: state.queue ++ [job]})}
     end
-
-    job = %Job{agent: agent, run_id: run_id, text: text}
-    {:reply, :ok, next(%{state | queue: state.queue ++ [job]})}
   end
 
   def handle_call(:idle?, _from, state),
@@ -205,19 +211,39 @@ defmodule Factory.Kiro.Session do
     )
   end
 
-  def handle_info(:turn_timeout, %{turn: %Turn{}} = state) do
-    notify(state, "session/cancel", %{sessionId: state.session_id})
-    minutes = div(Kiro.config(:prompt_timeout), 60_000)
+  def handle_info({:request_timeout, id}, state) do
+    case state.pending[id] do
+      %{kind: {:prompt, ^id}} when state.turn != nil and state.turn.request_id == id ->
+        notify(state, "session/cancel", %{sessionId: state.session_id})
+        minutes = div(Kiro.config(:prompt_timeout), 60_000)
+        state = finish_turn(state, "Stopped after waiting #{minutes} minutes for Kiro.")
 
-    {:noreply,
-     state |> finish_turn("Stopped after waiting #{minutes} minutes for Kiro.") |> next()}
+        carry =
+          case Factory.Context.compact(Enum.reverse(state.log),
+                 omitted_entries: state.log_dropped
+               ) do
+            {:ok, c} -> c.text
+            _ -> nil
+          end
+
+        # ACP chunks have no prompt id. Close the old transport before another turn
+        # starts, so even an uncooperative cancellation cannot leak into that turn.
+        {:noreply, restart(%{state | carry: carry, context: %{}})}
+
+      %{method: method} ->
+        fail(state, "Kiro didn't answer #{method} before its deadline.")
+
+      nil ->
+        {:noreply, state}
+    end
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
 
   @impl true
   def terminate(reason, state) do
-    if state.port, do: Port.close(state.port)
+    cancel_requests(state)
+    close_port(state.port)
     Agents.notify_changed()
 
     # Stopped on purpose (settings changed, Stop Kiro): agents go back to idle and lose
@@ -236,14 +262,16 @@ defmodule Factory.Kiro.Session do
 
   # A response to one of our requests
   defp handle_message(%{"id" => id} = msg, state) when not is_map_key(msg, "method") do
-    {kind, pending} = Map.pop(state.pending, id)
+    {request, pending} = Map.pop(state.pending, id)
+    if request, do: Process.cancel_timer(request.timer)
+    kind = request && request.kind
     state = %{state | pending: pending}
 
     case {kind, msg} do
       {_, %{"error" => error}} ->
         error_response(kind, error, state)
 
-      {:initialize, _} ->
+      {:initialize, %{"result" => _}} ->
         request(state, "session/new", %{cwd: state.workdir, mcpServers: []}, :new_session)
 
       {:new_session, %{"result" => %{"sessionId" => sid} = result}} ->
@@ -267,11 +295,15 @@ defmodule Factory.Kiro.Session do
             |> next()
         end
 
-      {:prompt, %{"result" => result}} ->
+      {{:prompt, ^id}, %{"result" => result}}
+      when state.turn != nil and state.turn.request_id == id ->
         state |> finish_turn(nil, result["stopReason"]) |> next()
 
-      _ ->
+      {nil, _} ->
         state
+
+      _ ->
+        {:fail, "Kiro returned an invalid response.", state}
     end
   end
 
@@ -285,21 +317,14 @@ defmodule Factory.Kiro.Session do
     # What the answering agent may do (Factory.Agents.Agent.tools/1), as in a run:
     # the ones that only look read and search; the rest may also edit and run commands.
     allowed = if state.turn, do: Agent.tools(state.turn.agent), else: []
+    wanted = if get_in(params, ["toolCall", "kind"]) in allowed, do: "allow", else: "reject"
+    outcome = Kiro.Permission.outcome(options, wanted)
+    reply(state, id, %{outcome: outcome})
 
-    if get_in(params, ["toolCall", "kind"]) in allowed do
-      allow =
-        Enum.find(options, &String.starts_with?(&1["kind"] || "", "allow")) ||
-          List.first(options)
-
-      reply(state, id, %{outcome: %{outcome: "selected", optionId: allow["optionId"]}})
+    if wanted == "allow" and outcome.outcome == "selected" do
       state
     else
-      reject =
-        Enum.find(options, &String.starts_with?(&1["kind"] || "", "reject")) ||
-          List.first(options)
-
       title = get_in(params, ["toolCall", "title"]) || "a tool"
-      reply(state, id, %{outcome: %{outcome: "selected", optionId: reject["optionId"]}})
 
       state
       |> update_turn(fn turn -> %{turn | denied: turn.denied ++ [title]} end)
@@ -313,6 +338,13 @@ defmodule Factory.Kiro.Session do
   end
 
   # Notifications
+  defp handle_message(
+         %{"method" => "session/update", "params" => %{"sessionId" => sid}},
+         %{session_id: current} = state
+       )
+       when sid != current,
+       do: state
+
   defp handle_message(%{"method" => "session/update", "params" => %{"update" => update}}, state) do
     case update do
       %{
@@ -344,7 +376,7 @@ defmodule Factory.Kiro.Session do
 
   defp handle_message(_msg, state), do: state
 
-  defp error_response(:prompt, error, state),
+  defp error_response({:prompt, id}, error, %{turn: %Turn{request_id: id}} = state),
     do: state |> finish_turn("Kiro returned an error: #{error["message"]}") |> next()
 
   defp error_response({:config, id, value, _rest}, error, state) do
@@ -410,10 +442,30 @@ defmodule Factory.Kiro.Session do
         if(turn.text != "", do: [%{kind: :assistant, who: who, text: turn.text}], else: []) ++
         if(error, do: [%{kind: :error, who: who, text: error}], else: [])
 
-    Enum.reduce(events, state, fn e, state ->
+    events
+    |> Enum.reduce(state, fn e, state ->
       seq = state.seq + 1
       %{state | seq: seq, log: [Map.merge(e, %{id: "e#{seq}", at: at}) | state.log]}
     end)
+    |> bound_log()
+  end
+
+  # Keep a contiguous suffix of complete entries, bounded by both count and bytes.
+  # Count omissions explicitly so future compactions do not imply a complete history.
+  defp bound_log(state) do
+    max_entries = Factory.Context.config(:max_log_entries)
+    max_bytes = Factory.Context.config(:max_log_bytes)
+
+    {log, _, _} =
+      Enum.reduce_while(state.log, {[], 0, 0}, fn event, {log, count, bytes} ->
+        size = :erlang.external_size(event) + 8
+
+        if count < max_entries and bytes + size <= max_bytes,
+          do: {:cont, {[event | log], count + 1, bytes + size}},
+          else: {:halt, {log, count, bytes}}
+      end)
+
+    %{state | log: Enum.reverse(log), log_dropped: state.seq - length(log)}
   end
 
   # Over the threshold with a message waiting: compact first.
@@ -429,7 +481,10 @@ defmodule Factory.Kiro.Session do
       if state.context[:window] && state.context[:pct],
         do: state.context.window * state.context.pct / 100
 
-    case Factory.Context.compact(Enum.reverse(state.log), tokens_before: before) do
+    case Factory.Context.compact(Enum.reverse(state.log),
+           tokens_before: before,
+           omitted_entries: state.log_dropped
+         ) do
       {:ok, c} ->
         Logger.info(
           "Kiro session #{inspect(state.key)} compacted: #{c.summarized} entries summarized, " <>
@@ -438,24 +493,27 @@ defmodule Factory.Kiro.Session do
 
         notice(state, c, run_id: run_id, how: how)
         state = compacted(state)
-        close_port(state.port)
-
-        {:ok,
-         open(%{
-           state
-           | port: nil,
-             session_id: nil,
-             ready: false,
-             buffer: "",
-             pending: %{},
-             config: %{},
-             primed: MapSet.new(),
-             carry: c.text
-         })}
+        {:ok, restart(%{state | carry: c.text})}
 
       error ->
         error
     end
+  end
+
+  defp restart(state) do
+    cancel_requests(state)
+    close_port(state.port)
+
+    open(%{
+      state
+      | port: nil,
+        session_id: nil,
+        ready: false,
+        buffer: "",
+        pending: %{},
+        config: %{},
+        primed: MapSet.new()
+    })
   end
 
   # Says in the chat what the compaction kept, so it's visible when it happened on its own.
@@ -483,12 +541,17 @@ defmodule Factory.Kiro.Session do
           n -> "the last #{n} word for word"
         end
 
+      omitted =
+        if state.log_dropped > 0,
+          do: " #{state.log_dropped} older log entries were omitted by the retention limit.",
+          else: ""
+
       Runs.post(
         run,
         "factory",
         "#{whose} conversation was compacted: #{c.summarized} earlier entries summarized, " <>
           "#{kept}, about #{approx(c.tokens)} tokens in all.#{why} " <>
-          "Kiro gets it with the next message, in a fresh session.",
+          "Kiro gets it with the next message, in a fresh session.#{omitted}",
         meta:
           %{
             "compaction" => %{
@@ -601,12 +664,12 @@ defmodule Factory.Kiro.Session do
         else: {text, state}
 
     Agents.set_activity(agent.id, "running", "Answering: " <> String.slice(job.text, 0, 60))
-    timer = Process.send_after(self(), :turn_timeout, Kiro.config(:prompt_timeout))
 
     turn = %Turn{
       agent: agent,
       run_id: job.run_id,
       ask: job.text,
+      request_id: state.next_id,
       started: System.monotonic_time(:millisecond),
       input_tokens: Factory.Usage.estimate_tokens(text)
     }
@@ -614,13 +677,12 @@ defmodule Factory.Kiro.Session do
     state = %{
       state
       | turn: turn,
-        timer: timer,
         members: MapSet.put(state.members, agent.id),
         usage: Map.put_new(state.usage, agent.id, fresh_usage(agent))
     }
 
     params = %{sessionId: state.session_id, prompt: [%{type: "text", text: text}]}
-    request(state, "session/prompt", params, :prompt)
+    request(state, "session/prompt", params, {:prompt, turn.request_id})
   end
 
   # An agent's usage starts from its saved totals, without context from an earlier session.
@@ -661,7 +723,9 @@ defmodule Factory.Kiro.Session do
   defp finish_turn(%{turn: nil} = state, _error, _stop_reason), do: state
 
   defp finish_turn(%{turn: turn} = state, error, stop_reason) do
-    if state.timer, do: Process.cancel_timer(state.timer)
+    {request, pending} = Map.pop(state.pending, turn.request_id)
+    if request, do: Process.cancel_timer(request.timer)
+    state = %{state | pending: pending}
     agent = turn.agent
 
     why =
@@ -708,7 +772,7 @@ defmodule Factory.Kiro.Session do
       Runs.post(run, "factory", text <> denied, author: agent.name, meta: meta)
     end
 
-    log_turn(%{state | turn: nil, timer: nil, last_run: turn.run_id}, turn, error)
+    log_turn(%{state | turn: nil, last_run: turn.run_id}, turn, error)
   end
 
   # Kiro reports how full the context is as a percentage, plus a token breakdown by
@@ -797,7 +861,19 @@ defmodule Factory.Kiro.Session do
 
   defp request(state, method, params, kind) do
     send_json(state, %{jsonrpc: "2.0", id: state.next_id, method: method, params: params})
-    %{state | next_id: state.next_id + 1, pending: Map.put(state.pending, state.next_id, kind)}
+
+    timeout =
+      if method == "session/prompt",
+        do: Kiro.config(:prompt_timeout),
+        else: Application.fetch_env!(:factory, :kiro) |> Keyword.get(:rpc_timeout, 30_000)
+
+    timer = Process.send_after(self(), {:request_timeout, state.next_id}, timeout)
+    request = %{kind: kind, method: method, timer: timer}
+    %{state | next_id: state.next_id + 1, pending: Map.put(state.pending, state.next_id, request)}
+  end
+
+  defp cancel_requests(state) do
+    for {_id, request} <- state.pending, do: Process.cancel_timer(request.timer)
   end
 
   defp notify(state, method, params),

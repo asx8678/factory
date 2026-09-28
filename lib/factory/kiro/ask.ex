@@ -165,13 +165,10 @@ defmodule Factory.Kiro.Ask do
     options = p["options"] || []
     wanted = if get_in(p, ["toolCall", "kind"]) in conn.allow, do: "allow", else: "reject"
 
-    option =
-      Enum.find(options, &String.starts_with?(&1["kind"] || "", wanted)) || List.first(options)
-
     send_json(conn.port, %{
       jsonrpc: "2.0",
       id: rid,
-      result: %{outcome: %{outcome: "selected", optionId: option["optionId"]}}
+      result: %{outcome: Kiro.Permission.outcome(options, wanted)}
     })
 
     {:cont, acc}

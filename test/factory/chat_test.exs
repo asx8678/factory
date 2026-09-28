@@ -26,6 +26,12 @@ defmodule Factory.ChatTest do
 
   test "/run needs tasks, then queues the run; /pause and /resume change status" do
     {:ok, run} = Runs.create_run()
+
+    {:ok, run} =
+      Runs.update_run(run, %{
+        settings: %{"workflow_id" => Factory.Workflows.standard("feature").id}
+      })
+
     Chat.handle(run, "/run")
     assert List.last(replies(run)) =~ "nothing to run"
 
@@ -37,6 +43,41 @@ defmodule Factory.ChatTest do
     assert Runs.get_run(run.id).status == "paused"
     Chat.handle(Runs.get_run(run.id), "/resume")
     assert Runs.get_run(run.id).status == "queued"
+  end
+
+  test "empty workflows cannot start or resume tasks" do
+    {:ok, workflow} = Factory.Workflows.create("No steps")
+    {:ok, run} = Runs.create_run()
+    {:ok, run} = Runs.update_run(run, %{settings: %{"workflow_id" => workflow.id}})
+    Chat.handle(run, "", [{"tasks.md", "1. Keep pending"}])
+    Chat.handle(run, "/run")
+
+    assert %{status: "draft", tasks: [%{status: "pending"}]} = Runs.get_run(run.id)
+    assert List.last(replies(run)) =~ "no steps"
+
+    {:ok, run} = Runs.update_run(Runs.get_run(run.id), %{status: "paused"})
+    Chat.handle(run, "/resume")
+    assert %{status: "paused", tasks: [%{status: "pending"}]} = Runs.get_run(run.id)
+    assert List.last(replies(run)) =~ "no steps"
+  end
+
+  test "chat reports a deleted explicit workflow without using the current agents" do
+    {:ok, workflow} = Factory.Workflows.create("Deleted")
+    {:ok, _} = Factory.Workflows.delete(workflow)
+    {:ok, run} = Runs.create_run()
+    {:ok, run} = Runs.update_run(run, %{settings: %{"workflow_id" => workflow.id}})
+
+    {:ok, run} =
+      Runs.attach_spec(run, [{"tasks.md", "1. Keep pending"}], [
+        %{ref: "1", title: "Keep pending"}
+      ])
+
+    for command <- ["/run", "/workflow", "/ask Someone hello"] do
+      Chat.handle(run, command)
+      assert List.last(replies(run)) =~ "workflow no longer exists"
+    end
+
+    assert %{status: "draft", tasks: [%{status: "pending"}]} = Runs.get_run(run.id)
   end
 
   test "unknown commands and plain text point to /help" do

@@ -19,6 +19,12 @@ export const Flow = {
     this.handleEvent("flow:graph", (graph) => this.flow.setGraph(graph))
     this.handleEvent("flow:select", ({ id }) => this.flow.select(id))
   },
+  updated() {
+    this.flow.setGraph(JSON.parse(this.el.dataset.graph))
+  },
+  reconnected() {
+    this.flow.setGraph(JSON.parse(this.el.dataset.graph))
+  },
   destroyed() {
     unmount(this.flow)
   },

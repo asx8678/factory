@@ -46,6 +46,11 @@ defmodule FactoryWeb.SpecLive do
 
   # Saves from this page and the background review and task suggestions all arrive here.
   def handle_info({:spec_updated, spec}, socket) do
+    socket =
+      if task_structure(socket.assigns.spec) != task_structure(spec),
+        do: assign(socket, selected: MapSet.new(), expanded: MapSet.new(), editing: nil),
+        else: socket
+
     {:noreply,
      socket
      |> plan_defaults(socket.assigns.spec.plan, spec.plan)
@@ -215,18 +220,23 @@ defmodule FactoryWeb.SpecLive do
 
   def handle_event("task_save", %{"i" => i} = params, socket) do
     i = String.to_integer(i)
-    old = socket.assigns.spec |> Specs.task_list() |> Enum.at(i)
 
-    case Specs.update_task(socket.assigns.spec, i, params) do
-      {:error, :blank_title} ->
-        {:noreply, put_flash(socket, :error, "A task needs a title.")}
+    if socket.assigns.editing == i do
+      old = socket.assigns.spec |> Specs.task_list() |> Enum.at(i)
 
-      {:error, :not_found} ->
-        {:noreply, assign(socket, editing: nil)}
+      case Specs.update_task(socket.assigns.spec, i, params) do
+        {:error, :blank_title} ->
+          {:noreply, put_flash(socket, :error, "A task needs a title.")}
 
-      result ->
-        socket = assign(socket, improve: Map.delete(socket.assigns.improve, old.title))
-        tasks_changed(socket, result)
+        {:error, :not_found} ->
+          {:noreply, assign(socket, editing: nil)}
+
+        result ->
+          socket = assign(socket, improve: Map.delete(socket.assigns.improve, old.title))
+          tasks_changed(socket, result)
+      end
+    else
+      {:noreply, socket}
     end
   end
 
@@ -444,7 +454,8 @@ defmodule FactoryWeb.SpecLive do
 
   # Questions are shown one at a time: Enter (or Next) moves on, and on the last one
   # sends the answers.
-  def handle_event("plan_next", _, socket) do
+  def handle_event("plan_next", params, socket) do
+    {:noreply, socket} = handle_event("plan_answer", params, socket)
     last = length(socket.assigns.spec.plan["questions"] || []) - 1
 
     if socket.assigns.question >= last,
@@ -635,6 +646,9 @@ defmodule FactoryWeb.SpecLive do
   end
 
   # Indices change when tasks move or go, so selection and expanded rows start over.
+  # Markdown tasks have no stable ids; their ordered titles identify the rows.
+  defp task_structure(spec), do: spec |> Specs.task_list() |> Enum.map(&{&1.ref, &1.title})
+
   defp tasks_changed(socket, {:ok, spec}),
     do:
       {:noreply,

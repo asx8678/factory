@@ -37,9 +37,16 @@ defmodule FactoryWeb.SourceParts do
       class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 backdrop-blur-sm sm:items-center"
       phx-window-keydown="sources_close"
       phx-key="Escape"
+      phx-mounted={
+        JS.push_focus(to: ":focus")
+        |> JS.show(to: "#sources-dialog")
+        |> JS.focus_first(to: "#sources-dialog")
+      }
+      phx-remove={JS.pop_focus()}
     >
-      <div
-        class="drawer-in w-full max-w-2xl overflow-hidden rounded-2xl border border-base-content/10 bg-surface shadow-2xl"
+      <.focus_wrap
+        id="sources-dialog"
+        class="hidden drawer-in w-full max-w-2xl overflow-hidden rounded-2xl border border-base-content/10 bg-surface shadow-2xl"
         phx-click-away="sources_close"
         role="dialog"
         aria-modal="true"
@@ -77,7 +84,7 @@ defmodule FactoryWeb.SourceParts do
           agents={@agents}
           attached={@attached}
         />
-      </div>
+      </.focus_wrap>
     </div>
     """
   end

@@ -8,9 +8,21 @@ defmodule Factory.Agents do
   alias Factory.Agents.{Agent, Link}
 
   @topic "agents:graph"
+  @activity_topic "agents:activity"
 
-  @doc "Subscribes the caller to `{:graph_changed}` messages sent after changes made by other processes."
-  def subscribe, do: Phoenix.PubSub.subscribe(Factory.PubSub, @topic)
+  @doc "Subscribes to structural `{:graph_changed}` and lightweight `{:agent_activity, agent}` messages."
+  def subscribe do
+    Phoenix.PubSub.subscribe(Factory.PubSub, @topic)
+    Phoenix.PubSub.subscribe(Factory.PubSub, @activity_topic)
+  end
+
+  @doc "Subscribes to structural changes and activity for just this workflow."
+  def subscribe(workflow_id) do
+    Phoenix.PubSub.subscribe(Factory.PubSub, @topic)
+    Phoenix.PubSub.subscribe(Factory.PubSub, activity_topic(workflow_id))
+  end
+
+  defp activity_topic(workflow_id), do: "#{@activity_topic}:#{workflow_id}"
 
   defp changed(result) do
     Phoenix.PubSub.broadcast_from(Factory.PubSub, self(), @topic, {:graph_changed})
@@ -46,11 +58,11 @@ defmodule Factory.Agents do
 
   @doc "Sets what an agent is doing right now (used by its Kiro session)."
   def set_activity(agent_id, status, activity) do
-    from(a in Agent, where: a.id == ^agent_id)
+    from(a in Agent, where: a.id == ^agent_id, select: a)
     |> Repo.update_all(
       set: [status: status, activity: activity, updated_at: DateTime.utc_now(:second)]
     )
-    |> changed()
+    |> activity_changed()
   end
 
   @doc "Tells open pages the graph changed, e.g. when a Kiro session starts or stops."
@@ -73,9 +85,18 @@ defmodule Factory.Agents do
 
   @doc "Stores an agent's usage totals from Kiro (turns, credits, context)."
   def record_usage(agent_id, usage) do
-    from(a in Agent, where: a.id == ^agent_id)
+    from(a in Agent, where: a.id == ^agent_id, select: a)
     |> Repo.update_all(set: [usage: usage])
-    |> changed()
+    |> activity_changed()
+  end
+
+  defp activity_changed({count, agents}) do
+    for agent <- agents,
+        topic <- [@activity_topic, activity_topic(agent.workflow_id)] do
+      Phoenix.PubSub.broadcast_from(Factory.PubSub, self(), topic, {:agent_activity, agent})
+    end
+
+    {count, nil}
   end
 
   def delete_agents(ids), do: Repo.delete_all(from a in Agent, where: a.id in ^ids) |> changed()
@@ -138,6 +159,18 @@ defmodule Factory.Agents do
 
   def list_links, do: Repo.all(from l in Link, order_by: l.id)
 
+  def list_links(workflow_id) do
+    Repo.all(
+      from l in Link,
+        join: source in Agent,
+        on: source.id == l.source_id,
+        join: target in Agent,
+        on: target.id == l.target_id,
+        where: source.workflow_id == ^workflow_id and target.workflow_id == ^workflow_id,
+        order_by: l.id
+    )
+  end
+
   @doc """
   Links two agents. `handles` names the circles the arrow is attached to,
   e.g. `%{source: "right", target: "left"}`; leave them out for the facing sides.
@@ -182,7 +215,6 @@ defmodule Factory.Agents do
   @doc "A workflow's graph in the shape the Svelte Flow canvas expects."
   def graph(workflow_id, selected_id \\ nil) do
     agents = list_agents(workflow_id)
-    ids = MapSet.new(agents, & &1.id)
 
     %{
       selected: selected_id && to_string(selected_id),
@@ -209,7 +241,7 @@ defmodule Factory.Agents do
           }
         end,
       edges:
-        for l <- list_links(), MapSet.member?(ids, l.source_id) do
+        for l <- list_links(workflow_id) do
           %{
             id: "l#{l.id}",
             source: to_string(l.source_id),

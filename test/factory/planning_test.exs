@@ -1,7 +1,7 @@
 defmodule Factory.PlanningTest do
   # Not async: the planner asks the fake kiro-cli from a background task.
   use Factory.DataCase, async: false
-  alias Factory.{Agents, Chat, Runs, Specs, Workflows}
+  alias Factory.{Agents, Chat, ChatPlanner, Runs, Specs, Workflows}
 
   # A chat on a workflow with a Planner and a Coder, in a real folder.
   setup do
@@ -93,5 +93,62 @@ defmodule Factory.PlanningTest do
     spec = Specs.for_run(run)
     assert Enum.map(Specs.tasks(spec), & &1.title) == ["Keep me", "And me"]
     assert Enum.map(Runs.get_run(run.id).tasks, & &1.title) == ["Keep me", "And me"]
+  end
+
+  test "an older planner reply cannot replace the latest plan or post stale replies", %{
+    run: run,
+    planner: planner
+  } do
+    older = Ecto.UUID.generate()
+    latest = Ecto.UUID.generate()
+    run |> Ecto.Changeset.change(planner_generation: latest) |> Repo.update!()
+
+    assert {:ok, :stale} = ChatPlanner.finish(run.id, older, planner, [], plan_result("Old task"))
+    assert Runs.list_messages(run.id) == []
+    assert Runs.get_run(run.id).tasks == []
+
+    assert {:ok, :applied} =
+             ChatPlanner.finish(run.id, latest, planner, [], plan_result("Latest task"))
+
+    assert [%{title: "Latest task"}] = Runs.get_run(run.id).tasks
+    assert [%{author: "Planner", actions: ["start"]}] = Runs.list_messages(run.id)
+
+    assert {:ok, :stale} = ChatPlanner.finish(run.id, older, planner, [], {:error, "Old failure"})
+
+    assert {:ok, :stale} =
+             ChatPlanner.finish(run.id, latest, planner, [], plan_result("Duplicate result"))
+
+    assert [%{title: "Latest task"}] = Runs.get_run(run.id).tasks
+    assert length(Runs.list_messages(run.id)) == 1
+  end
+
+  for status <- ~w(queued running paused done cancelled) do
+    test "a planner reply cannot replace tasks after the run becomes #{status}", %{
+      run: run,
+      planner: planner
+    } do
+      generation = Ecto.UUID.generate()
+      spec = Specs.for_run(run)
+      {:ok, _} = Specs.update_spec(spec, %{tasks: "- [ ] 1. Approved task\n"})
+
+      Runs.get_run(run.id)
+      |> Ecto.Changeset.change(status: unquote(status), planner_generation: generation)
+      |> Repo.update!()
+
+      assert {:ok, :stale} =
+               ChatPlanner.finish(run.id, generation, planner, [], plan_result("Late task"))
+
+      assert [%{title: "Approved task"}] = Runs.get_run(run.id).tasks
+      assert Specs.get_spec(spec.id).tasks == "- [ ] 1. Approved task\n"
+      assert Runs.list_messages(run.id) == []
+    end
+  end
+
+  defp plan_result(title) do
+    {:ok,
+     %{
+       reply: "Here's the plan",
+       tasks: [%{"title" => title, "details" => [], "requirements" => [], "size" => nil}]
+     }}
   end
 end

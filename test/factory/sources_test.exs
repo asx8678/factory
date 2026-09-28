@@ -5,9 +5,22 @@ defmodule Factory.SourcesTest do
 
   setup do
     {:ok, workflow} = Workflows.create("Docs flow")
-    tmp = Path.join(System.tmp_dir!(), "factory-sources-#{System.unique_integer([:positive])}")
+
+    tmp =
+      Path.join(
+        System.tmp_dir!(),
+        "factory-sources-#{System.get_env("MIX_TEST_PARTITION")}-#{System.unique_integer([:positive])}"
+      )
+
     File.mkdir_p!(tmp)
-    on_exit(fn -> File.rm_rf(tmp) end)
+    previous = Application.get_env(:factory, :sources_dir)
+    Application.put_env(:factory, :sources_dir, Path.join(tmp, "sources"))
+
+    on_exit(fn ->
+      Application.put_env(:factory, :sources_dir, previous)
+      File.rm_rf(tmp)
+    end)
+
     %{workflow: workflow, tmp: tmp}
   end
 
@@ -180,14 +193,160 @@ defmodule Factory.SourcesTest do
     refute Enum.any?(Specs.files(spec), &(elem(&1, 0) == "data-sources.md"))
   end
 
-  defp await_sync(source, tries \\ 100) do
-    case Sources.get(source.id) do
-      %{status: "syncing"} when tries > 0 ->
-        Process.sleep(50)
-        await_sync(source, tries - 1)
+  test "repository creation and copying can defer syncing until after commit", %{workflow: w} do
+    attrs = %{
+      kind: "azure_devops",
+      name: "Deferred",
+      config: %{
+        "org" => "o",
+        "project" => "p",
+        "repo" => "r",
+        "pat_env" => "FACTORY_TEST_UNSET_PAT"
+      }
+    }
 
-      s ->
-        s
+    assert {:ok, source} = Repo.transact(fn -> Sources.create(w.id, attrs, sync: false) end)
+    assert :global.whereis_name({Sources, source.id}) == :undefined
+    assert source.status == "ready"
+    assert source.synced_at == nil
+
+    {:ok, copied_workflow} = Workflows.create("Deferred copy")
+
+    assert {:ok, :ok} =
+             Repo.transact(fn ->
+               {:ok, Sources.copy(w.id, copied_workflow.id, %{}, sync: false)}
+             end)
+
+    [copy] = Sources.list(copied_workflow.id)
+    assert :global.whereis_name({Sources, copy.id}) == :undefined
+    assert copy.synced_at == nil
+
+    assert {:ok, %{status: "syncing"}} = Sources.start_sync(source)
+    assert %{status: "error", error: error} = await_sync(source)
+    assert error =~ "FACTORY_TEST_UNSET_PAT isn't set"
+  end
+
+  test "a timed out sync kills git and its child and refuses overlapping syncs", %{
+    workflow: w,
+    tmp: tmp
+  } do
+    executable = Path.join(tmp, "git")
+    pids_path = Path.join(tmp, "git-pids")
+    # The shell acts like git waiting on an SSH helper. Neither exits on port EOF.
+    File.write!(executable, """
+    #!/bin/sh
+    sleep 30 &
+    printf '%s %s' "$$" "$!" > '#{pids_path}'
+    wait
+    """)
+
+    File.chmod!(executable, 0o755)
+    previous = Application.get_env(:factory, :sources_git_executable)
+    previous_timeout = Application.get_env(:factory, :source_sync_timeout)
+    Application.put_env(:factory, :sources_git_executable, executable)
+    Application.put_env(:factory, :source_sync_timeout, 1_000)
+
+    on_exit(fn ->
+      restore_env(:sources_git_executable, previous)
+      restore_env(:source_sync_timeout, previous_timeout)
+    end)
+
+    {:ok, source} =
+      Sources.create(w.id, %{kind: "git", name: "Slow", config: %{"url" => "file:///unused"}},
+        sync: false
+      )
+
+    assert {:ok, _} = Sources.start_sync(source)
+    assert {:error, :already_syncing} = Sources.start_sync(source)
+    assert %{status: "error", error: "Syncing timed out and was stopped."} = await_sync(source)
+
+    for pid <- pids_path |> File.read!() |> String.split() do
+      assert {_output, status} = System.cmd("kill", ["-0", pid], stderr_to_stdout: true)
+      assert status != 0
     end
+
+    assert :global.whereis_name({Sources, source.id}) == :undefined
+
+    Application.put_env(:factory, :sources_git_executable, System.find_executable("true"))
+    assert {:ok, _} = Sources.start_sync(source)
+    assert %{status: "ready"} = await_sync(source)
+  end
+
+  test "completion retries when the source row is not visible yet", %{workflow: w} do
+    {:ok, source} =
+      Sources.create(
+        w.id,
+        %{
+          kind: "azure_devops",
+          name: "Delayed row",
+          config: %{
+            "org" => "o",
+            "project" => "p",
+            "repo" => "r",
+            "pat_env" => "FACTORY_TEST_UNSET_PAT"
+          }
+        },
+        sync: false
+      )
+
+    # Hide the row after setting its status, then pause the failed final lookup.
+    # This models an uncommitted insert without concurrent sandbox transactions.
+    parent = self()
+    ref = make_ref()
+
+    :telemetry.attach(
+      ref,
+      [:factory, :repo, :query],
+      &__MODULE__.pause_completion/4,
+      {parent, ref, source}
+    )
+
+    on_exit(fn -> :telemetry.detach(ref) end)
+    assert {:ok, _} = Sources.start_sync(source)
+    assert_receive {^ref, worker}, 1_000
+    :telemetry.detach(ref)
+    assert Sources.get(source.id) == nil
+    Repo.insert!(Ecto.put_meta(source, state: :built))
+    send(worker, ref)
+    assert %{status: "error", error: error} = await_sync(source)
+    assert error =~ "FACTORY_TEST_UNSET_PAT isn't set"
+  end
+
+  def pause_completion(_event, _measurements, metadata, {parent, ref, source}) do
+    if metadata[:source] == "data_sources" do
+      cond do
+        self() == parent and String.starts_with?(metadata.query, "UPDATE") ->
+          Repo.delete!(source)
+
+        self() != parent and String.starts_with?(metadata.query, "SELECT") ->
+          send(parent, {ref, self()})
+
+          receive do
+            ^ref -> :ok
+          after
+            1_000 -> :ok
+          end
+
+        true ->
+          :ok
+      end
+    end
+  end
+
+  defp restore_env(key, nil), do: Application.delete_env(:factory, key)
+  defp restore_env(key, value), do: Application.put_env(:factory, key, value)
+
+  defp await_sync(source) do
+    case :global.whereis_name({Sources, source.id}) do
+      :undefined ->
+        :ok
+
+      pid ->
+        ref = Process.monitor(pid)
+        assert_receive {:DOWN, ^ref, :process, ^pid, reason}, 5_000
+        assert reason in [:normal, :noproc]
+    end
+
+    Sources.get(source.id)
   end
 end

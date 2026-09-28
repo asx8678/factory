@@ -14,7 +14,7 @@ defmodule Factory.Sources do
   """
   import Ecto.Query, only: [from: 2]
   alias Factory.{Agents, Kiro, Repo}
-  alias Factory.Sources.{Link, PageIndex, Source}
+  alias Factory.Sources.{Git, Link, PageIndex, Source}
 
   @kinds [
     {"azure_devops", "Azure DevOps repository",
@@ -41,9 +41,11 @@ defmodule Factory.Sources do
 
   @doc """
   Adds a source to a workflow, its card below the others left of the agents.
-  `"agents"` (ids) attaches it. Repositories start syncing at once.
+  `"agents"` (ids) attaches it. Repositories start syncing at once unless
+  `sync: false` is passed. Inside a transaction, use `sync: false`, then call
+  `start_sync/1` on the returned source after the transaction commits.
   """
-  def create(workflow_id, attrs) do
+  def create(workflow_id, attrs, opts \\ []) do
     attrs = stringify(attrs)
     {agent_ids, attrs} = Map.pop(attrs, "agents")
 
@@ -57,7 +59,7 @@ defmodule Factory.Sources do
     |> Repo.insert()
     |> after_change(fn source ->
       if agent_ids, do: set_agents(source, agent_ids)
-      if repo?(source), do: sync(source)
+      if repo?(source) and Keyword.get(opts, :sync, true), do: start_sync(source)
     end)
   end
 
@@ -85,19 +87,24 @@ defmodule Factory.Sources do
   @doc """
   Copies a workflow's sources to another workflow (used when cloning), attached to
   the copies of the same agents: `agent_ids` maps old agent ids to new ones.
+  Pass `sync: false` inside transactions and start the copied sources after commit.
   """
-  def copy(from_workflow_id, to_workflow_id, agent_ids \\ %{}) do
+  def copy(from_workflow_id, to_workflow_id, agent_ids \\ %{}, opts \\ []) do
     for s <- list(from_workflow_id) do
-      create(to_workflow_id, %{
-        kind: s.kind,
-        name: s.name,
-        config: s.config,
-        content: s.content,
-        enabled: s.enabled,
-        x: s.x,
-        y: s.y,
-        agents: s |> agent_ids() |> Enum.map(&agent_ids[&1]) |> Enum.reject(&is_nil/1)
-      })
+      create(
+        to_workflow_id,
+        %{
+          kind: s.kind,
+          name: s.name,
+          config: s.config,
+          content: s.content,
+          enabled: s.enabled,
+          x: s.x,
+          y: s.y,
+          agents: s |> agent_ids() |> Enum.map(&agent_ids[&1]) |> Enum.reject(&is_nil/1)
+        },
+        opts
+      )
     end
 
     :ok
@@ -258,36 +265,100 @@ defmodule Factory.Sources do
   def remote_url(%Source{kind: "git", config: c}), do: String.trim(c["url"])
 
   @doc "Clones or pulls a repository source in the background; its status follows."
-  def sync(%Source{} = source) do
+  def sync(%Source{} = source), do: start_sync(source)
+
+  @doc """
+  Starts a repository sync after its source has committed. Returns `{:ok, source}`
+  or `{:error, :already_syncing}` when this source already has a sync in progress.
+  Non-repository sources are returned unchanged.
+  """
+  def start_sync(%Source{} = source) do
     if repo?(source) do
-      {:ok, source} = set_status(source, %{status: "syncing", error: nil})
+      caller = self()
+      ref = make_ref()
 
-      Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
-        result =
-          case Task.yield(Task.async(fn -> git_sync(source) end), 300_000) do
-            {:ok, result} -> result
-            nil -> {:error, "Syncing took over 5 minutes and was stopped."}
-          end
+      with {:ok, pid} <-
+             Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
+               # The registration belongs to the worker, so it is released even
+               # when the worker crashes. It covers both git and status updates.
+               case :global.register_name({__MODULE__, source.id}, self()) do
+                 :yes ->
+                   monitor = Process.monitor(caller)
+                   send(caller, {ref, :started})
 
-        if current = get(source.id) do
-          case result do
-            :ok ->
-              set_status(current, %{
-                status: "ready",
-                error: nil,
-                synced_at: DateTime.utc_now(:second)
-              })
+                   receive do
+                     {^ref, {:ok, source}} ->
+                       Process.demonitor(monitor, [:flush])
+                       finish_sync(source, git_sync(source))
 
-            {:error, reason} ->
-              set_status(current, %{status: "error", error: reason})
-          end
+                     {^ref, _error} ->
+                       :ok
 
-          forget_context(current.workflow_id)
+                     {:DOWN, ^monitor, :process, ^caller, _reason} ->
+                       :ok
+                   end
+
+                 :no ->
+                   send(caller, {ref, :already_syncing})
+               end
+             end) do
+        monitor = Process.monitor(pid)
+
+        receive do
+          {^ref, :started} ->
+            Process.demonitor(monitor, [:flush])
+
+            try do
+              result = set_status(source, %{status: "syncing", error: nil})
+              send(pid, {ref, result})
+              result
+            rescue
+              error ->
+                send(pid, {ref, :cancel})
+                reraise error, __STACKTRACE__
+            end
+
+          {^ref, :already_syncing} ->
+            Process.demonitor(monitor, [:flush])
+            {:error, :already_syncing}
+
+          {:DOWN, ^monitor, :process, ^pid, reason} ->
+            {:error, reason}
         end
-      end)
+      end
+    else
+      {:ok, source}
     end
+  end
 
-    {:ok, source}
+  defp finish_sync(source, result, retries \\ 100) do
+    # Older callers may still start a sync in a transaction. A quick git failure
+    # must not leave that row stuck at "syncing" when it becomes visible later.
+    case get(source.id) do
+      nil when retries > 0 ->
+        receive do
+        after
+          100 -> finish_sync(source, result, retries - 1)
+        end
+
+      nil ->
+        :ok
+
+      current ->
+        attrs =
+          case result do
+            :ok -> %{status: "ready", error: nil, synced_at: DateTime.utc_now(:second)}
+            {:error, reason} -> %{status: "error", error: reason}
+          end
+
+        # A concurrent deletion is harmless, including one after the lookup.
+        Repo.update_all(from(s in Source, where: s.id == ^current.id),
+          set: Map.to_list(Map.put(attrs, :updated_at, DateTime.utc_now(:second)))
+        )
+
+        Agents.notify_changed()
+        forget_context(current.workflow_id)
+    end
   end
 
   defp set_status(source, attrs) do
@@ -299,6 +370,10 @@ defmodule Factory.Sources do
   defp git_sync(source) do
     dir = local_path(source)
     branch = blank_nil(source.config["branch"])
+
+    deadline =
+      System.monotonic_time(:millisecond) +
+        Application.get_env(:factory, :source_sync_timeout, 300_000)
 
     with {:ok, env} <- git_env(source) do
       steps =
@@ -318,9 +393,11 @@ defmodule Factory.Sources do
         end
 
       Enum.reduce_while(steps, :ok, fn args, :ok ->
-        case System.cmd("git", args, env: env, stderr_to_stdout: true) do
-          {_, 0} -> {:cont, :ok}
-          {out, _} -> {:halt, {:error, git_error(out)}}
+        case Git.run(args, env, max(deadline - System.monotonic_time(:millisecond), 0)) do
+          {:ok, _, 0} -> {:cont, :ok}
+          {:ok, out, _} -> {:halt, {:error, git_error(out)}}
+          {:error, :timeout} -> {:halt, {:error, "Syncing timed out and was stopped."}}
+          {:error, reason} -> {:halt, {:error, "Couldn't run git: #{inspect(reason)}"}}
         end
       end)
     end

@@ -143,6 +143,15 @@ defmodule Factory.ActionsTest do
     bad = action(w, "command", %{"command" => "exit 3", "folder" => tmp})
     assert {:error, "`exit 3` failed (exit 3)" <> _} = Actions.run(bad)
 
+    # Placeholder values reach the shell as data, never as code.
+    echo = action(w, "command", %{"command" => ~s(printf '[%s]' "{{summary}}"), "folder" => tmp})
+    ctx = %{Actions.context() | "summary" => "$(echo PWNED) `id` ; touch hacked"}
+    assert {:ok, text} = Actions.run(echo, ctx)
+    assert text =~ "[$(echo PWNED) `id` ; touch hacked]"
+    refute File.exists?(Path.join(tmp, "hacked"))
+    assert {:ok, [line]} = Actions.plan(echo, ctx)
+    assert line =~ "$(echo PWNED)"
+
     remote = Path.join(tmp, "remote.git")
     work = Path.join(tmp, "work")
     {_, 0} = System.cmd("git", ["init", "-q", "--bare", remote])
