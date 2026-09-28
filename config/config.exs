@@ -36,6 +36,14 @@ config :phoenix_live_view,
 # at the `config/runtime.exs`.
 config :factory, Factory.Mailer, adapter: Swoosh.Adapters.Local
 
+# Kiro agents run `kiro-cli acp --agent-engine v3` in this folder unless the agent sets its own.
+# Their stderr goes to tmp/kiro-logs/agent-<id>.log.
+config :factory, :kiro,
+  cli: System.find_executable("kiro-cli") || Path.expand("~/.local/bin/kiro-cli"),
+  workspace: Path.expand("../tmp/workspace", __DIR__),
+  log_dir: Path.expand("../tmp/kiro-logs", __DIR__),
+  prompt_timeout: :timer.minutes(10)
+
 # Configure tailwind (the version is required)
 config :tailwind,
   version: "4.3.3",

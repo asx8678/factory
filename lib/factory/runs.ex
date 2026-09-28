@@ -15,7 +15,9 @@ defmodule Factory.Runs do
   defp broadcast(topic, msg), do: Phoenix.PubSub.broadcast(Factory.PubSub, topic, msg)
 
   def list_runs do
-    Repo.all(from r in Run, order_by: [desc: r.updated_at, desc: r.id], preload: :tasks)
+    Repo.all(
+      from r in Run, order_by: [desc: r.updated_at, desc: r.id], preload: [:tasks, :spec_doc]
+    )
   end
 
   def count_active,
@@ -84,6 +86,19 @@ defmodule Factory.Runs do
     end)
   end
 
+  @doc "Totals of the agent replies in a run: how many turns and how many credits."
+  def usage(run_id) do
+    replies =
+      Repo.all(
+        from m in Message, where: m.run_id == ^run_id and not is_nil(m.author), select: m.meta
+      )
+
+    %{
+      turns: length(replies),
+      credits: replies |> Enum.map(&(&1["credits"] || 0)) |> Enum.sum()
+    }
+  end
+
   def list_messages(run_id) do
     Repo.all(from m in Message, where: m.run_id == ^run_id, order_by: m.id)
   end
@@ -95,7 +110,9 @@ defmodule Factory.Runs do
         role: role,
         body: body,
         attachments: Keyword.get(opts, :attachments, []),
-        actions: Keyword.get(opts, :actions, [])
+        actions: Keyword.get(opts, :actions, []),
+        author: Keyword.get(opts, :author),
+        meta: Keyword.get(opts, :meta, %{})
       })
 
     broadcast("run:#{run.id}", {:message, message})

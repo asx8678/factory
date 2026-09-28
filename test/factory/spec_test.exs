@@ -35,4 +35,13 @@ defmodule Factory.SpecTest do
   test "reports no tasks" do
     assert Spec.tasks_from_files([{"notes.md", "just prose"}]) == {nil, []}
   end
+
+  test "characters containing the byte 0x85 aren't split as line breaks" do
+    text = "- [ ] 1. Add ★ flag\n  - Table with ★ Astra and Åse columns"
+
+    assert [%{title: "Add ★ flag"}] = Spec.parse_tasks(text)
+    {[], [block]} = Spec.blocks(text)
+    assert block.details == ["Table with ★ Astra and Åse columns"]
+    assert String.valid?(Spec.render_blocks([], [block]))
+  end
 end

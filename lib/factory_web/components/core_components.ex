@@ -62,6 +62,8 @@ defmodule FactoryWeb.CoreComponents do
       :if={msg = render_slot(@inner_block) || Phoenix.Flash.get(@flash, @kind)}
       id={@id}
       phx-click={JS.push("lv:clear-flash", value: %{key: @kind}) |> hide("##{@id}")}
+      phx-hook={@id in ["flash-info", "flash-error"] && "AutoDismiss"}
+      data-dismiss-after={if @kind == :error, do: 8000, else: 4000}
       role="alert"
       class="toast toast-top toast-end z-50"
       {@rest}

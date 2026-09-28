@@ -8,6 +8,8 @@ defmodule Factory.Runs.Message do
     field :body, :string, default: ""
     field :attachments, {:array, :string}, default: []
     field :actions, {:array, :string}, default: []
+    field :author, :string
+    field :meta, :map, default: %{}
 
     timestamps(type: :utc_datetime)
   end

@@ -39,3 +39,16 @@ config :phoenix_live_view,
 # Sort query params output of verified routes for robust url comparisons
 config :phoenix,
   sort_verified_routes_query_params: true
+
+# Tests talk to a fake kiro-cli instead of the real one.
+config :factory, :kiro,
+  cli: Path.expand("../test/support/fake_kiro.mjs", __DIR__),
+  workspace: Path.expand("../tmp/test-workspace", __DIR__),
+  log_dir: Path.expand("../tmp/test-kiro-logs", __DIR__),
+  prompt_timeout: 5_000
+
+# Repositories added as data sources are cloned here in tests.
+config :factory, :sources_dir, Path.expand("../tmp/test-sources", __DIR__)
+
+# Actions' HTTP requests (GitHub, Azure DevOps, webhooks, API calls) go to a stub.
+config :factory, :actions_req_options, plug: {Req.Test, Factory.Actions}

@@ -1,60 +1,297 @@
 defmodule FactoryWeb.WorkflowsLive do
+  @moduledoc """
+  The workflows: pick one, then arrange its agents and hand-offs on the canvas.
+  Standard workflows (one per job on the start screen) can be changed and restored;
+  custom ones can be made new or cloned, renamed and deleted.
+  URLs: /workflows (the current one), /workflows/:workflow_id, …/agents/:id.
+  """
   use FactoryWeb, :live_view
-  alias Factory.Agents
-  alias Factory.Agents.Agent
+  import FactoryWeb.RunParts, only: [type_icon: 2]
+  alias Factory.{Actions, Agents, FileBrowser, Kiro, Sources, Workflows}
+  alias Factory.Agents.{Agent, Workflow}
+
+  # Model and mode are switched per message, and prompt edits are re-sent, so only these
+  # need a fresh session: its folder, or which session the agent talks in.
+  @restart_fields [:runtime, :workdir, :session]
 
   def mount(_params, _session, socket) do
     if connected?(socket), do: Agents.subscribe()
-    {:ok, assign(socket, page_title: "Workflow", graph: Agents.graph(), selected: nil, form: nil)}
+
+    {:ok,
+     assign(socket,
+       page_title: "Workflows",
+       workflow: nil,
+       workflows: [],
+       graph: nil,
+       selected: nil,
+       form: nil,
+       editing_context: false,
+       naming: nil,
+       sources: [],
+       sources_view: nil,
+       source_kind: nil,
+       source_form: nil,
+       editing_source: nil,
+       browser: nil,
+       source_agents: [],
+       attached: MapSet.new(),
+       action_result: nil,
+       action_draft: nil,
+       new_action_id: nil
+     )
+     |> allow_upload(:source_file,
+       accept: ~w(.md .markdown .txt),
+       max_entries: 1,
+       max_file_size: 1_000_000,
+       auto_upload: true,
+       progress: &handle_progress/3
+     )}
   end
 
-  # Another tab changed the graph. Close the panel if its agent was deleted there.
+  # Another tab changed the graph. Close the panel if its agent was deleted there,
+  # and leave a workflow that was deleted there.
+  # An action run from its panel finished.
+  def handle_info({:action_result, id, result}, socket) do
+    if socket.assigns.selected && socket.assigns.selected.id == id,
+      do: {:noreply, socket |> assign(action_result: result) |> refresh()},
+      else: {:noreply, refresh(socket)}
+  end
+
   def handle_info({:graph_changed}, socket) do
+    socket = assign(socket, workflows: Workflows.list())
+
+    socket =
+      if socket.assigns.workflow,
+        do: assign(socket, sources: Sources.list(socket.assigns.workflow.id)),
+        else: socket
+
+    if socket.assigns.workflow && !Workflows.get(socket.assigns.workflow.id) do
+      {:noreply, push_navigate(socket, to: ~p"/workflows")}
+    else
+      graph_changed(socket)
+    end
+  end
+
+  defp graph_changed(socket) do
     case socket.assigns.selected && Agents.get_agent(socket.assigns.selected.id) do
       nil when socket.assigns.selected != nil ->
-        {:noreply, socket |> refresh() |> push_patch(to: ~p"/workflows")}
+        {:noreply,
+         socket |> refresh() |> push_patch(to: ~p"/workflows/#{socket.assigns.workflow.id}")}
 
       _ ->
         {:noreply, refresh(socket)}
     end
   end
 
-  def handle_params(%{"id" => id}, _uri, socket) do
-    case Agents.get_agent(id) do
-      nil -> {:noreply, push_patch(socket, to: ~p"/workflows")}
-      agent -> {:noreply, select(socket, agent)}
+  def handle_params(params, uri, socket) do
+    workflow =
+      case params["workflow_id"] do
+        nil -> Workflows.current()
+        id -> Workflows.get(id)
+      end
+
+    if workflow do
+      socket
+      |> open_workflow(workflow)
+      |> open_sources(params)
+      |> agent_params(params, uri)
+    else
+      {:noreply,
+       socket
+       |> put_flash(:error, "That workflow doesn't exist.")
+       |> push_navigate(to: ~p"/workflows")}
     end
   end
 
-  def handle_params(_params, _uri, socket) do
+  # ?sources opens the data sources window, e.g. from a link.
+  defp open_sources(socket, %{"sources" => _}),
+    do: assign(socket, sources_view: if(socket.assigns.sources == [], do: :pick, else: :list))
+
+  defp open_sources(socket, _params), do: socket
+
+  # A different workflow gets a fresh canvas (its element id changes with it).
+  defp open_workflow(socket, workflow) do
+    if socket.assigns.workflow && socket.assigns.workflow.id == workflow.id do
+      assign(socket, workflow: workflow)
+    else
+      assign(socket,
+        workflow: workflow,
+        workflows: Workflows.list(),
+        sources: Sources.list(workflow.id),
+        sources_view: nil,
+        graph: canvas_graph(workflow.id, nil, Sources.list(workflow.id)),
+        page_title: workflow.name,
+        selected: nil,
+        naming: nil
+      )
+    end
+  end
+
+  defp agent_params(socket, %{"id" => id} = params, _uri) do
+    case Agents.get_agent(id) do
+      %Agent{workflow_id: wid} = agent when wid == socket.assigns.workflow.id ->
+        # ?prompt opens the editor for the agent's prompt.
+        editing = Map.has_key?(params, "prompt")
+        context_form = to_form(%{"prompt" => agent.prompt}, as: :context)
+
+        {:noreply,
+         socket |> select(agent) |> assign(editing_context: editing, context_form: context_form)}
+
+      _ ->
+        {:noreply, push_patch(socket, to: ~p"/workflows/#{socket.assigns.workflow.id}")}
+    end
+  end
+
+  defp agent_params(socket, _params, _uri) do
     {:noreply,
-     socket |> assign(selected: nil, form: nil) |> push_event("flow:select", %{id: nil})}
+     socket
+     |> discard_new_action(nil)
+     |> assign(selected: nil, form: nil, editing_context: false)
+     |> push_event("flow:select", %{id: nil})}
   end
 
   # Events from the Svelte Flow canvas
 
   def handle_event("select", %{"id" => id}, socket),
-    do: {:noreply, push_patch(socket, to: ~p"/workflows/#{id}")}
+    do:
+      {:noreply,
+       push_patch(socket, to: ~p"/workflows/#{socket.assigns.workflow.id}/agents/#{id}")}
 
   def handle_event("deselect", _, socket) do
     {:noreply,
-     if(socket.assigns.selected, do: push_patch(socket, to: ~p"/workflows"), else: socket)}
+     if(socket.assigns.selected,
+       do: push_patch(socket, to: ~p"/workflows/#{socket.assigns.workflow.id}"),
+       else: socket
+     )}
   end
 
   def handle_event("move", %{"nodes" => positions}, socket) do
     Agents.move_agents(positions)
-    {:noreply, assign(socket, graph: Agents.graph())}
+
+    {:noreply,
+     assign(socket,
+       graph: canvas_graph(socket.assigns.workflow.id, nil, socket.assigns.sources)
+     )}
   end
 
-  def handle_event("connect", %{"source" => source, "target" => target}, socket) do
-    Agents.link(int(source), int(target))
+  def handle_event("connect", %{"source" => source, "target" => target} = params, socket) do
+    Agents.link(int(source), int(target), handles(params))
     {:noreply, refresh(socket)}
+  end
+
+  # Action cards (commit, open a PR, email…): added from the palette on the right,
+  # set up in their own side panel, tried with a dry run or run for real.
+
+  # A new action is a draft until Add; Cancel (or leaving it) removes it. Changes to
+  # an existing action are kept in `action_draft` until Save.
+  def handle_event("add_action", %{"type" => type, "x" => x, "y" => y}, socket) do
+    case Actions.get(type) && Agents.add_action(socket.assigns.workflow.id, type, x / 1, y / 1) do
+      {:ok, card} ->
+        {:noreply,
+         socket |> assign(new_action_id: card.id) |> refresh() |> push_patch(to: agent_path(card))}
+
+      _ ->
+        {:noreply, put_flash(socket, :error, "Couldn't add the action. Try again.")}
+    end
+  end
+
+  def handle_event("action_change", %{"action" => params}, socket),
+    do: {:noreply, assign(socket, action_draft: draft(socket.assigns.selected, params))}
+
+  def handle_event("action_save", params, socket) do
+    card = socket.assigns.selected
+    draft = draft(card, params["action"] || %{}, socket.assigns.action_draft)
+    new? = socket.assigns.new_action_id == card.id
+
+    case Agents.update_agent(card, %{name: draft.name, action: draft.action}) do
+      {:ok, card} ->
+        {:noreply,
+         socket
+         |> assign(selected: card, action_draft: nil, new_action_id: nil)
+         |> put_flash(
+           :info,
+           if(new?,
+             do: "Added “#{card.name}”. Draw an arrow from the agent it follows.",
+             else: "Saved “#{card.name}”."
+           )
+         )
+         |> refresh()}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Names can't be empty or over 40 characters.")}
+    end
+  end
+
+  def handle_event("action_cancel", _, socket) do
+    socket = assign(socket, action_draft: nil, action_result: nil)
+    {:noreply, push_patch(socket, to: ~p"/workflows/#{socket.assigns.workflow.id}")}
+  end
+
+  def handle_event("action_plan", _, socket) do
+    result =
+      case Actions.plan(socket.assigns.action_draft || socket.assigns.selected) do
+        {:ok, lines} -> {:plan, lines}
+        error -> error
+      end
+
+    {:noreply, assign(socket, action_result: result)}
+  end
+
+  def handle_event("action_run", _, socket) do
+    card = socket.assigns.action_draft || socket.assigns.selected
+    lv = self()
+    Agents.set_activity(card.id, "running", "Running")
+
+    Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
+      result = Actions.run(card)
+
+      {status, text} =
+        if match?({:ok, _}, result), do: {"done", "Done"}, else: {"error", elem(result, 1)}
+
+      Agents.set_activity(card.id, status, String.slice(text, 0, 200))
+      send(lv, {:action_result, card.id, result})
+    end)
+
+    {:noreply, assign(socket, action_result: :running)}
+  end
+
+  # Data source cards: an arrow from one to an agent attaches it; deleting the arrow
+  # (or the card) undoes that. Card ids on the canvas are "source-ID".
+
+  def handle_event("attach_source", %{"source" => sid, "agent" => aid}, socket) do
+    with %Sources.Source{} = source <- Sources.get(source_id(sid)) do
+      case Sources.attach(source, int(aid)) do
+        {:ok, _} -> :ok
+        {:error, _} -> :error
+      end
+    end
+
+    {:noreply, socket |> reload_sources() |> refresh()}
+  end
+
+  def handle_event("detach_source", %{"source" => sid, "agent" => aid}, socket) do
+    if source = Sources.get(source_id(sid)), do: Sources.detach(source, int(aid))
+    {:noreply, socket |> reload_sources() |> refresh()}
+  end
+
+  def handle_event("move_sources", %{"nodes" => positions}, socket) do
+    positions
+    |> Enum.map(&Map.update!(&1, "id", fn id -> source_id(id) end))
+    |> Sources.move()
+
+    {:noreply, reload_sources(socket)}
+  end
+
+  def handle_event("delete_sources", %{"ids" => ids}, socket) do
+    for id <- ids, source = Sources.get(source_id(id)), do: Sources.delete(source)
+    {:noreply, socket |> reload_sources() |> refresh()}
   end
 
   def handle_event("reconnect", %{"old" => old, "new" => new}, socket) do
     Agents.relink(
       {int(old["source"]), int(old["target"])},
-      {int(new["source"]), int(new["target"])}
+      {int(new["source"]), int(new["target"])},
+      handles(new)
     )
 
     {:noreply, refresh(socket)}
@@ -63,6 +300,7 @@ defmodule FactoryWeb.WorkflowsLive do
   def handle_event("delete", %{"nodes" => nodes, "edges" => edges}, socket) do
     for %{"source" => s, "target" => t} <- edges, do: Agents.unlink(int(s), int(t))
     ids = Enum.map(nodes, &int/1)
+    Enum.each(ids, &Kiro.stop/1)
     Agents.delete_agents(ids)
     {:noreply, socket |> refresh() |> close_if_deleted(ids)}
   end
@@ -70,37 +308,459 @@ defmodule FactoryWeb.WorkflowsLive do
   def handle_event("add_agent", %{"x" => x, "y" => y} = params, socket) do
     opts = [from: params["from"] && int(params["from"]), to: params["to"] && int(params["to"])]
 
-    case Agents.add_agent(x, y, opts) do
+    case Agents.add_agent(socket.assigns.workflow.id, x, y, opts) do
       {:ok, agent} ->
-        {:noreply, socket |> refresh() |> push_patch(to: ~p"/workflows/#{agent.id}")}
+        {:noreply, socket |> refresh() |> push_patch(to: agent_path(agent))}
 
       {:error, _} ->
         {:noreply, socket |> refresh() |> put_flash(:error, "Couldn't add the agent. Try again.")}
     end
   end
 
+  # Workflows: pick, make, rename, clone, restore, delete, use in chat
+
+  def handle_event("wf_naming", %{"what" => what}, socket),
+    do: {:noreply, assign(socket, naming: if(what == "", do: nil, else: what))}
+
+  def handle_event("wf_create", %{"name" => name}, socket) do
+    case Workflows.create(name) do
+      {:ok, w} ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "Made “#{w.name}”. Add agents with Add agent.")
+         |> push_patch(to: ~p"/workflows/#{w.id}")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Give the workflow a name.")}
+    end
+  end
+
+  def handle_event("wf_rename", %{"name" => name}, socket) do
+    case Workflows.rename(socket.assigns.workflow, name) do
+      {:ok, w} ->
+        {:noreply,
+         assign(socket, workflow: w, workflows: Workflows.list(), naming: nil, page_title: w.name)}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Names can't be empty or over 60 characters.")}
+    end
+  end
+
+  def handle_event("wf_clone", _, socket) do
+    {:ok, copy} = Workflows.clone(socket.assigns.workflow)
+
+    {:noreply,
+     socket
+     |> put_flash(:info, "Cloned as “#{copy.name}”.")
+     |> push_patch(to: ~p"/workflows/#{copy.id}")}
+  end
+
+  def handle_event("wf_restore", _, socket) do
+    case Workflows.restore(socket.assigns.workflow) do
+      {:ok, w} ->
+        {:noreply,
+         socket
+         |> assign(workflow: w, workflows: Workflows.list(), selected: nil, page_title: w.name)
+         |> refresh()
+         |> put_flash(:info, "Restored “#{w.name}” to its default.")
+         |> push_patch(to: ~p"/workflows/#{w.id}")}
+
+      {:error, _} ->
+        {:noreply, socket}
+    end
+  end
+
+  def handle_event("wf_delete", _, socket) do
+    case Workflows.delete(socket.assigns.workflow) do
+      {:ok, w} ->
+        {:noreply,
+         socket |> put_flash(:info, "Deleted “#{w.name}”.") |> push_navigate(to: ~p"/workflows")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Standard workflows can be restored, not deleted.")}
+    end
+  end
+
+  def handle_event("wf_use", _, socket) do
+    {:ok, w} = Workflows.set_current(socket.assigns.workflow)
+
+    {:noreply,
+     socket
+     |> assign(workflow: w, workflows: Workflows.list())
+     |> put_flash(:info, "Plain chats now use “#{w.name}”.")}
+  end
+
+  # Data sources: the window lists them, offers the kinds to add, and edits one.
+
+  def handle_event("sources_open", params, socket) do
+    view = if params["add"] || socket.assigns.sources == [], do: :pick, else: :list
+    {:noreply, assign(socket, sources_view: view)}
+  end
+
+  def handle_event("sources_close", _, socket),
+    do: {:noreply, assign(socket, sources_view: nil, browser: nil)}
+
+  def handle_event("source_view", %{"view" => view}, socket) when view in ["list", "pick"],
+    do:
+      {:noreply, assign(socket, sources_view: String.to_existing_atom(view), editing_source: nil)}
+
+  def handle_event("source_pick", %{"kind" => kind}, socket) do
+    form = Sources.change(%Sources.Source{kind: kind}) |> to_form(as: :source)
+
+    {:noreply,
+     assign(socket,
+       sources_view: :form,
+       source_kind: kind,
+       source_form: form,
+       editing_source: nil,
+       source_agents: Agents.list_agents(socket.assigns.workflow.id),
+       attached: MapSet.new()
+     )}
+  end
+
+  def handle_event("source_edit", %{"id" => id}, socket) do
+    source = Sources.get(id)
+    form = source |> Sources.change() |> to_form(as: :source)
+
+    {:noreply,
+     assign(socket,
+       sources_view: :form,
+       source_kind: source.kind,
+       source_form: form,
+       editing_source: source,
+       source_agents: Agents.list_agents(socket.assigns.workflow.id),
+       attached: MapSet.new(Sources.agent_ids(source))
+     )}
+  end
+
+  def handle_event("source_validate", %{"source" => params}, socket) do
+    base = socket.assigns.editing_source || %Sources.Source{kind: socket.assigns.source_kind}
+
+    form =
+      base
+      |> Sources.change(source_attrs(socket, params))
+      |> Map.put(:action, :validate)
+      |> to_form(as: :source)
+
+    # Ticks only come with the form itself (not with a browsed path or an upload).
+    attached =
+      if Map.has_key?(params, "agents"),
+        do: MapSet.new(agent_ticks(params)),
+        else: socket.assigns.attached
+
+    {:noreply, assign(socket, source_form: form, attached: attached)}
+  end
+
+  def handle_event("source_save", %{"source" => params}, socket) do
+    attrs = source_attrs(socket, params)
+
+    result =
+      case socket.assigns.editing_source do
+        # New sources start unattached; arrows attach them.
+        nil -> Sources.create(socket.assigns.workflow.id, Map.delete(attrs, "agents"))
+        source -> Sources.update(source, attrs)
+      end
+
+    case result do
+      {:ok, source} ->
+        {:noreply,
+         socket
+         |> assign(
+           sources: Sources.list(socket.assigns.workflow.id),
+           sources_view: :list,
+           editing_source: nil
+         )
+         |> refresh()
+         |> put_flash(
+           :info,
+           "#{source.name} is a data source of #{socket.assigns.workflow.name}."
+         )}
+
+      {:error, changeset} ->
+        {:noreply, assign(socket, source_form: to_form(changeset, as: :source))}
+    end
+  end
+
+  def handle_event("source_toggle", %{"id" => id}, socket) do
+    if s = Sources.get(id), do: Sources.toggle(s)
+    {:noreply, socket |> assign(sources: Sources.list(socket.assigns.workflow.id)) |> refresh()}
+  end
+
+  def handle_event("source_sync", %{"id" => id}, socket) do
+    if s = Sources.get(id), do: Sources.sync(s)
+    {:noreply, socket |> assign(sources: Sources.list(socket.assigns.workflow.id)) |> refresh()}
+  end
+
+  def handle_event("source_delete", %{"id" => id}, socket) do
+    if s = Sources.get(id), do: Sources.delete(s)
+    sources = Sources.list(socket.assigns.workflow.id)
+
+    {:noreply,
+     socket
+     |> assign(sources: sources, sources_view: if(sources == [], do: :pick, else: :list))
+     |> refresh()}
+  end
+
+  # The folder browser: picking a path for a source's folder or file field.
+
+  def handle_event("browse_open", %{"field" => field, "mode" => mode}, socket)
+      when mode in ["dir", "file", "json", "any"] do
+    current = form_params(socket.assigns.source_form)["config"][field]
+    browser = %{field: field, mode: mode, hidden: false, listing: nil, error: nil}
+    {:noreply, assign(socket, browser: browse(browser, FileBrowser.start_dir(current)))}
+  end
+
+  def handle_event("browse_go", %{"path" => path}, socket),
+    do: {:noreply, update(socket, :browser, &browse(&1, path))}
+
+  def handle_event("browse_hidden", _, socket) do
+    browser = %{socket.assigns.browser | hidden: !socket.assigns.browser.hidden}
+    {:noreply, assign(socket, browser: browse(browser, browser.listing && browser.listing.dir))}
+  end
+
+  def handle_event("browse_cancel", _, socket), do: {:noreply, assign(socket, browser: nil)}
+
+  # The chosen path fills the field; a source without a name is named after it.
+  def handle_event("browse_pick", %{"path" => path}, socket) do
+    %{field: field} = socket.assigns.browser
+    params = form_params(socket.assigns.source_form)
+    params = put_in(params, ["config", field], path)
+
+    params =
+      if String.trim(params["name"] || "") == "" and field == "path",
+        do: Map.put(params, "name", path |> Path.basename() |> Path.rootname()),
+        else: params
+
+    socket = assign(socket, browser: nil)
+    handle_event("source_validate", %{"source" => params}, socket)
+  end
+
   # Events from the side panel
 
   def handle_event("save", %{"agent" => params}, socket) do
-    case Agents.update_agent(socket.assigns.selected, params) do
+    old = socket.assigns.selected
+
+    case Agents.update_agent(old, params) do
       {:ok, agent} ->
-        {:noreply, socket |> assign(selected: agent) |> refresh()}
+        # Its own session was started in the old folder (or it now talks elsewhere).
+        if Map.take(old, @restart_fields) != Map.take(agent, @restart_fields),
+          do: Kiro.stop(old.id)
+
+        if agent.prompt != old.prompt, do: Kiro.forget(agent)
+
+        {:noreply,
+         socket |> assign(selected: agent, form: to_form(Agents.change_agent(agent))) |> refresh()}
 
       {:error, changeset} ->
         {:noreply, assign(socket, form: to_form(changeset, action: :validate))}
     end
   end
 
-  def handle_event("delete_agent", _, socket) do
-    Agents.delete_agents([socket.assigns.selected.id])
-    {:noreply, socket |> refresh() |> push_patch(to: ~p"/workflows")}
+  # Role picked from the menu on an agent card's icon.
+  def handle_event("kind", %{"id" => id, "kind" => kind}, socket) do
+    with %Agent{} = agent <- Agents.get_agent(id),
+         {:ok, _} <- Agents.update_agent(agent, %{kind: kind}) do
+      socket = refresh(socket)
+
+      # Keep the side panel's form in step if it shows this agent.
+      socket =
+        if socket.assigns.selected && socket.assigns.selected.id == agent.id,
+          do: assign(socket, form: to_form(Agents.change_agent(socket.assigns.selected))),
+          else: socket
+
+      {:noreply, socket}
+    else
+      _ -> {:noreply, socket}
+    end
   end
 
-  def handle_event("close", _, socket), do: {:noreply, push_patch(socket, to: ~p"/workflows")}
+  # The context button on an agent card.
+  def handle_event("context", %{"id" => id}, socket),
+    do:
+      {:noreply,
+       push_patch(socket, to: ~p"/workflows/#{socket.assigns.workflow.id}/agents/#{id}?prompt")}
+
+  # Keeps the character count current while typing.
+  def handle_event("context_change", %{"context" => params}, socket),
+    do: {:noreply, assign(socket, context_form: to_form(params, as: :context))}
+
+  def handle_event("save_context", %{"context" => %{"prompt" => prompt}}, socket) do
+    old = socket.assigns.selected
+
+    case Agents.update_agent(old, %{prompt: prompt}) do
+      {:ok, agent} ->
+        # The session already has the old prompt; send the new one with the next message.
+        if agent.prompt != old.prompt, do: Kiro.forget(agent)
+
+        {:noreply,
+         socket
+         |> put_flash(:info, "Saved #{agent.name}'s prompt.")
+         |> refresh()
+         |> push_patch(to: agent_path(agent))}
+
+      {:error, changeset} ->
+        {:noreply,
+         assign(socket, context_form: to_form(changeset, as: :context, action: :validate))}
+    end
+  end
+
+  # The red compact button on an agent's context bar, or in its side panel.
+  def handle_event("compact", %{"id" => id}, socket) do
+    agent = Agents.get_agent(id)
+
+    message =
+      case agent && Kiro.compact(agent) do
+        :ok ->
+          {:info,
+           "Compacting #{agent.name}'s context. Kiro shows the new size after its next reply."}
+
+        {:error, :busy} ->
+          {:error, "#{agent.name} is answering right now. Compact when it's idle."}
+
+        {:error, :starting} ->
+          {:error, "Kiro is still starting. Try again in a moment."}
+
+        _ ->
+          {:error, "Nothing to compact: #{agent && agent.name} has no Kiro session running."}
+      end
+
+    {:noreply, put_flash(socket, elem(message, 0), elem(message, 1))}
+  end
+
+  # Stops the session this agent talks in: its own, or the shared one.
+  def handle_event("stop_kiro", _, socket) do
+    Kiro.stop(Kiro.session_key(socket.assigns.selected))
+    {:noreply, refresh(socket)}
+  end
+
+  def handle_event("delete_agent", _, socket) do
+    Kiro.stop(socket.assigns.selected.id)
+    Agents.delete_agents([socket.assigns.selected.id])
+
+    {:noreply,
+     socket |> refresh() |> push_patch(to: ~p"/workflows/#{socket.assigns.workflow.id}")}
+  end
+
+  # "Chat" on an agent card opens the chat with just that agent.
+  def handle_event("chat", %{"id" => id}, socket),
+    do: {:noreply, push_navigate(socket, to: ~p"/chat?#{[agent: id]}")}
+
+  def handle_event("close", _, socket),
+    do: {:noreply, push_patch(socket, to: ~p"/workflows/#{socket.assigns.workflow.id}")}
+
+  defp browse(browser, dir) do
+    case FileBrowser.list(dir || System.user_home!(),
+           files: browser.mode != "dir",
+           ext:
+             case browser.mode do
+               "json" -> [".json"]
+               "any" -> :any
+               _ -> nil
+             end,
+           hidden: browser.hidden
+         ) do
+      {:ok, listing} -> %{browser | listing: listing, error: nil}
+      {:error, reason} -> %{browser | error: reason}
+    end
+  end
+
+  # What the source form holds now, typed or not.
+  defp form_params(form) do
+    %{
+      "name" => form[:name].value || "",
+      "content" => form[:content].value || "",
+      "config" => form[:config].value || %{}
+    }
+    |> Map.merge(form.params || %{})
+    |> Map.update("config", %{}, &(&1 || %{}))
+  end
+
+  # The kind comes from the window, not the form; config keeps only filled-in keys.
+  defp source_attrs(socket, params) do
+    config =
+      (params["config"] || %{})
+      |> Enum.map(fn {k, v} -> {k, String.trim(v)} end)
+      |> Enum.reject(fn {_, v} -> v == "" end)
+      |> Map.new()
+
+    %{
+      "kind" => socket.assigns.source_kind,
+      "name" => params["name"] || "",
+      "content" => params["content"] || "",
+      "config" => config,
+      "agents" =>
+        if(Map.has_key?(params, "agents"),
+          do: agent_ticks(params),
+          else: MapSet.to_list(socket.assigns.attached)
+        )
+    }
+  end
+
+  defp agent_ticks(params),
+    do:
+      params
+      |> Map.get("agents", [])
+      |> List.wrap()
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.map(&int/1)
+
+  # An uploaded file fills the text box, and names the source if it has no name yet.
+  defp handle_progress(:source_file, entry, socket) do
+    if entry.done? do
+      text =
+        consume_uploaded_entry(socket, entry, fn %{path: path} -> {:ok, File.read!(path)} end)
+
+      if String.valid?(text) do
+        form = socket.assigns.source_form
+        params = form.params || %{}
+        name = params["name"] || form[:name].value || ""
+        name = if String.trim(name) == "", do: Path.rootname(entry.client_name), else: name
+
+        params =
+          params
+          |> Map.put("content", text)
+          |> Map.put("name", name)
+          |> Map.put_new("config", form[:config].value || %{})
+
+        handle_event("source_validate", %{"source" => params}, socket)
+      else
+        {:noreply, put_flash(socket, :error, "#{entry.client_name} isn't a text file.")}
+      end
+    else
+      {:noreply, socket}
+    end
+  end
+
+  # The card with the form's unsaved values (name and settings).
+  defp draft(card, params, base \\ nil) do
+    base = base || card
+    config = Map.merge(base.action["config"] || %{}, params["config"] || %{})
+    name = params["name"] || base.name
+    %{base | name: name, action: Map.put(base.action, "config", config)}
+  end
+
+  # A new action that was never added (Add) goes when you leave it.
+  defp discard_new_action(%{assigns: %{new_action_id: id}} = socket, keep)
+       when not is_nil(id) and id != keep do
+    Agents.delete_agents([id])
+    socket |> assign(new_action_id: nil, action_draft: nil) |> refresh()
+  end
+
+  defp discard_new_action(socket, _keep), do: socket
 
   defp select(socket, agent) do
+    socket = discard_new_action(socket, agent.id)
+
     socket
     |> assign(
+      action_result:
+        if(socket.assigns.selected && socket.assigns.selected.id == agent.id,
+          do: socket.assigns.action_result
+        ),
+      action_draft:
+        if(socket.assigns.selected && socket.assigns.selected.id == agent.id,
+          do: socket.assigns.action_draft
+        ),
       selected: agent,
       form: to_form(Agents.change_agent(agent)),
       neighbours: Agents.neighbours(agent.id)
@@ -108,9 +768,55 @@ defmodule FactoryWeb.WorkflowsLive do
     |> push_event("flow:select", %{id: to_string(agent.id)})
   end
 
+  # The agents and arrows, plus the workflow's data sources for the card beside them.
+  defp canvas_graph(workflow_id, selected_id, sources) do
+    workflow_id
+    |> Agents.graph(selected_id)
+    |> Map.put(
+      :sources,
+      for s <- sources do
+        %{
+          id: to_string(s.id),
+          name: s.name,
+          kind: s.kind,
+          label: Sources.label(s.kind),
+          status: s.status,
+          enabled: s.enabled,
+          detail: FactoryWeb.SourceParts.detail(s),
+          x: s.x,
+          y: s.y
+        }
+      end
+    )
+    |> Map.put(
+      :action_types,
+      Enum.map(Actions.types(), &Map.take(&1, [:type, :label, :group, :blurb]))
+    )
+    |> Map.put(
+      :source_links,
+      for {sid, aid} <- Sources.links(workflow_id) do
+        %{source: "source-#{sid}", target: to_string(aid)}
+      end
+    )
+  end
+
+  defp source_id("source-" <> id), do: String.to_integer(id)
+  defp source_id(id), do: int(id)
+
+  defp reload_sources(socket),
+    do: assign(socket, sources: Sources.list(socket.assigns.workflow.id))
+
+  defp agent_path(%Agent{workflow_id: wid, id: id}), do: ~p"/workflows/#{wid}/agents/#{id}"
+
   # Sends the saved graph back to the canvas so it always matches the database.
   defp refresh(socket) do
-    graph = Agents.graph(socket.assigns.selected && socket.assigns.selected.id)
+    graph =
+      canvas_graph(
+        socket.assigns.workflow.id,
+        socket.assigns.selected && socket.assigns.selected.id,
+        socket.assigns.sources
+      )
+
     socket = socket |> assign(graph: graph) |> push_event("flow:graph", graph)
 
     if agent = socket.assigns.selected && Agents.get_agent(socket.assigns.selected.id),
@@ -119,99 +825,719 @@ defmodule FactoryWeb.WorkflowsLive do
   end
 
   defp close_if_deleted(%{assigns: %{selected: %Agent{id: id}}} = socket, ids) do
-    if id in ids, do: push_patch(socket, to: ~p"/workflows"), else: socket
+    if id in ids,
+      do: push_patch(socket, to: ~p"/workflows/#{socket.assigns.workflow.id}"),
+      else: socket
   end
 
   defp close_if_deleted(socket, _ids), do: socket
+
+  # Circle names from the canvas ("top", "right", ...); anything else means "facing sides".
+  defp handles(params) do
+    %{source: side(params["sourceHandle"]), target: side(params["targetHandle"])}
+  end
+
+  defp side(s) when s in ~w(top right bottom left), do: s
+  defp side(_), do: nil
 
   defp int(id) when is_integer(id), do: id
   defp int(id) when is_binary(id), do: String.to_integer(id)
 
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} active={:workflows}>
-      <div class="mb-4 flex flex-wrap items-end justify-between gap-3">
-        <h1 class="text-2xl font-semibold tracking-tight font-stretch-semi-condensed">Workflow</h1>
-        <p class="max-w-2xl text-sm text-base-content/60">
-          Drag from the dot under an agent to another agent to draw an arrow. Drop it on empty space to
-          create a new agent there. Select an agent or arrow and press Backspace to delete it.
-        </p>
-      </div>
-
-      <div
-        class="flex flex-col gap-4 lg:flex-row"
-        phx-window-keydown={@selected && "close"}
-        phx-key="Escape"
-      >
-        <div class="min-w-0 flex-1 overflow-hidden rounded-box border border-base-300 bg-base-200">
+    <Layouts.app flash={@flash} usage={@usage_meter} active={:workflows} full>
+      <div class="flex h-full flex-col">
+        <.workflow_bar
+          workflow={@workflow}
+          workflows={@workflows}
+          naming={@naming}
+          sources={@sources}
+        />
+        <FactoryWeb.SourceParts.window
+          :if={@sources_view}
+          workflow={@workflow}
+          sources={@sources}
+          view={@sources_view}
+          kind={@source_kind}
+          form={@source_form}
+          editing={@editing_source}
+          upload={@uploads.source_file}
+          browser={@browser}
+          agents={@source_agents}
+          attached={@attached}
+        />
+        <div class="flex min-h-0 flex-1">
           <div
-            id="agent-flow"
-            phx-hook="Flow"
-            phx-update="ignore"
-            data-graph={JSON.encode!(%{@graph | selected: @selected && to_string(@selected.id)})}
-            class="h-[65vh] lg:h-[calc(100vh-12rem)]"
+            class="relative min-h-0 min-w-0 flex-1 bg-base-200 dark:bg-base-100"
+            phx-window-keydown={@selected && !@editing_context && "close"}
+            phx-key="Escape"
           >
+            <div
+              id={"agent-flow-#{@workflow.id}"}
+              phx-hook="Flow"
+              phx-update="ignore"
+              data-graph={JSON.encode!(%{@graph | selected: @selected && to_string(@selected.id)})}
+              class="absolute inset-0"
+            >
+            </div>
+
+            <FactoryWeb.ActionParts.panel
+              :if={@selected && @selected.kind == "action"}
+              action={@action_draft || @selected}
+              result={@action_result}
+              new={@new_action_id == @selected.id}
+              changed={@action_draft != nil}
+            />
+            <aside
+              :if={@selected && @selected.kind != "action"}
+              id={"panel-#{@selected.id}"}
+              class="drawer-in absolute inset-x-3 bottom-3 flex max-h-[70%] flex-col overflow-hidden rounded-2xl border border-base-content/10 bg-surface shadow-xl sm:inset-x-auto sm:right-3 sm:top-3 sm:max-h-none sm:w-[340px]"
+            >
+              <.form
+                for={@form}
+                id="agent-form"
+                phx-change="save"
+                phx-submit="save"
+                class="flex min-h-0 flex-1 flex-col"
+              >
+                <div class="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-3.5">
+                  <div class="flex items-center gap-2">
+                    <.icon
+                      name={FactoryWeb.AgentKinds.icon(@selected.kind)}
+                      class="size-5 shrink-0 text-base-content/60"
+                    />
+                    <input
+                      type="text"
+                      id="agent-name"
+                      name={@form[:name].name}
+                      value={@form[:name].value}
+                      phx-debounce="300"
+                      aria-label="Name"
+                      class="-mx-1 min-w-0 flex-1 rounded-md border border-transparent bg-transparent px-1 py-0.5 text-base font-semibold outline-none hover:border-base-content/10 focus:border-base-content/25 focus-visible:outline-none"
+                    />
+                    <.link
+                      navigate={~p"/chat?#{[agent: @selected.id]}"}
+                      title="Chat with this agent"
+                      class="flex h-7 items-center gap-1 rounded-md px-2 text-xs text-base-content/60 hover:bg-base-content/[0.06] hover:text-base-content"
+                    >
+                      <.icon name="hero-chat-bubble-left-right-mini" class="size-4" /> Chat
+                    </.link>
+                    <.link
+                      patch={~p"/workflows/#{@selected.workflow_id}"}
+                      class="grid size-7 place-items-center rounded-md text-base-content/50 hover:bg-base-content/[0.06] hover:text-base-content"
+                      aria-label="Close"
+                    >
+                      <.icon name="hero-x-mark-mini" class="size-4" />
+                    </.link>
+                  </div>
+                  <p :for={{msg, _} <- @form[:name].errors} class="mt-1 text-xs text-error">{msg}</p>
+
+                  <div class="ml-7 mt-0.5 flex items-center gap-1.5 text-xs text-base-content/50">
+                    <span class={["size-1.5 rounded-full", Layouts.status_dot(@selected.status)]}></span>
+                    {Layouts.status_label(@selected.status)}
+                    <span :if={@selected.activity} class="truncate">· {@selected.activity}</span>
+                  </div>
+
+                  <textarea
+                    id="agent-role"
+                    name={@form[:role].name}
+                    phx-debounce="300"
+                    rows="2"
+                    placeholder="Add a description…"
+                    aria-label="Description"
+                    class="mt-3 block w-full resize-none rounded-md border border-transparent bg-transparent px-1 py-1 text-[13px] leading-5 text-base-content/80 outline-none placeholder:text-base-content/35 hover:border-base-content/10 focus:border-base-content/25 focus-visible:outline-none"
+                  >{Phoenix.HTML.Form.normalize_value("textarea", @form[:role].value)}</textarea>
+
+                  <dl class="mt-3 border-t border-base-content/10 pt-2 text-[13px]">
+                    <.prop label="Role">
+                      <.plain_select
+                        field={@form[:kind]}
+                        options={for {k, l, _} <- FactoryWeb.AgentKinds.all(), do: {l, k}}
+                      />
+                    </.prop>
+                    <.prop label="Runs on">
+                      <.plain_select field={@form[:runtime]} options={Agent.runtimes()} />
+                    </.prop>
+                    <%= if Ecto.Changeset.get_field(@form.source, :runtime) == "kiro_v3" do %>
+                      <.prop label="Model">
+                        <.plain_select field={@form[:model]} options={Kiro.models()} />
+                      </.prop>
+                      <.prop label="Mode">
+                        <.plain_select field={@form[:kiro_mode]} options={Kiro.modes()} />
+                      </.prop>
+                      <.prop label="Session">
+                        <.plain_select
+                          field={@form[:session]}
+                          options={[{"Own session", "own"}, {"Shared session", "shared"}]}
+                        />
+                      </.prop>
+                      <.prop
+                        :if={Ecto.Changeset.get_field(@form.source, :session) != "shared"}
+                        label="Folder"
+                      >
+                        <input
+                          type="text"
+                          name={@form[:workdir].name}
+                          value={@form[:workdir].value}
+                          phx-debounce="500"
+                          placeholder="Default workspace"
+                          title={@form[:workdir].value || Kiro.config(:workspace)}
+                          class="w-full truncate rounded-md border border-transparent bg-transparent px-1.5 py-1 outline-none placeholder:text-base-content/40 hover:border-base-content/10 focus:border-base-content/25 focus-visible:outline-none"
+                        />
+                      </.prop>
+                      <.prop label="Kiro">
+                        <span :if={!Kiro.running?(@selected)} class="px-1.5 text-base-content/50">
+                          Starts on first message
+                        </span>
+                        <span :if={Kiro.running?(@selected)} class="flex items-center gap-2 px-1.5">
+                          <span class="size-1.5 rounded-full bg-success"></span>
+                          {if @selected.session == "shared",
+                            do: "Shared session running",
+                            else: "Running"}
+                          <button
+                            id="stop-kiro"
+                            type="button"
+                            phx-click="stop_kiro"
+                            class="text-xs text-base-content/50 underline-offset-2 hover:text-base-content hover:underline"
+                          >
+                            Stop
+                          </button>
+                        </span>
+                      </.prop>
+                    <% end %>
+                    <.prop label="Usage">
+                      <div id="agent-usage" class="space-y-1.5 px-1.5 py-1">
+                        <span :if={!@selected.usage["turns"]} class="text-base-content/40">
+                          No turns yet
+                        </span>
+                        <div :if={@selected.usage["turns"]} class="flex items-center gap-3 text-xs">
+                          <span class="flex items-center gap-1" title="Turns with Kiro">
+                            <.icon
+                              name="hero-arrow-path-rounded-square-mini"
+                              class="size-4 opacity-50"
+                            />
+                            {@selected.usage["turns"]} {if @selected.usage["turns"] == 1,
+                              do: "turn",
+                              else: "turns"}
+                          </span>
+                          <span class="flex items-center gap-1" title="Kiro credits used">
+                            <.icon name="hero-bolt-mini" class="size-4 opacity-50" />
+                            {FactoryWeb.Usage.credits(@selected.usage["credits"])} credits
+                          </span>
+                        </div>
+                        <div
+                          :if={@selected.usage["context_pct"]}
+                          title="Current Kiro session. The window size is estimated from Kiro's numbers."
+                        >
+                          <div class="h-1 overflow-hidden rounded-full bg-base-content/10">
+                            <div
+                              class={[
+                                "h-full rounded-full",
+                                cond do
+                                  @selected.usage["context_pct"] >= 80 -> "bg-error"
+                                  @selected.usage["context_pct"] >= 50 -> "bg-warning"
+                                  true -> "bg-info"
+                                end
+                              ]}
+                              style={"width: #{max(@selected.usage["context_pct"], 2)}%"}
+                            >
+                            </div>
+                          </div>
+                          <p class="mt-1 flex items-center justify-between gap-2 text-[11px] text-base-content/50">
+                            <span>Context {FactoryWeb.Usage.context(@selected.usage)}</span>
+                            <button
+                              :if={Kiro.running?(@selected)}
+                              id="compact-context"
+                              type="button"
+                              phx-click="compact"
+                              phx-value-id={@selected.id}
+                              title="Ask Kiro to summarize the conversation so it takes less room"
+                              class="flex shrink-0 items-center gap-0.5 rounded px-1 text-error/80 hover:bg-error/10 hover:text-error"
+                            >
+                              <.icon name="hero-document-minus-mini" class="size-3.5" /> Compact
+                            </button>
+                          </p>
+                        </div>
+                      </div>
+                    </.prop>
+                    <.prop label="Prompt">
+                      <.link
+                        id="edit-context"
+                        patch={~p"/workflows/#{@selected.workflow_id}/agents/#{@selected.id}?prompt"}
+                        class="flex w-full items-center justify-between rounded-md px-1.5 py-1 hover:bg-base-content/[0.06]"
+                      >
+                        <span class={String.trim(@selected.prompt) == "" && "text-base-content/40"}>
+                          {prompt_summary(@selected.prompt)}
+                        </span>
+                        <span class="text-xs text-base-content/50">
+                          {if String.trim(@selected.prompt) == "", do: "Add", else: "Edit"}
+                        </span>
+                      </.link>
+                    </.prop>
+                    <.prop label="Hands off to">
+                      <div class="flex flex-wrap gap-1 px-1.5 py-0.5">
+                        <.agent_links agents={@neighbours.hands_off_to} />
+                      </div>
+                    </.prop>
+                    <.prop label="Receives from">
+                      <div class="flex flex-wrap gap-1 px-1.5 py-0.5">
+                        <.agent_links agents={@neighbours.receives_from} />
+                      </div>
+                    </.prop>
+                  </dl>
+                </div>
+
+                <div class="flex items-center justify-between border-t border-base-content/10 px-4 py-2">
+                  <span class="text-[11px] text-base-content/40">Saved automatically</span>
+                  <button
+                    id="delete-agent"
+                    type="button"
+                    phx-click="delete_agent"
+                    data-confirm={"Delete #{@selected.name} and its arrows?"}
+                    class="rounded-md px-1.5 py-1 text-xs text-base-content/45 hover:bg-error/10 hover:text-error"
+                  >
+                    Delete agent
+                  </button>
+                </div>
+              </.form>
+            </aside>
+
+            <.context_editor
+              :if={@selected && @editing_context}
+              agent={@selected}
+              form={@context_form}
+            />
+          </div>
+        </div>
+      </div>
+    </Layouts.app>
+    """
+  end
+
+  attr :agent, :map, required: true
+  attr :form, :any, required: true
+
+  # Editor for an agent's prompt, laid out like a file in a code editor.
+  defp context_editor(assigns) do
+    text = assigns.form[:prompt].value || ""
+
+    # The agent's own role first in the Templates menu.
+    kinds =
+      Enum.sort_by(FactoryWeb.AgentKinds.all(), fn {kind, _, _} -> kind != assigns.agent.kind end)
+
+    assigns =
+      assign(assigns,
+        kinds: kinds,
+        text: text,
+        chars: String.length(text),
+        lines: max(length(String.split(text, "\n")), 1),
+        dirty: text != (assigns.agent.prompt || ""),
+        close: JS.patch(agent_path(assigns.agent))
+      )
+
+    ~H"""
+    <div
+      id="context-editor"
+      class="absolute inset-0 z-40 flex items-center justify-center bg-black/50 p-3 sm:p-6"
+      phx-window-keydown={!@dirty && @close}
+      phx-key="Escape"
+    >
+      <.form
+        for={@form}
+        id="context-form"
+        phx-change="context_change"
+        phx-submit="save_context"
+        phx-click-away={!@dirty && @close}
+        class="flex h-full max-h-[760px] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-base-content/10 bg-surface shadow-2xl"
+      >
+        <header class="flex h-14 shrink-0 items-center gap-2 border-b border-base-content/10 pl-4 pr-3">
+          <.icon name={FactoryWeb.AgentKinds.icon(@agent.kind)} class="size-4 shrink-0 opacity-60" />
+          <p class="min-w-0 truncate text-xs">
+            <span class="text-base-content/60">{@agent.name}</span>
+            <span class="mx-1 text-base-content/30">/</span>
+            <span class="font-semibold">Prompt</span>
+          </p>
+          <span
+            :if={@dirty}
+            class="flex shrink-0 items-center gap-1.5 text-xs text-base-content/50"
+          >
+            <span class="size-1.5 rounded-full bg-amber-300/80"></span> Unsaved
+          </span>
+
+          <div class="ml-auto flex shrink-0 items-center gap-1.5">
+            <details
+              id="prompt-templates"
+              class="relative"
+              phx-click-away={JS.remove_attribute("open", to: "#prompt-templates")}
+            >
+              <summary class="flex h-8 cursor-pointer list-none items-center gap-1 rounded-lg px-2.5 text-xs text-base-content/70 hover:bg-base-content/[0.06] hover:text-base-content">
+                Templates <.icon name="hero-chevron-down-mini" class="size-4 opacity-60" />
+              </summary>
+              <div class="absolute right-0 z-10 mt-1 w-72 rounded-xl border border-base-content/10 bg-surface p-1 shadow-xl">
+                <p class="px-3 pb-1 pt-2 text-xs text-base-content/45">
+                  Replaces the current text
+                </p>
+                <button
+                  :for={{kind, label, icon} <- @kinds}
+                  type="button"
+                  phx-click={
+                    JS.dispatch("factory:fill",
+                      to: "#context-prompt",
+                      detail: %{text: FactoryWeb.AgentKinds.template(kind, @agent.name)}
+                    )
+                    |> JS.remove_attribute("open", to: "#prompt-templates")
+                  }
+                  class="flex w-full items-start gap-2.5 rounded-lg px-3 py-2 text-left hover:bg-base-content/[0.06]"
+                >
+                  <.icon name={icon} class="mt-0.5 size-4 shrink-0 opacity-60" />
+                  <span class="min-w-0 flex-1">
+                    <span class="flex items-center gap-1.5 text-[13px]">
+                      {label}
+                      <span
+                        :if={kind == @agent.kind}
+                        class="rounded bg-base-200 px-1 text-[10px] text-base-content/55"
+                      >
+                        this agent
+                      </span>
+                    </span>
+                    <span class="block text-[11px] text-base-content/50">
+                      {FactoryWeb.AgentKinds.blurb(kind)}
+                    </span>
+                  </span>
+                </button>
+              </div>
+            </details>
+            <.link
+              patch={agent_path(@agent)}
+              data-confirm={@dirty && "Discard your changes to #{@agent.name}'s prompt?"}
+              class="flex h-8 items-center rounded-lg px-3 text-xs text-base-content/70 hover:bg-base-content/[0.06] hover:text-base-content"
+            >
+              Cancel
+            </.link>
+            <button
+              type="submit"
+              class="flex h-8 items-center rounded-lg bg-base-content px-3.5 text-xs font-medium text-base-100 hover:opacity-90"
+            >
+              Save
+            </button>
+          </div>
+        </header>
+
+        <div class="relative min-h-0 flex-1 overflow-y-auto bg-base-200/40">
+          <div class="flex min-h-full">
+            <div
+              class="w-10 shrink-0 select-none border-r border-base-content/10 py-3.5 pr-2 text-right font-mono text-[10px] leading-[18px] text-base-content/25"
+              aria-hidden="true"
+            >
+              <div :for={n <- 1..@lines}>{n}</div>
+            </div>
+            <textarea
+              id="context-prompt"
+              name={@form[:prompt].name}
+              phx-hook="PromptEditor"
+              phx-debounce="150"
+              spellcheck="false"
+              aria-label={"#{@agent.name}'s prompt"}
+              class="block min-h-full w-full resize-none overflow-hidden bg-transparent px-4 py-3.5 font-mono text-[11px] leading-[18px] outline-none focus-visible:outline-none"
+            >{Phoenix.HTML.Form.normalize_value("textarea", @text)}</textarea>
+          </div>
+
+          <div
+            :if={String.trim(@text) == ""}
+            class="pointer-events-none absolute inset-0 flex items-center justify-center p-6"
+          >
+            <div class="max-w-sm text-center">
+              <p class="text-[13px] font-medium">Write how {@agent.name} should work</p>
+              <p class="mt-1.5 text-[11px] leading-[18px] text-base-content/55">
+                What it's responsible for, how it should work, and what it must never do.
+                Kiro reads this before your first message in each session.
+              </p>
+              <button
+                type="button"
+                phx-click={
+                  JS.dispatch("factory:fill",
+                    to: "#context-prompt",
+                    detail: %{text: FactoryWeb.AgentKinds.template(@agent.kind, @agent.name)}
+                  )
+                }
+                class="pointer-events-auto mt-4 inline-flex items-center gap-1.5 rounded-lg border border-base-content/15 bg-base-100 px-3 py-1.5 text-xs hover:bg-base-content/[0.06]"
+              >
+                <.icon name={FactoryWeb.AgentKinds.icon(@agent.kind)} class="size-4 opacity-70" />
+                Start from the {FactoryWeb.AgentKinds.label(@agent.kind)} template
+              </button>
+              <p class="mt-2 text-[11px] text-base-content/40">or just start typing</p>
+            </div>
           </div>
         </div>
 
-        <aside
-          :if={@selected}
-          id={"panel-#{@selected.id}"}
-          class="drawer-in rounded-box border border-base-300 bg-base-200 p-5 lg:w-[340px] lg:shrink-0"
+        <p
+          :for={{msg, _} <- @form[:prompt].errors}
+          class="border-t border-error/30 bg-error/10 px-4 py-2 text-xs text-error"
         >
-          <div class="flex items-start justify-between gap-3">
-            <div class="min-w-0">
-              <h2 class="truncate text-xl font-semibold tracking-tight">{@selected.name}</h2>
-              <Layouts.status_badge status={@selected.status} />
-            </div>
-            <.link
-              patch={~p"/workflows"}
-              class="grid size-8 place-items-center rounded-md text-base-content/55 hover:bg-base-300 hover:text-base-content"
-              aria-label="Close"
-            >
-              <.icon name="hero-x-mark-mini" class="size-5" />
-            </.link>
-          </div>
+          {msg}
+        </p>
 
-          <.form for={@form} id="agent-form" phx-change="save" phx-submit="save" class="mt-5">
-            <.input field={@form[:name]} label="Name" phx-debounce="300" />
-            <.input
-              field={@form[:role]}
-              label="Job"
-              placeholder="What this agent does"
-              phx-debounce="300"
-            />
-            <.input field={@form[:model]} type="select" label="Model" options={Agent.models()} />
-            <p class="-mt-1 text-xs text-base-content/50">Changes save automatically.</p>
-          </.form>
+        <footer class="flex h-9 shrink-0 items-center gap-4 border-t border-base-content/10 px-4 text-[10px] text-base-content/45">
+          <span>Markdown</span>
+          <span id="context-count" class="tabular-nums">
+            {@lines} {if @lines == 1, do: "line", else: "lines"}, {@chars} characters
+          </span>
+          <span class="hidden sm:inline">Saving restarts {@agent.name}'s Kiro</span>
+          <span class="ml-auto hidden sm:inline">⌘S to save</span>
+        </footer>
+      </.form>
+    </div>
+    """
+  end
 
-          <dl class="mt-5 divide-y divide-base-300 border-t border-base-300 text-sm">
-            <div class="flex justify-between gap-4 py-2.5">
-              <dt class="text-base-content/55">Hands off to</dt>
-              <dd class="flex flex-wrap justify-end gap-x-2">
-                <.agent_links agents={@neighbours.hands_off_to} />
-              </dd>
-            </div>
-            <div class="flex justify-between gap-4 py-2.5">
-              <dt class="text-base-content/55">Receives from</dt>
-              <dd class="flex flex-wrap justify-end gap-x-2">
-                <.agent_links agents={@neighbours.receives_from} />
-              </dd>
-            </div>
-          </dl>
+  attr :label, :string, required: true
+  slot :inner_block, required: true
 
-          <div class="mt-5 flex gap-2">
-            <button
-              phx-click="delete_agent"
-              data-confirm={"Delete #{@selected.name} and its arrows?"}
-              class="btn btn-sm btn-ghost text-error"
-            >
-              Delete agent
-            </button>
-          </div>
-        </aside>
+  # One row in the side panel: label on the left, value on the right.
+  defp prop(assigns) do
+    ~H"""
+    <div class="flex min-h-9 items-center gap-2">
+      <dt class="w-24 shrink-0 text-base-content/50">{@label}</dt>
+      <dd class="min-w-0 flex-1">{render_slot(@inner_block)}</dd>
+    </div>
+    """
+  end
+
+  attr :field, Phoenix.HTML.FormField, required: true
+  attr :options, :list, required: true
+
+  # A select that reads as plain text until hovered.
+  defp plain_select(assigns) do
+    ~H"""
+    <select
+      name={@field.name}
+      class="w-full cursor-pointer appearance-none truncate rounded-md border border-transparent bg-transparent px-1.5 py-1 outline-none hover:bg-base-content/[0.06] focus:border-base-content/25 focus-visible:outline-none"
+    >
+      {Phoenix.HTML.Form.options_for_select(@options, @field.value)}
+    </select>
+    """
+  end
+
+  defp prompt_summary(prompt) do
+    case String.trim(prompt || "") do
+      "" ->
+        "Not set"
+
+      text ->
+        case length(String.split(text, "\n")) do
+          1 -> "1 line"
+          n -> "#{n} lines"
+        end
+    end
+  end
+
+  attr :workflow, :map, required: true
+  attr :workflows, :list, required: true
+  attr :naming, :string, default: nil
+  attr :sources, :list, default: []
+
+  # Above the canvas: which workflow this is, a menu to pick another, and what to do with it.
+  defp workflow_bar(assigns) do
+    {standard, custom} = Enum.split_with(assigns.workflows, &Workflow.standard?/1)
+
+    assigns =
+      assign(assigns,
+        standard: standard,
+        custom: custom,
+        modified: Workflows.modified?(assigns.workflow)
+      )
+
+    ~H"""
+    <div
+      id="workflow-bar"
+      class="flex min-h-13 flex-wrap items-center gap-x-3 gap-y-2 border-b border-base-300 bg-base-100 px-4 py-2 sm:px-6"
+    >
+      <details
+        id="workflow-picker"
+        class="relative"
+        phx-click-away={JS.remove_attribute("open", to: "#workflow-picker")}
+      >
+        <summary class="flex cursor-pointer list-none items-center gap-2 rounded-lg border border-base-300 px-3 py-1.5 text-sm hover:border-base-content/25 [&::-webkit-details-marker]:hidden">
+          <.icon name="hero-squares-2x2-mini" class="size-4 text-base-content/50" />
+          <span class="text-base-content/55">Select workflow</span>
+          <.icon name="hero-chevron-down-mini" class="size-4 text-base-content/40" />
+        </summary>
+        <div class="absolute left-0 z-40 mt-1.5 w-80 rounded-xl border border-base-content/10 bg-surface p-1.5 shadow-xl">
+          <p class="px-2.5 pb-1 pt-1.5 text-[11px] font-medium uppercase tracking-wide text-base-content/45">
+            Standard
+          </p>
+          <.workflow_item :for={w <- @standard} w={w} open={w.id == @workflow.id} />
+          <p class="px-2.5 pb-1 pt-3 text-[11px] font-medium uppercase tracking-wide text-base-content/45">
+            Custom
+          </p>
+          <p :if={@custom == []} class="px-2.5 pb-2 text-xs text-base-content/50">
+            None yet. Make one, or clone a standard one to change it freely.
+          </p>
+          <.workflow_item :for={w <- @custom} w={w} open={w.id == @workflow.id} />
+        </div>
+      </details>
+
+      <div :if={@naming != "rename"} class="flex min-w-0 items-center gap-2">
+        <.icon
+          :if={@workflow.key}
+          name={type_icon(@workflow.key, :micro)}
+          class="size-4 shrink-0 text-primary"
+        />
+        <h1 id="workflow-name" class="truncate text-[15px] font-semibold">{@workflow.name}</h1>
+        <span
+          :if={@workflow.key}
+          class="rounded bg-base-content/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-base-content/60"
+        >
+          Standard
+        </span>
+        <span
+          :if={@modified}
+          id="workflow-modified"
+          class="rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-warning"
+        >
+          Modified
+        </span>
+        <span
+          :if={@workflow.current}
+          title="Plain chats talk to this workflow's agents"
+          class="rounded bg-success/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-success"
+        >
+          Used in chat
+        </span>
       </div>
-    </Layouts.app>
+
+      <form
+        :if={@naming in ["rename", "new"]}
+        id="workflow-name-form"
+        phx-submit={if @naming == "new", do: "wf_create", else: "wf_rename"}
+        phx-keydown="wf_naming"
+        phx-key="Escape"
+        phx-value-what=""
+        class="flex items-center gap-2"
+      >
+        <input
+          name="name"
+          value={if @naming == "rename", do: @workflow.name, else: ""}
+          placeholder="Workflow name"
+          maxlength="60"
+          phx-mounted={JS.focus()}
+          class="h-8 w-60 rounded-md border border-base-300 bg-base-100 px-2.5 text-sm outline-none focus:border-base-content/30"
+        />
+        <button class="btn btn-primary btn-xs">
+          {if @naming == "new", do: "Create", else: "Rename"}
+        </button>
+        <button type="button" phx-click="wf_naming" phx-value-what="" class="btn btn-ghost btn-xs">
+          Cancel
+        </button>
+      </form>
+
+      <div class="ml-auto flex flex-wrap items-center gap-1">
+        <.bar_button
+          :if={@naming == nil}
+          id="wf-rename"
+          event="wf_naming"
+          value="rename"
+          icon="hero-pencil-mini"
+        >
+          Rename
+        </.bar_button>
+        <.bar_button id="wf-clone" event="wf_clone" icon="hero-document-duplicate-mini">
+          Clone
+        </.bar_button>
+        <.bar_button
+          :if={@workflow.key}
+          id="wf-restore"
+          event="wf_restore"
+          icon="hero-arrow-uturn-left-mini"
+          confirm={"Restore “#{@workflow.name}” to its default? Its agents, prompts and arrows are replaced. Clone it first to keep your changes."}
+          disabled={!@modified}
+        >
+          Restore default
+        </.bar_button>
+        <.bar_button
+          :if={!@workflow.current}
+          id="wf-use"
+          event="wf_use"
+          icon="hero-chat-bubble-left-right-mini"
+        >
+          Use in chat
+        </.bar_button>
+        <.bar_button
+          :if={!@workflow.key}
+          id="wf-delete"
+          event="wf_delete"
+          icon="hero-trash-mini"
+          confirm={"Delete “#{@workflow.name}” and its agents?"}
+          danger
+        >
+          Delete
+        </.bar_button>
+        <span class="mx-1 h-5 w-px bg-base-300"></span>
+        <button
+          id="wf-new"
+          type="button"
+          phx-click="wf_naming"
+          phx-value-what="new"
+          class="btn btn-primary btn-sm"
+        >
+          <.icon name="hero-plus-mini" class="size-4" /> Add new workflow
+        </button>
+      </div>
+    </div>
+    """
+  end
+
+  attr :w, :map, required: true
+  attr :open, :boolean, required: true
+
+  defp workflow_item(assigns) do
+    ~H"""
+    <.link
+      patch={~p"/workflows/#{@w.id}"}
+      id={"pick-workflow-#{@w.id}"}
+      class={[
+        "flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm hover:bg-base-content/[0.06]",
+        @open && "bg-base-content/[0.06] font-medium"
+      ]}
+    >
+      <.icon :if={@w.key} name={type_icon(@w.key, :micro)} class="size-4 shrink-0 text-primary" />
+      <.icon :if={!@w.key} name="hero-squares-2x2-micro" class="size-4 shrink-0 text-base-content/45" />
+      <span class="min-w-0 flex-1 truncate">{@w.name}</span>
+      <span :if={@w.current} class="size-1.5 rounded-full bg-success" title="Used in chat"></span>
+      <span class="text-xs tabular-nums text-base-content/45">
+        {length(@w.agents)} {if length(@w.agents) == 1, do: "agent", else: "agents"}
+      </span>
+      <.icon :if={@open} name="hero-check-mini" class="size-4 text-base-content/60" />
+    </.link>
+    """
+  end
+
+  attr :id, :string, required: true
+  attr :event, :string, required: true
+  attr :value, :string, default: nil
+  attr :icon, :string, required: true
+  attr :confirm, :string, default: nil
+  attr :disabled, :boolean, default: false
+  attr :danger, :boolean, default: false
+  slot :inner_block, required: true
+
+  defp bar_button(assigns) do
+    ~H"""
+    <button
+      id={@id}
+      type="button"
+      phx-click={@event}
+      phx-value-what={@value}
+      data-confirm={@confirm}
+      disabled={@disabled}
+      class={[
+        "inline-flex h-8 items-center gap-1.5 rounded-md px-2.5 text-sm text-base-content/70 transition-colors hover:bg-base-content/[0.06] hover:text-base-content disabled:pointer-events-none disabled:opacity-40",
+        @danger && "hover:bg-error/10 hover:text-error"
+      ]}
+    >
+      <.icon name={@icon} class="size-4" />
+      {render_slot(@inner_block)}
+    </button>
     """
   end
 
@@ -220,7 +1546,13 @@ defmodule FactoryWeb.WorkflowsLive do
   defp agent_links(assigns) do
     ~H"""
     <span :if={@agents == []} class="text-base-content/40">None</span>
-    <.link :for={a <- @agents} patch={~p"/workflows/#{a.id}"} class="text-primary hover:underline">{a.name}</.link>
+    <.link
+      :for={a <- @agents}
+      patch={agent_path(a)}
+      class="rounded-md bg-base-200 px-1.5 py-0.5 text-xs hover:bg-base-300"
+    >
+      {a.name}
+    </.link>
     """
   end
 end

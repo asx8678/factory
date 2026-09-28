@@ -4,6 +4,7 @@
 @import "tailwindcss" source(none);
 @import "phoenix-colocated/factory/colocated.css";
 @import "../node_modules/@xyflow/svelte/dist/style.css";
+@import "../node_modules/highlight.js/styles/github-dark.css";
 @source "../css";
 @source "../js";
 @source "../svelte";
@@ -28,33 +29,35 @@
   default: false;
   prefersdark: true;
   color-scheme: "dark";
-  --color-base-100: oklch(30.33% 0.016 252.42);
-  --color-base-200: oklch(25.26% 0.014 253.1);
-  --color-base-300: oklch(20.15% 0.012 254.09);
-  --color-base-content: oklch(97.807% 0.029 256.847);
-  --color-primary: oklch(58% 0.233 277.117);
-  --color-primary-content: oklch(96% 0.018 272.314);
-  --color-secondary: oklch(58% 0.233 277.117);
-  --color-secondary-content: oklch(96% 0.018 272.314);
-  --color-accent: oklch(60% 0.25 292.717);
-  --color-accent-content: oklch(96% 0.016 293.756);
-  --color-neutral: oklch(37% 0.044 257.287);
-  --color-neutral-content: oklch(98% 0.003 247.858);
-  --color-info: oklch(58% 0.158 241.966);
-  --color-info-content: oklch(97% 0.013 236.62);
-  --color-success: oklch(60% 0.118 184.704);
-  --color-success-content: oklch(98% 0.014 180.72);
-  --color-warning: oklch(66% 0.179 58.318);
-  --color-warning-content: oklch(98% 0.022 95.277);
-  --color-error: oklch(58% 0.253 17.585);
-  --color-error-content: oklch(96% 0.015 12.422);
+  /* Surfaces get lighter as they rise: page, raised/hover, lines. Text is a soft
+     off-white, not pure white, and the accents are toned down to read on dark. */
+  --color-base-100: oklch(20.5% 0.008 264);
+  --color-base-200: oklch(23.8% 0.009 264);
+  --color-base-300: oklch(29.5% 0.01 264);
+  --color-base-content: oklch(90.5% 0.008 264);
+  --color-primary: oklch(63% 0.17 277);
+  --color-primary-content: oklch(98% 0.01 277);
+  --color-secondary: oklch(63% 0.17 277);
+  --color-secondary-content: oklch(98% 0.01 277);
+  --color-accent: oklch(66% 0.16 293);
+  --color-accent-content: oklch(98% 0.01 293);
+  --color-neutral: oklch(31% 0.012 264);
+  --color-neutral-content: oklch(92% 0.006 264);
+  --color-info: oklch(72% 0.11 237);
+  --color-info-content: oklch(20% 0.03 237);
+  --color-success: oklch(72% 0.1 172);
+  --color-success-content: oklch(20% 0.03 172);
+  --color-warning: oklch(79% 0.12 75);
+  --color-warning-content: oklch(22% 0.04 75);
+  --color-error: oklch(68% 0.16 20);
+  --color-error-content: oklch(98% 0.01 20);
   --radius-selector: 0.25rem;
   --radius-field: 0.25rem;
   --radius-box: 0.5rem;
   --size-selector: 0.21875rem;
   --size-field: 0.21875rem;
   --border: 1.5px;
-  --depth: 1;
+  --depth: 0;
   --noise: 0;
 }
 
@@ -93,6 +96,14 @@
   --noise: 0;
 }
 
+/* Cards that sit on a background (agents on the canvas, floating panels): white in
+   light mode, a step lighter than the page in dark mode. */
+@theme inline {
+  --color-surface: var(--surface);
+}
+:root, [data-theme="light"] { --surface: oklch(100% 0 0); }
+[data-theme="dark"] { --surface: oklch(24.5% 0.009 264); }
+
 @theme {
   --font-sans: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "Martian Mono", ui-monospace, "SF Mono", monospace;
@@ -113,6 +124,7 @@
 
 body {
   font-feature-settings: "tnum" 0;
+  background-color: var(--color-base-100);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -127,15 +139,15 @@ body {
 /* Svelte Flow, mapped onto the daisyUI theme colors */
 .svelte-flow {
   --xy-background-color: transparent;
-  --xy-background-pattern-color: color-mix(in oklab, var(--color-base-content) 18%, transparent);
-  --xy-edge-stroke: color-mix(in oklab, var(--color-base-content) 55%, transparent);
+  --xy-background-pattern-color: color-mix(in oklab, var(--color-base-content) 13%, transparent);
+  --xy-edge-stroke: color-mix(in oklab, var(--color-base-content) 38%, transparent);
   --xy-edge-stroke-selected: var(--color-primary);
   --xy-edge-stroke-width: 1.5;
   --xy-connectionline-stroke: var(--color-primary);
   --xy-connectionline-stroke-width: 1.5;
-  --xy-handle-background-color: var(--color-base-100);
+  --xy-handle-background-color: var(--color-surface);
   --xy-handle-border-color: color-mix(in oklab, var(--color-base-content) 50%, transparent);
-  --xy-controls-button-background-color: var(--color-base-100);
+  --xy-controls-button-background-color: var(--color-surface);
   --xy-controls-button-background-color-hover: var(--color-base-300);
   --xy-controls-button-color: var(--color-base-content);
   --xy-controls-button-border-color: var(--color-base-300);
@@ -154,12 +166,31 @@ body {
   height: 10px;
   border-width: 1.5px;
 }
+/* Connection dots only show when you might use them: hovering or selecting an agent,
+   or while drawing an arrow. Hidden dots still accept a dropped arrow. */
+.svelte-flow .svelte-flow__node-agent .svelte-flow__handle { opacity: 0; transition: opacity 0.15s; }
+.svelte-flow .svelte-flow__node-agent:hover .svelte-flow__handle,
+.svelte-flow .svelte-flow__node-agent.selected .svelte-flow__handle,
+.svelte-flow .svelte-flow__handle.connectingfrom,
+.svelte-flow .svelte-flow__handle.connectingto { opacity: 1; }
+/* A bigger invisible grab area around each circle, so dragging starts an arrow, not a move. */
+.svelte-flow .svelte-flow__node-agent .svelte-flow__handle::after { content: ""; position: absolute; inset: -9px; border-radius: 9999px; }
 .svelte-flow .svelte-flow__handle:hover,
 .svelte-flow .svelte-flow__handle.connectingto {
   background: var(--color-primary);
   border-color: var(--color-primary);
 }
 .svelte-flow__attribution { opacity: 0.5; }
+/* Data source cards and the dashed green arrows attaching them to agents. */
+.svelte-flow .svelte-flow__node-source { padding: 0; border: 0; background: none; }
+.svelte-flow .svelte-flow__node-source .svelte-flow__handle { opacity: 0; transition: opacity 0.15s; border-color: var(--color-success); }
+.svelte-flow .svelte-flow__node-source:hover .svelte-flow__handle,
+.svelte-flow .svelte-flow__handle.connectingfrom.source-handle { opacity: 1; }
+.svelte-flow .svelte-flow__node-source .svelte-flow__handle:hover { background: var(--color-success); }
+.svelte-flow .source-edge path.svelte-flow__edge-path {
+  stroke: color-mix(in oklab, var(--color-success) 70%, transparent);
+  stroke-dasharray: 6 5;
+}
 
 .drawer-in { animation: drawer-in 0.18s ease-out; }
 @keyframes drawer-in {
@@ -168,4 +199,99 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   .drawer-in { animation: none; }
+}
+
+/* Code inside running text. Martian Mono is wide and dark next to Instrument Sans,
+   so it is narrowed, lightened and set a little smaller, on a faint tint. */
+.code-inline, .md :not(pre) > code {
+  font-family: var(--font-mono);
+  font-size: 0.8em;
+  font-stretch: 80%;
+  font-weight: 350;
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  color: color-mix(in oklab, var(--color-base-content) 88%, transparent);
+  background: color-mix(in oklab, var(--color-base-content) 7%, transparent);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+/* A task card that is open or selected: a soft primary-to-info gradient on the
+   border (the gradient fills the border box, the card's own color the padding box),
+   with a faint glow under it. */
+.task-card-active {
+  --task-bg: color-mix(in oklab, var(--color-base-200) 55%, var(--color-base-100));
+  border-color: transparent;
+  background:
+    linear-gradient(var(--task-bg), var(--task-bg)) padding-box,
+    linear-gradient(
+      125deg,
+      color-mix(in oklab, var(--color-primary) 70%, transparent),
+      color-mix(in oklab, var(--color-info) 40%, transparent) 45%,
+      color-mix(in oklab, var(--color-base-content) 10%, transparent)
+    ) border-box;
+  box-shadow: 0 12px 32px -20px color-mix(in oklab, var(--color-primary) 55%, transparent);
+}
+/* A job on the start screen: a very light green wash when hovered or focused. */
+.job-card { transition: background-color 150ms, border-color 150ms, transform 150ms; }
+.job-card:hover, .job-card:focus-visible {
+  background-color: color-mix(in oklab, var(--color-success) 9%, var(--color-base-100));
+  border-color: color-mix(in oklab, var(--color-success) 35%, transparent);
+}
+.task-card-selected {
+  --task-bg: color-mix(in oklab, var(--color-primary) 7%, var(--color-base-100));
+}
+
+/* Rendered Markdown in chat replies */
+.md { font-size: 15px; line-height: 1.75; overflow-wrap: anywhere; }
+.md > * + * { margin-top: 0.85em; }
+.md h1, .md h2, .md h3, .md h4 { font-weight: 600; line-height: 1.3; letter-spacing: -0.01em; }
+.md h1 { font-size: 1.35em; margin-top: 1.4em; }
+.md h2 { font-size: 1.2em; margin-top: 1.3em; }
+.md h3, .md h4 { font-size: 1.05em; margin-top: 1.2em; }
+.md > :first-child { margin-top: 0; }
+.md ul { list-style: disc; padding-left: 1.4em; }
+.md ol { list-style: decimal; padding-left: 1.5em; }
+.md li + li { margin-top: 0.3em; }
+.md li::marker { color: color-mix(in oklab, var(--color-base-content) 45%, transparent); }
+/* Task lists (- [ ] …): the checkbox is the marker. */
+.md li:has(> input[type="checkbox"]) { list-style: none; margin-left: -1.4em; }
+.md li > input[type="checkbox"] { margin-right: 0.5em; vertical-align: -1px; }
+/* In a spaced-out task list the text is a paragraph: keep it beside its checkbox. */
+.md li:has(> input[type="checkbox"]) > p:first-of-type { display: inline; }
+.md strong { font-weight: 600; }
+.md a { color: var(--color-primary); text-decoration: underline; text-underline-offset: 2px; text-decoration-thickness: 1px; }
+.md hr { border-color: var(--color-base-300); }
+.md blockquote {
+  border-left: 3px solid var(--color-base-300);
+  padding-left: 1em;
+  color: color-mix(in oklab, var(--color-base-content) 70%, transparent);
+}
+.md table { width: 100%; border-collapse: collapse; font-size: 0.92em; display: block; overflow-x: auto; }
+.md th, .md td { border-bottom: 1px solid var(--color-base-300); padding: 0.5em 0.9em 0.5em 0; text-align: left; }
+.md th { font-weight: 600; }
+.md input[type="checkbox"] { margin-right: 0.4em; }
+
+/* Code blocks: always dark, with a header for the language and Copy */
+.md .code-frame { border-radius: 12px; overflow: hidden; background: #0d1117; border: 1px solid color-mix(in oklab, var(--color-base-content) 12%, transparent); }
+.md .code-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 8px 6px 14px; font-size: 12px; color: #9da7b3; background: #161b22;
+}
+.md .code-bar button { padding: 2px 8px; border-radius: 6px; color: #c9d1d9; }
+.md .code-bar button:hover { background: #30363d; }
+.md pre { margin: 0; overflow-x: auto; }
+.md pre code, .md pre code.hljs {
+  display: block; padding: 14px 16px; background: transparent;
+  font-family: var(--font-mono); font-size: 12.5px; line-height: 1.65; color: #e6edf3;
+}
+
+/* The chat's text box: a raised card like the others (see --color-surface). */
+.composer-box { background: var(--color-surface); }
+
+/* A spec step's text box while a file is dragged over it. */
+textarea.drop-active {
+  border-color: var(--color-primary);
+  border-style: dashed;
+  background-color: color-mix(in oklab, var(--color-primary) 5%, var(--color-base-100));
 }

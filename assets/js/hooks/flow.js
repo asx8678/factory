@@ -10,6 +10,7 @@ export const Flow = {
       props: {
         graph: JSON.parse(this.el.dataset.graph),
         readonly: this.el.dataset.readonly === "true",
+        viewKey: this.el.id,
         push: (event, payload) => this.pushEvent(event, payload),
       },
     })

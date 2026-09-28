@@ -32,6 +32,8 @@ defmodule FactoryWeb.Layouts do
     default: false,
     doc: "fill the window below the header, without page padding"
 
+  attr :usage, :map, default: nil, doc: "Kiro usage for the header, from FactoryWeb.UsageMeter"
+
   attr :current_scope, :map,
     default: nil,
     doc: "the current [scope](https://phoenix.hexdocs.pm/scopes.html)"
@@ -39,9 +41,12 @@ defmodule FactoryWeb.Layouts do
   slot :inner_block, required: true
 
   @menu [
-    {:chat, "Chat", "/"},
+    {:home, "Home", "/"},
+    {:chat, "Chat", "/chat"},
+    {:specs, "Specs", "/specs"},
     {:workflows, "Workflows", "/workflows"},
     {:runs, "Runs", "/runs"},
+    {:usage, "Usage", "/usage"},
     {:settings, "Settings", "/settings"}
   ]
 
@@ -97,6 +102,7 @@ defmodule FactoryWeb.Layouts do
                                                                                         do: "run",
                                                                                         else: "runs"}
           </.link>
+          <.usage_meter :if={@usage} usage={@usage} />
           <.theme_toggle />
         </div>
       </div>
@@ -110,6 +116,27 @@ defmodule FactoryWeb.Layouts do
     </main>
 
     <.flash_group flash={@flash} />
+    """
+  end
+
+  attr :usage, :map, required: true
+
+  # Credits (exact, from Kiro) and tokens (estimated) for today or the page's run/spec.
+  defp usage_meter(assigns) do
+    ~H"""
+    <.link
+      id="usage-meter"
+      navigate={~p"/usage"}
+      title={"#{FactoryWeb.UsageMeter.label(@usage.scope)}: #{@usage.calls} #{if @usage.calls == 1, do: "call", else: "calls"} to Kiro, #{FactoryWeb.UsageMeter.credits(@usage.credits)} credits, about #{FactoryWeb.UsageMeter.tokens(@usage.tokens)} tokens (estimated)"}
+      class="hidden items-center gap-2 rounded-full border border-base-content/10 px-3 py-1 text-xs tabular-nums text-base-content/70 transition-colors hover:border-base-content/25 hover:text-base-content sm:flex"
+    >
+      <span class="text-base-content/45">{FactoryWeb.UsageMeter.label(@usage.scope)}</span>
+      <span class="flex items-center gap-1">
+        <.icon name="hero-bolt-micro" class="size-3.5 text-warning/80" />
+        {FactoryWeb.UsageMeter.credits(@usage.credits)}
+      </span>
+      <span class="text-base-content/50">≈{FactoryWeb.UsageMeter.tokens(@usage.tokens)} tok</span>
+    </.link>
     """
   end
 
@@ -152,6 +179,16 @@ defmodule FactoryWeb.Layouts do
   def status_dot(s) when s in ["waiting", "paused"], do: "bg-warning"
   def status_dot("error"), do: "bg-error"
   def status_dot(_), do: "bg-base-content/30"
+
+  @doc "How long ago a time was. The server doesn't know the viewer's time zone, so no clock times."
+  def ago(time) do
+    case DateTime.diff(DateTime.utc_now(), time) do
+      s when s < 60 -> "just now"
+      s when s < 3600 -> "#{div(s, 60)} min ago"
+      s when s < 86_400 -> "#{div(s, 3600)} h ago"
+      s -> "#{div(s, 86_400)} d ago"
+    end
+  end
 
   attr :title, :string, required: true
   attr :subtitle, :string, default: nil

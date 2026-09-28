@@ -26,12 +26,16 @@ import {hooks as colocatedHooks} from "phoenix-colocated/factory"
 import topbar from "../vendor/topbar"
 import {Flow} from "./hooks/flow"
 import {ChatInput, ChatScroll} from "./hooks/chat"
+import {Markdown, copy} from "./hooks/markdown"
+import {PromptEditor} from "./hooks/prompt_editor"
+import {QuestionKeys} from "./hooks/question_keys"
+import {AutoDismiss} from "./hooks/auto_dismiss"
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks, Flow, ChatInput, ChatScroll},
+  hooks: {...colocatedHooks, Flow, ChatInput, ChatScroll, Markdown, PromptEditor, AutoDismiss, QuestionKeys},
 })
 
 // Show progress bar on live navigation and form submits
@@ -40,6 +44,20 @@ window.addEventListener("phx:page-loading-start", _info => topbar.show(300))
 window.addEventListener("phx:page-loading-stop", _info => topbar.hide())
 
 // connect if there are any LiveViews on the page
+// Copy buttons: phx-click={JS.dispatch("factory:copy", to: "#some-id")} copies that element's text.
+window.addEventListener("factory:copy", (e) => {
+  const button = e.detail?.button && document.getElementById(e.detail.button)?.querySelector("span")
+  copy(e.target.innerText, button)
+})
+
+// Template buttons: JS.dispatch("factory:fill", to: "#textarea", detail: %{text: ...}) replaces
+// the text box's content and tells LiveView it changed.
+window.addEventListener("factory:fill", (e) => {
+  e.target.value = e.detail.text
+  e.target.dispatchEvent(new Event("input", {bubbles: true}))
+  e.target.focus()
+})
+
 liveSocket.connect()
 
 // expose liveSocket on window for web console debug logs and latency simulation:

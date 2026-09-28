@@ -12,7 +12,7 @@ defmodule FactoryWeb.SettingsLive do
 
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} active={:settings}>
+    <Layouts.app flash={@flash} usage={@usage_meter} active={:settings}>
       <Layouts.page_title title="Settings" />
 
       <div class="grid gap-10 md:grid-cols-[12rem_minmax(0,1fr)]">

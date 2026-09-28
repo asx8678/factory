@@ -12,6 +12,15 @@ defmodule Factory.Application do
       Factory.Repo,
       {DNSCluster, query: Application.get_env(:factory, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Factory.PubSub},
+      {Registry, keys: :unique, name: Factory.Kiro.Registry},
+      {DynamicSupervisor, name: Factory.Kiro.Supervisor, strategy: :one_for_one},
+      {Task.Supervisor, name: Factory.TaskSupervisor},
+      # No Kiro session or review survives a restart: clear leftover context and statuses.
+      {Task,
+       fn ->
+         Factory.Agents.reset_sessions()
+         Factory.Specs.reset_reviews()
+       end},
       # Start a worker by calling: Factory.Worker.start_link(arg)
       # {Factory.Worker, arg},
       # Start to serve requests, typically the last entry

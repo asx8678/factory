@@ -4,11 +4,12 @@ defmodule Factory.Chat do
   out here in Elixir; plain-language messages get a pointer to /help until a
   model is connected.
   """
-  alias Factory.{Agents, Runs, Spec}
+  alias Factory.{Agents, Kiro, Runs, Spec}
   alias Factory.Runs.Run
 
   @commands [
     {"/help", "Show the commands"},
+    {"/ask", "Ask an agent on Kiro, e.g. /ask Coder what does mix.exs do?"},
     {"/run", "Start the run with the attached spec"},
     {"/status", "Show progress"},
     {"/tasks", "List the tasks"},
@@ -24,18 +25,36 @@ defmodule Factory.Chat do
   @doc """
   Posts the person's message, applies any attached spec files
   (`[{name, content}]`), then runs the command and posts the factory's reply.
-  """
-  def handle(%Run{} = run, text, files \\ []) do
-    text = String.trim(text)
-    Runs.post(run, "user", text, attachments: Enum.map(files, &elem(&1, 0)))
 
-    run = if files != [], do: attach(run, files), else: run
-    if text != "", do: command(run, text)
+  With `to: agent` the chat is focused on one agent: plain text goes straight
+  to that agent, and every reply is tagged with it so it shows in that agent's view.
+  """
+  def handle(%Run{} = run, text, files \\ [], opts \\ []) do
+    text = String.trim(text)
+    agent = opts[:to]
+    # "/ask Coder …" from the All view also belongs in Coder's own chat.
+    recipient = agent || asked_agent(run, text)
+    to_meta = if recipient, do: %{"to_agent_id" => recipient.id}, else: %{}
+    Runs.post(run, "user", text, attachments: Enum.map(files, &elem(&1, 0)), meta: to_meta)
+
+    tagged(agent, fn ->
+      run = if files != [], do: attach(run, files), else: run
+
+      cond do
+        text == "" -> :ok
+        agent && not String.starts_with?(text, "/") -> ask_agent(run, agent, text)
+        true -> command(run, text)
+      end
+    end)
+
     :ok
   end
 
   @doc "Runs a button action shown under a factory message."
   def action(%Run{} = run, "start"), do: command(run, "/run")
+
+  @doc "Attaches spec files (`[{name, content}]`) to a run and posts the tasks found in them."
+  def attach_spec(%Run{} = run, files), do: attach(run, files)
 
   defp attach(run, files) do
     case Spec.tasks_from_files(files) do
@@ -163,16 +182,36 @@ defmodule Factory.Chat do
     end
   end
 
+  defp run_command(run, "ask", args) do
+    agents = agents(run)
+
+    case match_agent(agents, args) do
+      nil ->
+        names = Enum.map_join(agents, ", ", & &1.name)
+
+        say(
+          run,
+          "Name the agent first, e.g. /ask #{List.first(agents, %{name: "Coder"}).name} hello. Agents: #{names}"
+        )
+
+      {agent, ""} ->
+        say(run, "What should I ask #{agent.name}? e.g. /ask #{agent.name} what can you do?")
+
+      {agent, question} ->
+        ask_agent(run, agent, question)
+    end
+  end
+
   defp run_command(run, "workflow", _) do
-    case Agents.list_agents() do
+    case agents(run) do
       [] ->
         say(run, "The workflow has no agents yet. Add them under Workflows.")
 
       agents ->
         say(
           run,
-          "Agents in the workflow:\n" <>
-            Enum.map_join(agents, "\n", &"• #{&1.name} (#{&1.model})")
+          "Agents in #{Factory.Workflows.for_run(run).name}:\n" <>
+            Enum.map_join(agents, "\n", &agent_line/1)
         )
     end
   end
@@ -180,7 +219,94 @@ defmodule Factory.Chat do
   defp run_command(run, name, _),
     do: say(run, "There's no /#{name} command. Type /help to see them.")
 
-  defp say(run, body, opts \\ []), do: Runs.post(run, "factory", body, opts)
+  # Sends a question to an agent's Kiro session; its reply is posted by the session.
+  defp ask_agent(run, agent, question) do
+    tagged(agent, fn ->
+      cond do
+        agent.runtime == nil ->
+          say(
+            run,
+            "#{agent.name} isn't connected to Kiro. In Workflows, select #{agent.name} and set Runs on to Kiro ACP (v3)."
+          )
+
+        true ->
+          case Kiro.prompt(agent, run.id, question) do
+            :ok ->
+              :ok
+
+            {:error, :busy} ->
+              say(run, "#{agent.name} is still answering. Try again when it's idle.")
+
+            {:error, reason} ->
+              say(run, "Couldn't start Kiro for #{agent.name}: #{inspect(reason)}")
+          end
+      end
+    end)
+  end
+
+  defp agent_line(%{runtime: "kiro_v3"} = a),
+    do: "• #{a.name}: Kiro v3, #{a.model}, #{a.kiro_mode} mode"
+
+  defp agent_line(a), do: "• #{a.name}: not connected"
+
+  # The agents this run's chat talks to: its workflow's (see Factory.Workflows.for_run/1).
+  # Action cards (commit, open a PR…) aren't agents to talk to.
+  defp agents(run) do
+    Factory.Workflows.for_run(run).id
+    |> Agents.list_agents()
+    |> Enum.reject(&Factory.Agents.Agent.action?/1)
+  end
+
+  defp asked_agent(run, "/ask " <> rest) do
+    case match_agent(agents(run), String.trim(rest)) do
+      {agent, _question} -> agent
+      nil -> nil
+    end
+  end
+
+  defp asked_agent(_run, _text), do: nil
+
+  # "/ask Agent 2 hello" -> the agent whose name the text starts with (longest name wins).
+  defp match_agent(agents, text) do
+    lower = String.downcase(text)
+
+    agents
+    |> Enum.filter(fn a ->
+      name = String.downcase(a.name)
+      lower == name or String.starts_with?(lower, name <> " ")
+    end)
+    |> Enum.max_by(&String.length(&1.name), fn -> nil end)
+    |> case do
+      nil -> nil
+      agent -> {agent, text |> String.slice(String.length(agent.name)..-1//1) |> String.trim()}
+    end
+  end
+
+  # Replies made while handling a message for one agent carry that agent's id,
+  # so the agent's focused chat shows them. Scoped to the current call.
+  defp tagged(nil, fun), do: fun.()
+
+  defp tagged(agent, fun) do
+    previous = Process.put(:chat_reply_agent, agent.id)
+
+    try do
+      fun.()
+    after
+      if previous,
+        do: Process.put(:chat_reply_agent, previous),
+        else: Process.delete(:chat_reply_agent)
+    end
+  end
+
+  defp say(run, body, opts \\ []) do
+    opts =
+      case Process.get(:chat_reply_agent) do
+        nil -> opts
+        id -> Keyword.update(opts, :meta, %{"agent_id" => id}, &Map.put(&1, "agent_id", id))
+      end
+
+    Runs.post(run, "factory", body, opts)
+  end
 
   defp names(files), do: files |> Enum.map(&elem(&1, 0)) |> Enum.join(", ")
   defp plural([_], word), do: word

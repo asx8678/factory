@@ -31,7 +31,8 @@ export const ChatScroll = {
     this.scroller = this.el.closest("[data-scroll]")
     this.toBottom()
     this.observer = new MutationObserver(() => this.toBottom())
-    this.observer.observe(this.el, { childList: true, subtree: true })
+    // Watch the whole scroll area: agent replies stream in below the message list.
+    this.observer.observe(this.scroller, { childList: true, subtree: true, characterData: true })
   },
   toBottom() {
     this.scroller.scrollTop = this.scroller.scrollHeight

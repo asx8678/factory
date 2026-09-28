@@ -17,11 +17,18 @@ defmodule FactoryWeb.Router do
   scope "/", FactoryWeb do
     pipe_through :browser
 
-    live "/", ChatLive
+    live "/", HomeLive
+    live "/new", NewRunLive
+    live "/chat", ChatLive
     live "/chat/:id", ChatLive
+    live "/specs", SpecsLive
+    live "/specs/:id", SpecLive
     live "/workflows", WorkflowsLive
-    live "/workflows/:id", WorkflowsLive
+    live "/workflows/:workflow_id", WorkflowsLive
+    live "/workflows/:workflow_id/agents/:id", WorkflowsLive
     live "/runs", RunsLive
+    live "/runs/:id", RunLive
+    live "/usage", UsageLive
     live "/settings", SettingsLive
   end
 

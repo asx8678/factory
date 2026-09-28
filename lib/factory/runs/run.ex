@@ -10,6 +10,15 @@ defmodule Factory.Runs.Run do
     field :status, :string, default: "draft"
     field :spec_files, {:array, :string}, default: []
     field :spec, :string
+    # A factory run's type ("feature", "bug", …, see Factory.Runs.Types); nil for a plain chat.
+    field :kind, :string
+    # What the person asked for, as they wrote it.
+    field :description, :string, default: ""
+    # How the factory works on it: workflow, setup, plan approval, project folder.
+    field :settings, :map, default: %{}
+    # Kiro's planning of the run: %{"status" => "writing" | "done" | "error", ...}.
+    field :plan, :map, default: %{}
+    belongs_to :spec_doc, Factory.Specs.Spec, foreign_key: :spec_id
     has_many :tasks, Factory.Runs.Task, preload_order: [asc: :position]
     has_many :messages, Factory.Runs.Message
 
@@ -18,7 +27,17 @@ defmodule Factory.Runs.Run do
 
   def changeset(run, attrs) do
     run
-    |> cast(attrs, [:title, :status, :spec_files, :spec])
+    |> cast(attrs, [
+      :title,
+      :status,
+      :spec_files,
+      :spec,
+      :spec_id,
+      :kind,
+      :description,
+      :settings,
+      :plan
+    ])
     |> update_change(:title, &String.trim/1)
     |> validate_required([:title])
     |> validate_length(:title, max: 80)

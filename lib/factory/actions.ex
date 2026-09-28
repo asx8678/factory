@@ -1,0 +1,529 @@
+defmodule Factory.Actions do
+  @moduledoc """
+  Actions: steps in a workflow that aren't agents. They sit between agents or after
+  them (an arrow into an action means "when that's done, do this"): commit and push,
+  open a pull request, update or close a ticket, send an email, post to Slack or
+  Teams, run a command that must pass.
+
+  An action is a workflow card with kind "action" (`Factory.Agents.Agent`); its
+  `action` field is `%{"type" => …, "config" => %{…}}`. Settings may use
+  placeholders: `{{run}}` (the run's title), `{{summary}}`, `{{branch}}`, `{{run_id}}`.
+
+  Tokens and webhook URLs are never stored: settings name environment variables,
+  read when the action runs. `plan/2` says exactly what an action would do (a dry
+  run); `run/2` does it.
+  """
+  alias Factory.Agents.Agent
+
+  # {type, label, group, what it does, fields}; a field is
+  # {key, label, input, placeholder or default, required?}. Inputs: :text, :textarea,
+  # :env (the name of an environment variable), {:select, options}.
+  @types [
+    {"git_push", "Commit & push", "Git & pull requests",
+     "Commit everything the agents changed and push the branch.",
+     [
+       {"branch", "Branch", :text, "factory/{{run_id}}", false},
+       {"message", "Commit message", :text, "{{run}}", true},
+       {"remote", "Remote", :text, "origin", false},
+       {"folder", "Folder", :text, "The run's project folder", false}
+     ]},
+    {"github_pr", "Create GitHub PR", "Git & pull requests",
+     "Open a pull request on GitHub for the pushed branch.",
+     [
+       {"repo", "Repository", :text, "owner/name", true},
+       {"head", "From branch", :text, "{{branch}}", true},
+       {"base", "Into branch", :text, "main", true},
+       {"title", "Title", :text, "{{run}}", true},
+       {"body", "Description", :textarea, "{{summary}}", false},
+       {"token_env", "Token variable", :env, "GITHUB_TOKEN", true}
+     ]},
+    {"azure_pr", "Create Azure DevOps PR", "Git & pull requests",
+     "Open a pull request in an Azure DevOps repository.",
+     [
+       {"org", "Organization", :text, "contoso", true},
+       {"project", "Project", :text, "Shop", true},
+       {"repo", "Repository", :text, "backend", true},
+       {"source", "From branch", :text, "{{branch}}", true},
+       {"target", "Into branch", :text, "main", true},
+       {"title", "Title", :text, "{{run}}", true},
+       {"description", "Description", :textarea, "{{summary}}", false},
+       {"pat_env", "Token variable", :env, "AZURE_DEVOPS_PAT", true}
+     ]},
+    {"azure_item_update", "Update Azure DevOps ticket", "Tickets",
+     "Move a work item to a new state and add a comment.",
+     [
+       {"org", "Organization", :text, "contoso", true},
+       {"project", "Project", :text, "Shop", true},
+       {"item", "Work item id", :text, "1234", true},
+       {"state", "New state", :text, "Active, Resolved…", false},
+       {"comment", "Comment", :textarea, "Factory: {{summary}}", false},
+       {"pat_env", "Token variable", :env, "AZURE_DEVOPS_PAT", true}
+     ]},
+    {"azure_item_close", "Close Azure DevOps ticket", "Tickets",
+     "Close a work item when the job is done, with a comment.",
+     [
+       {"org", "Organization", :text, "contoso", true},
+       {"project", "Project", :text, "Shop", true},
+       {"item", "Work item id", :text, "1234", true},
+       {"state", "Closed state", :text, "Closed", true},
+       {"comment", "Comment", :textarea, "Done by Factory: {{run}}", false},
+       {"pat_env", "Token variable", :env, "AZURE_DEVOPS_PAT", true}
+     ]},
+    {"github_issue", "Update GitHub issue", "Tickets",
+     "Comment on a GitHub issue, and close it if you like.",
+     [
+       {"repo", "Repository", :text, "owner/name", true},
+       {"issue", "Issue number", :text, "42", true},
+       {"comment", "Comment", :textarea, "Factory: {{summary}}", false},
+       {"close", "Close it", {:select, ["no", "yes"]}, "no", false},
+       {"token_env", "Token variable", :env, "GITHUB_TOKEN", true}
+     ]},
+    {"email", "Send email", "Notify", "Email someone when this point is reached.",
+     [
+       {"to", "To", :text, "team@example.com", true},
+       {"subject", "Subject", :text, "Factory: {{run}}", true},
+       {"body", "Message", :textarea, "{{summary}}", true},
+       {"from", "From", :text, "factory@localhost", false}
+     ]},
+    {"webhook", "Slack or Teams message", "Notify",
+     "Post a message to a Slack or Microsoft Teams channel webhook.",
+     [
+       {"url_env", "Webhook URL variable", :env, "SLACK_WEBHOOK_URL", true},
+       {"text", "Message", :textarea, "Factory finished {{run}}", true}
+     ]},
+    {"api_request", "API request", "API",
+     "Call any HTTP API: GET, POST, PUT, PATCH or DELETE, with headers and a JSON body.",
+     [
+       {"method", "Method", {:select, ["POST", "GET", "PUT", "PATCH", "DELETE"]}, "POST", true},
+       {"url", "URL", :text, "https://api.example.com/deploys", true},
+       {"headers", "Headers", :textarea, "One per line, e.g. X-Team: platform", false},
+       {"body", "Body", :textarea, ~s({"run": "{{run}}", "summary": "{{summary}}"}), false},
+       {"token_env", "Token variable", :text, "Optional: sent as Authorization: Bearer", false}
+     ]},
+    {"command", "Run a command", "Checks",
+     "Run a command, like the tests; the run only goes on if it succeeds.",
+     [
+       {"command", "Command", :text, "mix test", true},
+       {"folder", "Folder", :text, "The run's project folder", false}
+     ]}
+  ]
+
+  @doc "Every action type: `%{type:, label:, group:, blurb:, fields:}`."
+  def types do
+    for {type, label, group, blurb, fields} <- @types,
+        do: %{type: type, label: label, group: group, blurb: blurb, fields: fields}
+  end
+
+  def get(type), do: Enum.find(types(), &(&1.type == type))
+
+  def label(%Agent{action: %{"type" => type}}), do: label(type)
+  def label(type) when is_binary(type), do: (get(type) || %{label: "Action"}).label
+
+  @doc "A new action's settings: every field with a default (placeholder text isn't one)."
+  def defaults(type) do
+    for {key, _, input, default, _} <- get(type).fields,
+        default?(key, input, default),
+        into: %{},
+        do: {key, default}
+  end
+
+  # Examples ("contoso", "owner/name", "The run's …") aren't defaults; templates are.
+  defp default?(_key, :env, _), do: true
+  defp default?(_key, {:select, _}, _), do: true
+
+  defp default?(key, _, default),
+    do:
+      key in ~w(message remote branch head source title body description comment subject text state base target) and
+        (String.contains?(default, "{{") or default in ["origin", "main", "Closed"])
+
+  @doc "Required settings that are still empty."
+  def missing(%Agent{action: %{"type" => type} = action}) do
+    config = action["config"] || %{}
+
+    for {key, label, _, _, true} <- get(type).fields,
+        String.trim(to_string(config[key] || "")) == "",
+        do: label
+  end
+
+  def missing(_), do: ["Type"]
+
+  @doc "Fills `{{run}}`, `{{summary}}`, `{{branch}}` and `{{run_id}}` from the context."
+  def render(text, ctx) do
+    Regex.replace(~r/\{\{\s*(\w+)\s*\}\}/, to_string(text || ""), fn whole, key ->
+      case ctx[key] do
+        nil -> whole
+        value -> to_string(value)
+      end
+    end)
+  end
+
+  @doc """
+  The context an action runs in. Outside a run (trying it from the Workflows page)
+  it uses sample values, so templates still read sensibly.
+  """
+  def context(run \\ nil) do
+    base = %{
+      "run" => "Factory test run",
+      "run_id" => "test",
+      "summary" => "Test from the Workflows page.",
+      "folder" => Factory.Kiro.config(:workspace)
+    }
+
+    ctx =
+      case run do
+        nil ->
+          base
+
+        run ->
+          %{
+            base
+            | "run" => run.title,
+              "run_id" => to_string(run.id),
+              "summary" => "Factory run “#{run.title}”.",
+              "folder" => run.settings["project_dir"] || base["folder"]
+          }
+      end
+
+    Map.put(ctx, "branch", "factory/#{ctx["run_id"]}")
+  end
+
+  # What each action does, as steps: {:cmd, folder, args, label} or
+  # {:http, method, url, headers, body, label} or {:email, email, label}.
+
+  @doc "Says what the action would do, without doing it: `{:ok, [line]}` or `{:error, reason}`."
+  def plan(%Agent{} = action, ctx \\ context()) do
+    with {:ok, steps} <- steps(action, ctx, :plan) do
+      {:ok, Enum.map(steps, &describe/1)}
+    end
+  end
+
+  @doc "Does the action: `{:ok, what happened}` or `{:error, reason}`."
+  def run(%Agent{} = action, ctx \\ context()) do
+    with {:ok, steps} <- steps(action, ctx, :run) do
+      Enum.reduce_while(steps, {:ok, []}, fn step, {:ok, done} ->
+        case perform(step) do
+          {:ok, out} -> {:cont, {:ok, done ++ [out]}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+      |> case do
+        {:ok, lines} -> {:ok, lines |> Enum.reject(&(&1 in [nil, ""])) |> Enum.join("\n")}
+        error -> error
+      end
+    end
+  end
+
+  defp steps(%Agent{action: %{"type" => type} = action} = card, ctx, mode) do
+    c = Map.new(action["config"] || %{}, fn {k, v} -> {k, render(v, ctx)} end)
+
+    case missing(card) do
+      [] -> build(type, c, ctx, mode)
+      labels -> {:error, "Fill in: #{Enum.join(labels, ", ")}."}
+    end
+  end
+
+  defp steps(_card, _ctx, _mode), do: {:error, "This card has no action type."}
+
+  defp build("git_push", c, ctx, _mode) do
+    folder = folder(c, ctx)
+    remote = blank(c["remote"]) || "origin"
+    branch = blank(c["branch"])
+
+    {:ok,
+     if(branch,
+       do: [{:cmd, folder, ["checkout", "-B", branch], "Switch to branch #{branch}"}],
+       else: []
+     ) ++
+       [
+         {:cmd, folder, ["add", "-A"], "Stage every change"},
+         {:cmd, folder, ["commit", "-m", c["message"]], "Commit: #{c["message"]}"},
+         {:cmd, folder, ["push", "-u", remote, branch || "HEAD"], "Push to #{remote}"}
+       ]}
+  end
+
+  defp build("github_pr", c, _ctx, mode) do
+    with {:ok, token} <- env(c["token_env"], mode) do
+      {:ok,
+       [
+         {:http, :post, "https://api.github.com/repos/#{c["repo"]}/pulls", github(token),
+          %{title: c["title"], head: c["head"], base: c["base"], body: c["body"] || ""},
+          "Open a pull request on #{c["repo"]}: #{c["head"]} → #{c["base"]}, “#{c["title"]}”"}
+       ]}
+    end
+  end
+
+  defp build("azure_pr", c, _ctx, mode) do
+    with {:ok, pat} <- env(c["pat_env"], mode) do
+      url =
+        "#{azure_base(c)}/_apis/git/repositories/#{enc(c["repo"])}/pullrequests?api-version=7.1"
+
+      {:ok,
+       [
+         {:http, :post, url, azure(pat),
+          %{
+            sourceRefName: "refs/heads/#{c["source"]}",
+            targetRefName: "refs/heads/#{c["target"]}",
+            title: c["title"],
+            description: c["description"] || ""
+          },
+          "Open a pull request in #{c["org"]}/#{c["project"]}/#{c["repo"]}: #{c["source"]} → #{c["target"]}, “#{c["title"]}”"}
+       ]}
+    end
+  end
+
+  defp build(type, c, _ctx, mode) when type in ["azure_item_update", "azure_item_close"] do
+    with {:ok, pat} <- env(c["pat_env"], mode) do
+      ops =
+        [
+          blank(c["state"]) && %{op: "add", path: "/fields/System.State", value: c["state"]},
+          blank(c["comment"]) && %{op: "add", path: "/fields/System.History", value: c["comment"]}
+        ]
+        |> Enum.filter(& &1)
+
+      what =
+        [
+          blank(c["state"]) && "set state to #{c["state"]}",
+          blank(c["comment"]) && "add a comment"
+        ]
+        |> Enum.filter(& &1)
+        |> Enum.join(" and ")
+
+      if ops == [] do
+        {:error, "Give a new state or a comment."}
+      else
+        {:ok,
+         [
+           {:http, :patch,
+            "#{azure_base(c)}/_apis/wit/workitems/#{enc(c["item"])}?api-version=7.1",
+            [{"content-type", "application/json-patch+json"} | azure(pat)], ops,
+            "Work item #{c["item"]} in #{c["org"]}/#{c["project"]}: #{what}"}
+         ]}
+      end
+    end
+  end
+
+  defp build("github_issue", c, _ctx, mode) do
+    with {:ok, token} <- env(c["token_env"], mode) do
+      base = "https://api.github.com/repos/#{c["repo"]}/issues/#{c["issue"]}"
+
+      steps =
+        [
+          blank(c["comment"]) &&
+            {:http, :post, "#{base}/comments", github(token), %{body: c["comment"]},
+             "Comment on #{c["repo"]}##{c["issue"]}"},
+          c["close"] == "yes" &&
+            {:http, :patch, base, github(token), %{state: "closed"},
+             "Close #{c["repo"]}##{c["issue"]}"}
+        ]
+        |> Enum.filter(& &1)
+
+      if steps == [], do: {:error, "Write a comment or choose to close it."}, else: {:ok, steps}
+    end
+  end
+
+  defp build("email", c, _ctx, _mode) do
+    email =
+      Swoosh.Email.new(
+        to: c["to"] |> String.split(~r/[,;\s]+/, trim: true),
+        from: blank(c["from"]) || "factory@localhost",
+        subject: c["subject"],
+        text_body: c["body"]
+      )
+
+    {:ok, [{:email, email, "Email #{c["to"]}: “#{c["subject"]}”"}]}
+  end
+
+  defp build("webhook", c, _ctx, mode) do
+    with {:ok, url} <- env(c["url_env"], mode) do
+      {:ok,
+       [
+         {:http, :post, url, [], %{text: c["text"]},
+          "Post to the webhook in $#{c["url_env"]}: “#{c["text"]}”"}
+       ]}
+    end
+  end
+
+  defp build("api_request", c, _ctx, mode) do
+    method = c["method"] |> to_string() |> String.downcase()
+    method = if method in ~w(get post put patch delete), do: String.to_atom(method), else: :post
+
+    with {:ok, auth} <- api_auth(blank(c["token_env"]), mode) do
+      headers = api_headers(c["headers"]) ++ auth
+
+      body =
+        case {method, blank(c["body"])} do
+          {m, _} when m in [:get, :delete] -> nil
+          {_, nil} -> nil
+          {_, text} -> api_body(text)
+        end
+
+      {:ok,
+       [
+         {:http, method, c["url"], headers, body,
+          "#{String.upcase(to_string(method))} #{c["url"]}"}
+       ]}
+    end
+  end
+
+  defp build("command", c, ctx, _mode),
+    do: {:ok, [{:sh, folder(c, ctx), c["command"], "Run `#{c["command"]}` (must succeed)"}]}
+
+  defp build(type, _c, _ctx, _mode), do: {:error, "Factory doesn't know the action “#{type}”."}
+
+  defp folder(c, ctx) do
+    case blank(c["folder"]) do
+      nil -> ctx["folder"]
+      f -> Path.expand(f)
+    end
+  end
+
+  # A token or URL from the environment. A dry run only says which variable it reads.
+  defp env(var, :plan), do: {:ok, "$#{var}"}
+
+  defp env(var, :run) do
+    case System.get_env(to_string(var)) do
+      nil -> {:error, "The environment variable #{var} isn't set. Set it and restart Factory."}
+      "" -> {:error, "The environment variable #{var} is empty."}
+      value -> {:ok, value}
+    end
+  end
+
+  defp api_auth(nil, _mode), do: {:ok, []}
+
+  defp api_auth(var, mode) do
+    with {:ok, token} <- env(var, mode), do: {:ok, [{"authorization", "Bearer #{token}"}]}
+  end
+
+  # "Name: value" per line.
+  defp api_headers(text) do
+    for line <- String.split(to_string(text || ""), ~r/\R/u, trim: true),
+        [name, value] <- [String.split(line, ":", parts: 2)],
+        String.trim(name) != "",
+        do: {String.downcase(String.trim(name)), String.trim(value)}
+  end
+
+  # JSON when it parses as JSON; otherwise sent as text.
+  defp api_body(text) do
+    case JSON.decode(text) do
+      {:ok, data} -> data
+      {:error, _} -> {:raw, text}
+    end
+  end
+
+  defp github(token),
+    do: [
+      {"authorization", "Bearer #{token}"},
+      {"accept", "application/vnd.github+json"},
+      {"x-github-api-version", "2022-11-28"}
+    ]
+
+  defp azure(pat), do: [{"authorization", "Basic " <> Base.encode64(":" <> pat)}]
+
+  defp azure_base(c), do: "https://dev.azure.com/#{enc(c["org"])}/#{enc(c["project"])}"
+  defp enc(s), do: URI.encode(String.trim(to_string(s)), &URI.char_unreserved?/1)
+
+  defp blank(v) do
+    case String.trim(to_string(v || "")) do
+      "" -> nil
+      s -> s
+    end
+  end
+
+  defp describe({:cmd, folder, args, label}),
+    do: "#{label}: git #{Enum.join(args, " ")} (in #{folder})"
+
+  defp describe({:sh, folder, _cmd, label}), do: "#{label} in #{folder}"
+
+  defp describe({:http, method, url, _h, _b, label}),
+    do:
+      "#{label} (#{method |> to_string() |> String.upcase()} #{url |> String.split("?") |> hd()})"
+
+  defp describe({:email, _email, label}), do: label
+
+  # Doing it
+
+  defp perform({:cmd, folder, args, label}) do
+    case System.cmd("git", args,
+           cd: folder,
+           stderr_to_stdout: true,
+           env: [{"GIT_TERMINAL_PROMPT", "0"}]
+         ) do
+      {_, 0} ->
+        {:ok, label}
+
+      {out, _} ->
+        if out =~ "nothing to commit",
+          do: {:ok, "Nothing to commit"},
+          else: {:error, "#{label} failed: #{tail(out)}"}
+    end
+  rescue
+    e -> {:error, "#{label} failed: #{Exception.message(e)}"}
+  end
+
+  defp perform({:sh, folder, command, label}) do
+    task =
+      Task.async(fn -> System.cmd("sh", ["-c", command], cd: folder, stderr_to_stdout: true) end)
+
+    case Task.yield(task, 600_000) || Task.shutdown(task) do
+      {:ok, {out, 0}} -> {:ok, "#{label}: passed\n#{tail(out)}"}
+      {:ok, {out, code}} -> {:error, "`#{command}` failed (exit #{code}):\n#{tail(out)}"}
+      nil -> {:error, "`#{command}` took over 10 minutes and was stopped."}
+    end
+  rescue
+    e -> {:error, "#{label} failed: #{Exception.message(e)}"}
+  end
+
+  defp perform({:http, method, url, headers, body, label}) do
+    payload =
+      case body do
+        nil -> []
+        {:raw, text} -> [body: text]
+        data -> [json: data]
+      end
+
+    opts = [method: method, url: url, headers: headers, retry: false] ++ payload
+    opts = Keyword.merge(opts, Application.get_env(:factory, :actions_req_options, []))
+
+    case Req.request(opts) do
+      {:ok, %{status: status, body: resp}} when status in 200..299 ->
+        link =
+          is_map(resp) &&
+            (resp["html_url"] || get_in(resp, ["_links", "web", "href"]) || resp["url"])
+
+        {:ok,
+         cond do
+           is_binary(link) ->
+             "#{label}: #{link}"
+
+           method in [:get] or label =~ ~r/^(GET|POST|PUT|PATCH|DELETE) / ->
+             "#{label}: HTTP #{status}\n#{preview(resp)}"
+
+           true ->
+             label
+         end}
+
+      {:ok, %{status: status, body: resp}} ->
+        {:error, "#{label} failed (HTTP #{status}): #{error_text(resp)}"}
+
+      {:error, e} ->
+        {:error, "#{label} failed: #{Exception.message(e)}"}
+    end
+  end
+
+  defp perform({:email, email, label}) do
+    case Factory.Mailer.deliver(email) do
+      {:ok, _} -> {:ok, label}
+      {:error, reason} -> {:error, "#{label} failed: #{inspect(reason)}"}
+    end
+  end
+
+  defp preview(""), do: ""
+  defp preview(body) when is_binary(body), do: String.slice(body, 0, 400)
+  defp preview(body), do: body |> JSON.encode!() |> String.slice(0, 400)
+
+  defp error_text(%{"message" => m}), do: m
+  defp error_text(body) when is_binary(body), do: tail(body)
+  defp error_text(body), do: body |> inspect() |> tail()
+
+  defp tail(text), do: text |> to_string() |> String.trim() |> String.slice(-500, 500)
+end
