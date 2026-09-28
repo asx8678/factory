@@ -24,11 +24,11 @@ defmodule FactoryWeb.WorkflowsPageTest do
     refute has_element?(view, "#workflow-modified")
     assert ["Investigator" | _] = Enum.map(Workflows.steps(bug), & &1["name"])
 
-    # Clone opens the copy, which can be used in chat and deleted.
+    # Clone opens the copy, which becomes the workflow used everywhere, and can be deleted.
     view |> element("#wf-clone") |> render_click()
     copy = Enum.find(Workflows.list(), &(&1.name == "Fix a bug (copy)"))
     assert_patch(view, ~p"/workflows/#{copy.id}")
-    view |> element("#wf-use") |> render_click()
+    render(view)
     assert Workflows.current().id == copy.id
     view |> element("#wf-delete") |> render_click()
     assert_redirect(view, ~p"/workflows")
@@ -45,15 +45,6 @@ defmodule FactoryWeb.WorkflowsPageTest do
     # New agents land in the open workflow.
     render_hook(view, "add_agent", %{"x" => 0, "y" => 0})
     assert [_] = Agents.list_agents(docs.id)
-  end
-
-  test "the start screen shows each job's workflow as it is now", %{conn: conn} do
-    bug = Workflows.standard("bug")
-    [investigator | _] = Workflows.ordered_agents(bug.id)
-    {:ok, _} = Agents.update_agent(investigator, %{name: "Detective"})
-
-    {:ok, _view, html} = live(conn, ~p"/")
-    assert html =~ "Detective"
   end
 
   test "actions are added from the palette and set up in their own panel", %{conn: conn} do

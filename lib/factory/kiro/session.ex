@@ -14,24 +14,42 @@ defmodule Factory.Kiro.Session do
   Text streams to the run's chat as it arrives; a turn ends when Kiro answers the
   prompt request with a `stopReason`.
 
-  Permission policy for now: every request to write files or run commands is
-  denied and noted in the reply.
+  Permissions: when Kiro asks to use a tool, the answering agent's kind decides
+  (`Factory.Agents.Agent.tools/1`, the same as in a run). A denied request is noted
+  in the reply.
+
+  Context: the session keeps its own log of every turn (the message, the tools Kiro
+  used and how they went, the reply or error). When Kiro reports the context at
+  `Factory.Context.config(:compact_at)` percent or more, before the next message, or
+  when asked (`compact/1`), the log is compacted by `Factory.Context.compact/2` (fixed
+  rules, no model) and Kiro starts a fresh session with that in front of the next
+  message. Agents' prompts go again with their next message. A note in the chat says
+  what was kept (see `notice/3`).
   """
   use GenServer, restart: :temporary
   require Logger
   alias Factory.{Agents, Kiro, Runs}
+  alias Factory.Agents.Agent
 
   @doc "`key` is `:shared` or an agent id; `workdir` is the folder Kiro works in."
   def start_link({key, workdir}),
-    do: GenServer.start_link(__MODULE__, {key, workdir}, name: via(key))
+    do: GenServer.start_link(__MODULE__, {key, workdir}, name: via(key, workdir))
 
-  defp via(key), do: {:via, Registry, {Factory.Kiro.Registry, key}}
+  # Registered with the folder it works in, so `Factory.Kiro` can tell which one.
+  defp via(key, workdir), do: {:via, Registry, {Factory.Kiro.Registry, key, workdir}}
+
+  @doc "Whether the session is ready with nothing to answer."
+  def idle?(pid), do: GenServer.call(pid, :idle?)
 
   @doc "Queues a message from `agent`; the reply is posted to the run."
   def prompt(pid, agent, run_id, text), do: GenServer.call(pid, {:prompt, agent, run_id, text})
 
-  @doc "Asks Kiro to compact (summarize) this session's context. Not while it is answering."
-  def compact(pid), do: GenServer.call(pid, :compact)
+  @doc """
+  Compacts this session's conversation now (see the moduledoc). Not while it is
+  answering. `{:error, :no_gain}` when the result wouldn't be smaller. The note goes to
+  the chat `run_id`, else to the chat of the last turn.
+  """
+  def compact(pid, run_id \\ nil), do: GenServer.call(pid, {:compact, run_id})
 
   @doc "Sends the agent's prompt again before its next message (after it was edited)."
   def forget(pid, agent_id), do: GenServer.cast(pid, {:forget, agent_id})
@@ -61,7 +79,14 @@ defmodule Factory.Kiro.Session do
     # latest context use in this session: %{pct:, window:}
     context: %{},
     # running totals per agent id, saved to the agent's usage after each turn
-    usage: %{}
+    usage: %{},
+    # every turn so far, newest first, as `Factory.Context.Projections` describes events
+    log: [],
+    seq: 0,
+    # the compacted conversation, to go in front of the next message
+    carry: nil,
+    # the chat of the latest turn, where a compaction is noted when no other is given
+    last_run: nil
   ]
 
   # A message waiting to be sent: who, where the reply goes, what they said.
@@ -71,7 +96,18 @@ defmodule Factory.Kiro.Session do
 
   # A turn in progress: the job, what Kiro has said so far, tools it asked for.
   defmodule Turn do
-    defstruct [:agent, :run_id, :started, input_tokens: 0, text: "", denied: [], credits: nil]
+    defstruct [
+      :agent,
+      :run_id,
+      :started,
+      :ask,
+      input_tokens: 0,
+      text: "",
+      denied: [],
+      credits: nil,
+      # tools Kiro used, in order: %{call_id:, tool:, title:, paths:, outcome:}
+      tools: []
+    ]
   end
 
   @impl true
@@ -93,15 +129,18 @@ defmodule Factory.Kiro.Session do
         fail(state, "kiro-cli wasn't found at #{Kiro.config(:cli)}.")
 
       true ->
-        log_name = if state.key == :shared, do: "shared.log", else: "agent-#{state.key}.log"
-        port = Kiro.open_port(state.workdir, log_name)
-
-        state = %{state | port: port}
         # Cards show whether a session is running.
         Agents.notify_changed()
-        params = %{protocolVersion: 1, clientCapabilities: %{}}
-        {:noreply, request(state, "initialize", params, :initialize)}
+        {:noreply, open(state)}
     end
+  end
+
+  # Starts kiro-cli and opens a Kiro session in it (answered in handle_message/2).
+  defp open(state) do
+    log_name = if state.key == :shared, do: "shared.log", else: "agent-#{state.key}.log"
+    port = Kiro.open_port(state.workdir, log_name)
+    params = %{protocolVersion: 1, clientCapabilities: %{}}
+    request(%{state | port: port}, "initialize", params, :initialize)
   end
 
   @impl true
@@ -116,7 +155,12 @@ defmodule Factory.Kiro.Session do
     {:reply, :ok, next(%{state | queue: state.queue ++ [job]})}
   end
 
-  def handle_call(:compact, _from, state) do
+  def handle_call(:idle?, _from, state),
+    do:
+      {:reply, state.ready and state.turn == nil and state.switching == nil and state.queue == [],
+       state}
+
+  def handle_call({:compact, run_id}, _from, state) do
     cond do
       not state.ready ->
         {:reply, {:error, :starting}, state}
@@ -125,10 +169,10 @@ defmodule Factory.Kiro.Session do
         {:reply, {:error, :busy}, state}
 
       true ->
-        for id <- state.members, do: Agents.set_activity(id, "running", "Compacting context")
-
-        {:reply, :ok,
-         request(state, "_kiro/session/compact", %{sessionId: state.session_id}, :compact)}
+        case compact_now(state, run_id || state.last_run, :manual) do
+          {:ok, state} -> {:reply, :ok, state}
+          error -> {:reply, error, state}
+        end
     end
   end
 
@@ -223,9 +267,6 @@ defmodule Factory.Kiro.Session do
             |> next()
         end
 
-      {:compact, %{"result" => _}} ->
-        next(compacted(state))
-
       {:prompt, %{"result" => result}} ->
         state |> finish_turn(nil, result["stopReason"]) |> next()
 
@@ -241,9 +282,11 @@ defmodule Factory.Kiro.Session do
        ) do
     options = params["options"] || []
 
-    # Reading and searching are allowed (the project and the workflow's data sources);
-    # writing files and running commands aren't yet.
-    if get_in(params, ["toolCall", "kind"]) in ["read", "search"] do
+    # What the answering agent may do (Factory.Agents.Agent.tools/1), as in a run:
+    # the ones that only look read and search; the rest may also edit and run commands.
+    allowed = if state.turn, do: Agent.tools(state.turn.agent), else: []
+
+    if get_in(params, ["toolCall", "kind"]) in allowed do
       allow =
         Enum.find(options, &String.starts_with?(&1["kind"] || "", "allow")) ||
           List.first(options)
@@ -258,7 +301,9 @@ defmodule Factory.Kiro.Session do
       title = get_in(params, ["toolCall", "title"]) || "a tool"
       reply(state, id, %{outcome: %{outcome: "selected", optionId: reject["optionId"]}})
 
-      update_turn(state, fn turn -> %{turn | denied: turn.denied ++ [title]} end)
+      state
+      |> update_turn(fn turn -> %{turn | denied: turn.denied ++ [title]} end)
+      |> track_tool(Map.put(params["toolCall"] || %{}, "status", "denied"))
     end
   end
 
@@ -280,7 +325,10 @@ defmodule Factory.Kiro.Session do
 
       %{"sessionUpdate" => "tool_call", "title" => title} ->
         if state.turn, do: Agents.set_activity(state.turn.agent.id, "running", "Using #{title}")
-        state
+        track_tool(state, update)
+
+      %{"sessionUpdate" => "tool_call_update"} ->
+        track_tool(state, update)
 
       %{"_meta" => %{"kiro" => %{"contextUsage" => %{"usagePercentage" => pct}} = kiro}} ->
         %{state | context: read_context(state.context, pct, kiro["breakdown"])}
@@ -305,18 +353,168 @@ defmodule Factory.Kiro.Session do
     |> next()
   end
 
-  defp error_response(:compact, error, state) do
-    for id <- state.members,
-        do: Agents.set_activity(id, "error", "Couldn't compact: #{error["message"]}")
-
-    next(state)
-  end
-
   defp error_response(kind, error, state) when kind in [:initialize, :new_session] do
     {:fail, "Kiro couldn't start a session: #{error["message"]}", state}
   end
 
   defp error_response(_kind, _error, state), do: state
+
+  # A tool call starts, changes status, or is denied. Kept on the turn by its call id
+  # (a denial without one is its own entry) for the log.
+  defp track_tool(%{turn: nil} = state, _call), do: state
+
+  defp track_tool(state, call) do
+    update_turn(state, fn turn ->
+      id = call["toolCallId"]
+      known = id && Enum.find_index(turn.tools, &(&1.call_id == id))
+
+      fields =
+        %{
+          title: call["title"],
+          tool: call["kind"],
+          paths: call["locations"] && for(%{"path" => p} <- call["locations"], do: p),
+          outcome: outcome(call["status"])
+        }
+        |> Map.reject(fn {_, v} -> is_nil(v) end)
+
+      tools =
+        if known,
+          do: List.update_at(turn.tools, known, &Map.merge(&1, fields)),
+          else:
+            turn.tools ++
+              [
+                Map.merge(
+                  %{call_id: id, tool: "other", title: "a tool", paths: [], outcome: "pending"},
+                  fields
+                )
+              ]
+
+      %{turn | tools: tools}
+    end)
+  end
+
+  defp outcome("completed"), do: "ok"
+  defp outcome("failed"), do: "failed"
+  defp outcome("denied"), do: "denied"
+  defp outcome(s) when s in ["pending", "in_progress"], do: "pending"
+  defp outcome(_), do: nil
+
+  # The turn as log events: the message, the tools, then the reply or the error.
+  defp log_turn(state, turn, error) do
+    at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+    who = turn.agent.name
+
+    events =
+      [%{kind: :user, who: who, text: turn.ask || ""}] ++
+        Enum.map(turn.tools, &(&1 |> Map.delete(:call_id) |> Map.merge(%{kind: :tool, who: who}))) ++
+        if(turn.text != "", do: [%{kind: :assistant, who: who, text: turn.text}], else: []) ++
+        if(error, do: [%{kind: :error, who: who, text: error}], else: [])
+
+    Enum.reduce(events, state, fn e, state ->
+      seq = state.seq + 1
+      %{state | seq: seq, log: [Map.merge(e, %{id: "e#{seq}", at: at}) | state.log]}
+    end)
+  end
+
+  # Over the threshold with a message waiting: compact first.
+  defp compact_due?(state) do
+    pct = state.context[:pct]
+    state.log != [] and is_number(pct) and pct >= Factory.Context.config(:compact_at)
+  end
+
+  # Compacts the log and starts a fresh Kiro session; the result goes in front of the
+  # next message. Messages waiting are sent once the new session is ready.
+  defp compact_now(state, run_id, how) do
+    before =
+      if state.context[:window] && state.context[:pct],
+        do: state.context.window * state.context.pct / 100
+
+    case Factory.Context.compact(Enum.reverse(state.log), tokens_before: before) do
+      {:ok, c} ->
+        Logger.info(
+          "Kiro session #{inspect(state.key)} compacted: #{c.summarized} entries summarized, " <>
+            "#{c.kept} kept, about #{c.tokens} tokens (sha256 #{String.slice(c.sha256, 0, 12)})"
+        )
+
+        notice(state, c, run_id: run_id, how: how)
+        state = compacted(state)
+        close_port(state.port)
+
+        {:ok,
+         open(%{
+           state
+           | port: nil,
+             session_id: nil,
+             ready: false,
+             buffer: "",
+             pending: %{},
+             config: %{},
+             primed: MapSet.new(),
+             carry: c.text
+         })}
+
+      error ->
+        error
+    end
+  end
+
+  # Says in the chat what the compaction kept, so it's visible when it happened on its own.
+  defp notice(_state, _c, run_id: nil, how: _how), do: :ok
+
+  defp notice(state, c, run_id: run_id, how: how) do
+    if run = Runs.get_run(run_id) do
+      whose =
+        if state.key == :shared,
+          do: "The shared session's",
+          else: "#{(Agents.get_agent(state.key) || %{name: "The agent"}).name}'s"
+
+      why =
+        case {how, state.context[:pct]} do
+          {:auto, pct} when is_number(pct) ->
+            " Its context was #{round(pct)}% full (compacting starts at #{Factory.Context.config(:compact_at)}%)."
+
+          _ ->
+            ""
+        end
+
+      kept =
+        case c.kept do
+          0 -> "nothing kept word for word"
+          n -> "the last #{n} word for word"
+        end
+
+      Runs.post(
+        run,
+        "factory",
+        "#{whose} conversation was compacted: #{c.summarized} earlier entries summarized, " <>
+          "#{kept}, about #{approx(c.tokens)} tokens in all.#{why} " <>
+          "Kiro gets it with the next message, in a fresh session.",
+        meta:
+          %{
+            "compaction" => %{
+              "summarized" => c.summarized,
+              "kept" => c.kept,
+              "tokens" => c.tokens,
+              "sha256" => c.sha256,
+              "from_pct" => state.context[:pct],
+              "auto" => how == :auto
+            }
+          }
+          |> then(&if state.key == :shared, do: &1, else: Map.put(&1, "agent_id", state.key))
+      )
+    end
+  end
+
+  defp approx(n) when n >= 1000, do: "#{round(n / 1000)}k"
+  defp approx(n), do: "#{n}"
+
+  defp close_port(nil), do: :ok
+
+  defp close_port(port) do
+    Port.close(port)
+  rescue
+    ArgumentError -> :ok
+  end
 
   # Kiro only reports the smaller context with the next turn. Until then each agent shows
   # "Context compacted" and remembers the size it had, so the next reply can show both.
@@ -347,7 +545,18 @@ defmodule Factory.Kiro.Session do
 
   # The queue: one job at a time, after switching to its agent's model and mode.
 
-  defp next(%{ready: true, turn: nil, switching: nil, queue: [job | rest]} = state) do
+  defp next(%{ready: true, turn: nil, switching: nil, queue: [_ | _]} = state) do
+    with true <- compact_due?(state),
+         {:ok, state} <- compact_now(state, hd(state.queue).run_id, :auto) do
+      state
+    else
+      _ -> start_next(state)
+    end
+  end
+
+  defp next(state), do: state
+
+  defp start_next(%{queue: [job | rest]} = state) do
     wanted =
       Enum.reject(
         [{"model", job.agent.model}, {"mode", job.agent.kiro_mode}],
@@ -356,8 +565,6 @@ defmodule Factory.Kiro.Session do
 
     switch(%{state | queue: rest, switching: job}, wanted)
   end
-
-  defp next(state), do: state
 
   defp switch(state, []) do
     job = state.switching
@@ -386,12 +593,20 @@ defmodule Factory.Kiro.Session do
 
   defp send_prompt(state, %Job{agent: agent} = job) do
     {text, state} = with_context(state, agent, job.text)
+
+    # After a compaction the conversation so far goes first.
+    {text, state} =
+      if state.carry,
+        do: {state.carry <> "\n\n" <> text, %{state | carry: nil}},
+        else: {text, state}
+
     Agents.set_activity(agent.id, "running", "Answering: " <> String.slice(job.text, 0, 60))
     timer = Process.send_after(self(), :turn_timeout, Kiro.config(:prompt_timeout))
 
     turn = %Turn{
       agent: agent,
       run_id: job.run_id,
+      ask: job.text,
       started: System.monotonic_time(:millisecond),
       input_tokens: Factory.Usage.estimate_tokens(text)
     }
@@ -449,12 +664,12 @@ defmodule Factory.Kiro.Session do
     if state.timer, do: Process.cancel_timer(state.timer)
     agent = turn.agent
 
-    denied =
-      Enum.map_join(
-        turn.denied,
-        "",
-        &"\n(Denied: #{&1}. Agents can't write files or run commands yet.)"
-      )
+    why =
+      if Agent.read_only?(agent),
+        do: "#{agent.name} only reads and checks; it can't change the project.",
+        else: "#{agent.name} can't use that tool."
+
+    denied = Enum.map_join(turn.denied, "", &"\n(Denied: #{&1}. #{why})")
 
     text =
       if turn.text == "", do: error || "(Kiro ended the turn without a reply.)", else: turn.text
@@ -493,7 +708,7 @@ defmodule Factory.Kiro.Session do
       Runs.post(run, "factory", text <> denied, author: agent.name, meta: meta)
     end
 
-    %{state | turn: nil, timer: nil}
+    log_turn(%{state | turn: nil, timer: nil, last_run: turn.run_id}, turn, error)
   end
 
   # Kiro reports how full the context is as a percentage, plus a token breakdown by

@@ -1,5 +1,5 @@
 defmodule FactoryWeb.RunParts do
-  @moduledoc "Pieces shared by the pages about factory runs: the start screen, New run and a run."
+  @moduledoc "Pieces shared by the pages about runs: icons, the run type badge, usage and state."
   use FactoryWeb, :html
   alias Factory.Runs.Types
   alias FactoryWeb.UsageMeter, as: Fmt
@@ -31,6 +31,11 @@ defmodule FactoryWeb.RunParts do
   @doc "An agent kind's 16px icon."
   def kind_icon(kind), do: Map.get(@kind_icons, kind, "hero-cpu-chip-micro")
 
+  @doc "A workflow's icon: its job's for a standard workflow, else a generic one."
+  def workflow_icon(%{key: key}, size) when is_binary(key), do: type_icon(key, size)
+  def workflow_icon(_workflow, :outline), do: "hero-squares-2x2"
+  def workflow_icon(_workflow, :micro), do: "hero-squares-2x2-micro"
+
   attr :kind, :string, default: nil
   attr :class, :string, default: nil
 
@@ -44,25 +49,6 @@ defmodule FactoryWeb.RunParts do
     ]}>
       <.icon :if={@kind} name={type_icon(@kind, :micro)} class="size-3" />
       {Types.short(@kind)}
-    </span>
-    """
-  end
-
-  attr :steps, :list, required: true
-  attr :class, :string, default: nil
-
-  @doc "A workflow in one line: Investigator → Fixer → Tester → Reviewer."
-  def chain(assigns) do
-    ~H"""
-    <span class={["flex flex-wrap items-center gap-1 text-xs text-base-content/60", @class]}>
-      <%!-- Each arrow stays on the line of the step it points to. --%>
-      <span :for={{step, i} <- Enum.with_index(@steps)} class="inline-flex items-center gap-1">
-        <.icon :if={i > 0} name="hero-arrow-long-right-micro" class="size-3.5 text-base-content/30" />
-        <span class="inline-flex items-center gap-1 rounded-md bg-base-content/[0.06] px-1.5 py-0.5">
-          <.icon name={kind_icon(step["kind"])} class="size-3 opacity-70" />
-          {step["name"]}
-        </span>
-      </span>
     </span>
     """
   end
@@ -94,17 +80,10 @@ defmodule FactoryWeb.RunParts do
     """
   end
 
-  defp state_dot(%{plan: %{"status" => "writing"}}), do: "bg-info animate-pulse"
-  defp state_dot(%{plan: %{"status" => "error"}}), do: "bg-error"
   defp state_dot(%{status: status}) when status in ~w(queued running), do: "bg-info"
+  defp state_dot(%{status: "paused"}), do: "bg-warning"
   defp state_dot(%{status: "done"}), do: "bg-success"
   defp state_dot(_), do: "bg-base-content/30"
 
-  def state_text(%{plan: %{"status" => "writing"}}), do: "Kiro is planning"
-  def state_text(%{plan: %{"status" => "error"}}), do: "Planning failed"
-
-  def state_text(%{kind: kind, status: "draft", tasks: []}) when not is_nil(kind),
-    do: "Plan ready for review"
-
-  def state_text(%{status: status}), do: String.capitalize(status)
+  defp state_text(%{status: status}), do: String.capitalize(status)
 end

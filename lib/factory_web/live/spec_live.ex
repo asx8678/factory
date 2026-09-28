@@ -1,7 +1,7 @@
 defmodule FactoryWeb.SpecLive do
   @moduledoc "One spec: its overview, requirements, design and tasks, written and approved in order."
   use FactoryWeb, :live_view
-  alias Factory.Specs
+  alias Factory.{Runs, Specs}
   alias Factory.Specs.{Review, Spec}
 
   @labels %{
@@ -538,6 +538,23 @@ defmodule FactoryWeb.SpecLive do
     end
   end
 
+  def handle_event("write_missing", _, socket) do
+    case Specs.write_missing(socket.assigns.spec) do
+      {:ok, spec} -> {:noreply, assign(socket, spec: spec, activity: [])}
+      {:error, :nothing_missing} -> {:noreply, put_flash(socket, :info, "Every part is written.")}
+    end
+  end
+
+  # The base specs (company rules) the run this spec plans follows.
+  def handle_event("toggle_base", %{"id" => id}, socket) do
+    run = Runs.get_run(socket.assigns.home_run.id)
+    id = String.to_integer(id)
+    ids = run.settings["base_spec_ids"] || []
+    ids = if id in ids, do: List.delete(ids, id), else: ids ++ [id]
+    {:ok, run} = Runs.update_run(run, %{settings: Map.put(run.settings, "base_spec_ids", ids)})
+    {:noreply, assign(socket, home_run: run)}
+  end
+
   def handle_event("review", _, socket) do
     case Specs.review(socket.assigns.spec) do
       {:ok, spec} -> {:noreply, assign(socket, spec: spec)}
@@ -738,7 +755,7 @@ defmodule FactoryWeb.SpecLive do
     ~H"""
     <Layouts.app flash={@flash} usage={@usage_meter} active={:specs}>
       <Layouts.back_link :if={!@home_run} to={~p"/specs"}>Specs</Layouts.back_link>
-      <Layouts.back_link :if={@home_run} to={~p"/runs/#{@home_run.id}"}>
+      <Layouts.back_link :if={@home_run} to={~p"/chat/#{@home_run.id}"}>
         {@home_run.title}
       </Layouts.back_link>
 
@@ -772,21 +789,22 @@ defmodule FactoryWeb.SpecLive do
 
       <div class="mt-6 grid gap-10 lg:grid-cols-[minmax(0,1fr)_20rem]">
         <div>
+          <%!-- A step that isn't open yet: say which step to finish first. --%>
           <section
             :if={!@open}
+            id="step-locked"
             class="rounded-lg border border-dashed border-base-300 px-6 py-12 text-center"
           >
             <.icon name="hero-lock-closed" class="size-5 text-base-content/35" />
-            <h2 class="mt-2 font-medium">{elem(intro(@step), 0)}</h2>
-            <p class="mx-auto mt-2 w-fit whitespace-pre-line text-left text-sm text-base-content/55">
-              {elem(intro(@step), 1)}
-            </p>
-            <p class="mt-4 text-sm text-base-content/65">
-              Approve the {String.downcase(step_label(prev_step(@step)))} to open this step.
+            <h2 class="mt-2 font-medium">
+              Finish the {step_label(Spec.current_step(@spec))} first
+            </h2>
+            <p class="mx-auto mt-1 max-w-sm text-sm text-base-content/60">
+              {step_label(@step)}: {purpose(@step)} Steps open one at a time, as you approve them.
             </p>
             <.link
               patch={~p"/specs/#{@spec.id}?step=#{Spec.current_step(@spec)}"}
-              class="btn btn-sm mt-4"
+              class="btn btn-sm mt-5"
             >
               Go to {step_label(Spec.current_step(@spec))}
             </.link>
@@ -989,6 +1007,8 @@ defmodule FactoryWeb.SpecLive do
         </div>
 
         <aside class="space-y-8 text-sm">
+          <.write_panel spec={@spec} activity={@activity} />
+          <.rules_panel :if={@home_run} run={@home_run} />
           <.review_panel :if={@step != "tasks"} spec={@spec} />
 
           <FactoryWeb.TaskList.queue
@@ -1090,9 +1110,97 @@ defmodule FactoryWeb.SpecLive do
   end
 
   attr :spec, Spec, required: true
+  attr :activity, :list, required: true
 
-  # Kiro's review of the whole spec: score, verdict, checks (worst first) and what to improve.
-  defp review_panel(assigns) do
+  # Kiro writes the parts the spec is missing (Factory.Specs.write_missing/1).
+  defp write_panel(assigns) do
+    write = assigns.spec.plan["write"] || %{}
+    missing = Specs.missing_parts(assigns.spec)
+
+    assigns =
+      assign(assigns,
+        status: write["status"],
+        write: write,
+        missing: missing,
+        offer: missing != [] and Specs.files(assigns.spec) != [] and write["status"] != "running"
+      )
+
+    ~H"""
+    <section :if={@offer or @status in ["running", "done"]} id="write-panel">
+      <h2 class="font-medium">Write with Kiro</h2>
+
+      <div :if={@status == "running"} class="mt-2 text-base-content/65">
+        <p class="flex items-center gap-2">
+          <span class="loading loading-spinner loading-xs text-info"></span>
+          Kiro is reading the project and writing the {parts(@write["writing"])}.
+        </p>
+        <p
+          :for={line <- Enum.take(@activity, -3)}
+          class="mt-1 truncate pl-6 text-xs text-base-content/45"
+        >
+          {line}
+        </p>
+      </div>
+
+      <p
+        :if={@status == "done" and @write["why"] not in [nil, ""]}
+        class="mt-1 text-base-content/65"
+      >
+        Wrote the {parts(@write["wrote"])}. {@write["why"]}
+      </p>
+
+      <div :if={@offer}>
+        <p :if={@status == "error"} class="mt-1 text-error">{@write["error"]}</p>
+        <p class="mt-1 text-base-content/60">
+          Kiro reads the project, then writes the {parts(@missing)}, keeping to what you
+          wrote. QA reviews the spec after.
+        </p>
+        <button id="write-missing" phx-click="write_missing" class="btn btn-sm mt-3">
+          <.icon name="hero-sparkles-mini" class="size-4" /> Write the {parts(@missing)}
+        </button>
+      </div>
+    </section>
+    """
+  end
+
+  defp parts(list) do
+    case List.wrap(list) do
+      [] -> "rest"
+      [one] -> one
+      many -> Enum.join(Enum.drop(many, -1), ", ") <> " and " <> List.last(many)
+    end
+  end
+
+  attr :run, :map, required: true
+
+  # The base specs (company rules) the run this spec plans follows.
+  defp rules_panel(assigns) do
+    assigns = assign(assigns, specs: Specs.list_base_specs())
+
+    ~H"""
+    <section id="rules-panel">
+      <h2 class="font-medium">Rules this run follows</h2>
+      <p class="mt-1 mb-3 text-base-content/60">
+        Base specs every agent in the run keeps to.
+      </p>
+      <FactoryWeb.SpecParts.base_picker
+        id="run-base-specs"
+        specs={@specs}
+        selected={@run.settings["base_spec_ids"] || []}
+        event="toggle_base"
+      />
+    </section>
+    """
+  end
+
+  attr :spec, Spec, required: true
+  attr :title, :string, default: "Kiro review"
+
+  @doc """
+  Kiro's review of the whole spec: score, verdict, checks (worst first) and what to
+  improve. Its buttons send `review`.
+  """
+  def review_panel(assigns) do
     review = assigns.spec.review
 
     assigns =
@@ -1107,7 +1215,7 @@ defmodule FactoryWeb.SpecLive do
     ~H"""
     <section id="review" class="border-b border-base-300 pb-8">
       <div class="flex items-center justify-between gap-3">
-        <h2 class="font-medium">Kiro review</h2>
+        <h2 class="font-medium">{@title}</h2>
         <button
           :if={@status in ["done", "error"]}
           phx-click="review"
@@ -1284,6 +1392,12 @@ defmodule FactoryWeb.SpecLive do
   end
 
   # What to write in each step: a plain instruction, then prompts to answer.
+  # What a step is for, in a few words.
+  defp purpose("overview"), do: "what you're building and why."
+  defp purpose("requirements"), do: "what it must do."
+  defp purpose("design"), do: "how it will be built."
+  defp purpose("tasks"), do: "the steps to build it, in order."
+
   defp intro("overview"),
     do:
       {"Write here the main spec: the big picture the other steps build on.",

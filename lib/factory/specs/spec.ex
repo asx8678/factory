@@ -8,8 +8,13 @@ defmodule Factory.Specs.Spec do
 
   @steps ~w(overview requirements design tasks)
 
+  @kinds ~w(base run)
+
   schema "specs" do
     field :name, :string
+    # "base": kept for every run that includes it (company rules, conventions), written
+    # as one document in `overview`. "run": one run's own spec, in four steps.
+    field :kind, :string, default: "run"
     field :overview, :string, default: ""
     field :requirements, :string, default: ""
     field :design, :string, default: ""
@@ -36,7 +41,8 @@ defmodule Factory.Specs.Spec do
 
   def changeset(spec, attrs) do
     spec
-    |> cast(attrs, [:name, :overview, :requirements, :design, :tasks])
+    |> cast(attrs, [:name, :kind, :overview, :requirements, :design, :tasks])
+    |> validate_inclusion(:kind, @kinds)
     |> update_change(:name, &String.trim/1)
     |> validate_required([:name])
     |> validate_length(:name, max: 80)

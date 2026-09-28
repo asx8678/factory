@@ -93,6 +93,7 @@
       data: { attachment: true },
       markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
     }))
+    const actions = new Set(g.nodes.filter((n) => n.kind === "action").map((n) => n.id))
     return [...attachments, ...g.edges.map((e) => ({
       id: e.id,
       source: e.source,
@@ -101,6 +102,7 @@
       sourceHandle: e.source_handle ?? undefined,
       targetHandle: e.target_handle ?? undefined,
       animated: running.has(e.source),
+      data: { prompt: e.prompt ?? "", toAction: actions.has(e.target) },
       markerEnd: { type: MarkerType.ArrowClosed, width: 18, height: 18 },
     }))]
   }

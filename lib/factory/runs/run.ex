@@ -16,8 +16,9 @@ defmodule Factory.Runs.Run do
     field :description, :string, default: ""
     # How the factory works on it: workflow, setup, plan approval, project folder.
     field :settings, :map, default: %{}
-    # Kiro's planning of the run: %{"status" => "writing" | "done" | "error", ...}.
-    field :plan, :map, default: %{}
+    # The engine's way through the workflow (see Factory.Engine):
+    # %{"done" => [step ids], "outputs" => %{step id => text}, "current" => id, "error" => text}.
+    field :progress, :map, default: %{}
     belongs_to :spec_doc, Factory.Specs.Spec, foreign_key: :spec_id
     has_many :tasks, Factory.Runs.Task, preload_order: [asc: :position]
     has_many :messages, Factory.Runs.Message
@@ -36,7 +37,7 @@ defmodule Factory.Runs.Run do
       :kind,
       :description,
       :settings,
-      :plan
+      :progress
     ])
     |> update_change(:title, &String.trim/1)
     |> validate_required([:title])

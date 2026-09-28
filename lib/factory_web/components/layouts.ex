@@ -41,7 +41,6 @@ defmodule FactoryWeb.Layouts do
   slot :inner_block, required: true
 
   @menu [
-    {:home, "Home", "/"},
     {:chat, "Chat", "/chat"},
     {:specs, "Specs", "/specs"},
     {:workflows, "Workflows", "/workflows"},
@@ -55,10 +54,10 @@ defmodule FactoryWeb.Layouts do
 
     ~H"""
     <header class="sticky top-0 z-30 border-b border-base-300 bg-base-100/85 backdrop-blur">
-      <div class="mx-auto flex h-14 max-w-7xl items-stretch gap-3 px-4 sm:gap-6 sm:px-6">
+      <div class="mx-auto flex h-12 max-w-7xl items-stretch gap-3 px-4 sm:gap-5 sm:px-6">
         <.link
           navigate={~p"/"}
-          class="flex items-center gap-2 text-[15px] font-semibold tracking-tight"
+          class="flex items-center gap-2 text-[14px] font-semibold tracking-tight"
         >
           <svg viewBox="0 0 20 20" class="size-5" aria-hidden="true">
             <path
@@ -80,7 +79,7 @@ defmodule FactoryWeb.Layouts do
             navigate={path}
             aria-current={@active == key && "page"}
             class={[
-              "flex items-center whitespace-nowrap border-b-2 px-3 text-sm transition-colors",
+              "flex items-center whitespace-nowrap border-b-2 px-2.5 text-[13px] transition-colors",
               if(@active == key,
                 do: "border-primary text-base-content font-medium",
                 else: "border-transparent text-base-content/55 hover:text-base-content"
@@ -108,7 +107,7 @@ defmodule FactoryWeb.Layouts do
       </div>
     </header>
 
-    <main :if={@full} class="h-[calc(100dvh-3.5rem)] overflow-hidden">
+    <main :if={@full} class="h-[calc(100dvh-3rem)] overflow-hidden">
       {render_slot(@inner_block)}
     </main>
     <main :if={!@full} class="mx-auto max-w-7xl px-4 py-8 sm:px-6 sm:py-10">

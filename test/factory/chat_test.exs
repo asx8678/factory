@@ -1,5 +1,6 @@
 defmodule Factory.ChatTest do
-  use Factory.DataCase, async: true
+  # Not async: messages to agents start (fake) Kiro sessions, which need the shared sandbox.
+  use Factory.DataCase, async: false
   alias Factory.{Chat, Runs}
 
   defp replies(run),
@@ -49,14 +50,17 @@ defmodule Factory.ChatTest do
 
   test "in an agent's view, plain text goes to that agent and replies are tagged with it" do
     {:ok, agent} = Factory.Agents.create_agent(%{name: "Planner"})
+    on_exit(fn -> Factory.Kiro.stop(agent.id) end)
     {:ok, run} = Runs.create_run()
+    Runs.subscribe(run.id)
     Chat.handle(run, "plan the login page", [], to: agent)
+    assert_receive {:message, %{author: "Planner"}}, 5_000
     Chat.handle(run, "/status", [], to: agent)
 
-    [ask, not_connected, status_cmd, status_reply] = Runs.list_messages(run.id)
+    [ask, reply, status_cmd, status_reply] = Runs.list_messages(run.id)
     assert ask.meta == %{"to_agent_id" => agent.id}
-    assert not_connected.meta == %{"agent_id" => agent.id}
-    assert not_connected.body =~ "isn't connected to Kiro"
+    assert reply.meta["agent_id"] == agent.id
+    assert reply.body == "echo: plan the login page"
     assert status_cmd.meta == %{"to_agent_id" => agent.id}
     assert status_reply.meta == %{"agent_id" => agent.id}
     assert status_reply.body =~ "Run is draft"
@@ -66,11 +70,14 @@ defmodule Factory.ChatTest do
     # A unique name, so agents left in the test database can't match instead.
     name = "Planner #{System.unique_integer([:positive])}"
     {:ok, agent} = Factory.Agents.create_agent(%{name: name})
+    on_exit(fn -> Factory.Kiro.stop(agent.id) end)
     {:ok, run} = Runs.create_run()
+    Runs.subscribe(run.id)
     Chat.handle(run, "/ask #{name} hi")
+    assert_receive {:message, %{author: ^name}}, 5_000
 
     [ask, reply] = Runs.list_messages(run.id)
     assert ask.meta == %{"to_agent_id" => agent.id}
-    assert reply.meta == %{"agent_id" => agent.id}
+    assert reply.meta["agent_id"] == agent.id
   end
 end

@@ -3,17 +3,17 @@ defmodule FactoryWeb.WorkflowsLiveTest do
   import Phoenix.LiveViewTest
   alias Factory.Agents
 
-  test "the side panel edits an agent and only shows Kiro settings when connected", %{conn: conn} do
+  test "the side panel edits an agent and its Kiro settings", %{conn: conn} do
     {:ok, agent} = Agents.create_agent(%{name: "Coder"})
     {:ok, view, _} = live(conn, ~p"/workflows/#{agent.workflow_id}/agents/#{agent.id}")
 
     assert has_element?(view, "#agent-form")
     assert has_element?(view, ~s(a[href="/chat?agent=#{agent.id}"]), "Chat")
-    refute has_element?(view, "#agent-form select[name='agent[kiro_mode]']")
-
-    view |> form("#agent-form", agent: %{name: "Builder", runtime: "kiro_v3"}) |> render_change()
-    assert %{name: "Builder", runtime: "kiro_v3", model: "auto"} = Agents.get_agent(agent.id)
     assert has_element?(view, "#agent-form select[name='agent[kiro_mode]']")
+    refute has_element?(view, "#agent-form select[name='agent[runtime]']")
+
+    view |> form("#agent-form", agent: %{name: "Builder"}) |> render_change()
+    assert %{name: "Builder", model: "auto"} = Agents.get_agent(agent.id)
   end
 
   test "Chat on an agent card opens the chat with that agent", %{conn: conn} do

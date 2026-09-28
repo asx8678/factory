@@ -1,19 +1,27 @@
 defmodule FactoryWeb.ChatLive do
   use FactoryWeb, :live_view
-  alias Factory.{Agents, Chat, Runs}
+  alias Factory.{Agents, Chat, Engine, FileBrowser, Kiro, Runs, Workflows}
+  alias FactoryWeb.WorkflowMap
 
   def mount(_params, _session, socket) do
     if connected?(socket) do
       Runs.subscribe()
       Agents.subscribe()
+      # Runs opened and left without a word or a task go after an hour.
+      Runs.prune_empty()
     end
 
+    # A new run starts clean: no folder and no specs until you choose them.
     {:ok,
      socket
      |> assign(runs: Runs.list_runs(), run: nil, focus: nil, count: 0)
      |> assign(run_usage: %{turns: 0, credits: 0})
      |> assign(draft: "", view: "chat", streaming: %{})
      |> assign(commands: Chat.commands())
+     |> assign(workflows: Workflows.list(), browser: nil, folder_warn: false, to: nil)
+     |> assign(pick: Workflows.picked())
+     |> assign(base_ids: [])
+     |> set_dir("")
      |> load_agents()
      |> assign(form: to_form(%{"body" => ""}, as: :chat))
      |> allow_upload(:spec,
@@ -32,7 +40,9 @@ defmodule FactoryWeb.ChatLive do
          socket
          |> watch(nil)
          |> FactoryWeb.UsageMeter.scope(:today)
-         |> assign(run: nil)
+         |> assign(run: nil, pick: Workflows.picked())
+         |> assign(base_ids: [])
+         |> set_dir("")
          |> load_agents()
          |> assign(page_title: (focus && focus.name) || "Chat", run: nil, focus: focus, count: 0)
          |> assign(run_usage: %{turns: 0, credits: 0})
@@ -53,6 +63,8 @@ defmodule FactoryWeb.ChatLive do
              |> watch(run)
              |> FactoryWeb.UsageMeter.scope({:run, run.id})
              |> assign(run: run)
+             |> keep_dir(run)
+             |> assign(base_ids: run.settings["base_spec_ids"] || [])
              |> load_agents()
              |> assign(page_title: run.title, run: run, focus: focus, streaming: %{})
              |> load_messages()}
@@ -60,15 +72,71 @@ defmodule FactoryWeb.ChatLive do
     end
   end
 
-  # The agents this chat talks to: the run's workflow, or the current one.
+  # The agents this chat talks to: the run's workflow, or the current one. `steps` are
+  # the workflow's steps as the run follows them, for the map above the chat.
+  # Messages go to `to` (the workflow's planner unless another is picked), or to the
+  # agent the chat is focused on.
   defp load_agents(socket) do
-    workflow = Factory.Workflows.for_run(socket.assigns[:run])
+    run = socket.assigns[:run]
+    workflow = if run, do: Workflows.for_run(run), else: socket.assigns.pick
+    agents = workflow.id |> Agents.list_agents() |> Enum.reject(&Factory.Agents.Agent.action?/1)
+
+    to =
+      case socket.assigns[:to] do
+        :factory -> :factory
+        old -> (old && Enum.find(agents, &(&1.id == old.id))) || default_to(agents)
+      end
 
     assign(socket,
       workflow: workflow,
       graph: Agents.graph(workflow.id),
-      agents: workflow.id |> Agents.list_agents() |> Enum.reject(&Factory.Agents.Agent.action?/1)
+      agents: agents,
+      to: to,
+      steps: if(run, do: Engine.steps(run), else: Engine.workflow_steps(workflow.id))
     )
+  end
+
+  defp placeholder(nil, _run), do: "Message the factory, or type / for commands"
+
+  defp placeholder(%{kind: "planner"} = agent, run) do
+    if settable?(run),
+      do: "Describe a change, e.g. add an export button to the invoices page…",
+      else: "Message #{agent.name}…"
+  end
+
+  defp placeholder(agent, _run), do: "Message #{agent.name}…"
+
+  # Specs on this run: its base specs, and its own spec once something is written in it.
+  defp spec_count(assigns) do
+    own = if assigns.run && assigns.run.spec_files != [], do: 1, else: 0
+    length(assigns.base_ids) + own
+  end
+
+  defp default_to(agents),
+    do: Enum.find(agents, &(&1.kind == "planner")) || List.first(agents) || :factory
+
+  # The agent a message goes to, or nil for the factory.
+  defp recipient(focus, _to) when focus != nil, do: focus
+  defp recipient(_focus, :factory), do: nil
+  defp recipient(_focus, to), do: to
+
+  # A run keeps its folder. One that has none yet waits for you to choose it.
+  defp keep_dir(socket, run), do: set_dir(socket, run.settings["project_dir"])
+
+  defp set_dir(socket, dir) do
+    dir = String.trim(dir || "")
+    assign(socket, dir: dir, dir_ok: dir != "" and File.dir?(Path.expand(dir)))
+  end
+
+  # The workflow and folder can change until the run starts.
+  defp settable?(nil), do: true
+  defp settable?(run), do: run.status == "draft"
+
+  defp save_setting(%{assigns: %{run: nil}} = socket, _key, _value), do: socket
+
+  defp save_setting(%{assigns: %{run: run}} = socket, key, value) do
+    {:ok, run} = Runs.update_run(run, %{settings: Map.put(run.settings, key, value)})
+    assign(socket, run: run)
   end
 
   # Follow only the open run's messages.
@@ -106,30 +174,109 @@ defmodule FactoryWeb.ChatLive do
     {:noreply, assign(socket, draft: get_in(params, ["chat", "body"]) || "")}
   end
 
+  # Commands work anywhere; anything for the agents needs the folder they work in.
   def handle_event("send", %{"chat" => %{"body" => body}}, socket) do
-    files =
-      consume_uploaded_entries(socket, :spec, fn %{path: path}, entry ->
-        {:ok, {entry.client_name, File.read!(path)}}
-      end)
-
-    if String.trim(body) == "" and files == [] do
-      {:noreply, socket}
+    if socket.assigns.dir_ok or String.starts_with?(String.trim(body), "/") do
+      send_message(socket, body)
     else
-      run = if socket.assigns.run, do: Runs.get_run(socket.assigns.run.id), else: new_run()
-      Chat.handle(run, body, files, to: socket.assigns.focus)
-      socket = socket |> assign(draft: "") |> push_event("chat:sent", %{})
-
-      if socket.assigns.run,
-        do: {:noreply, socket},
-        else: {:noreply, push_patch(socket, to: chat_path(run, socket.assigns.focus))}
+      {:noreply,
+       socket
+       |> assign(folder_warn: true)
+       |> put_flash(
+         :error,
+         "Choose the project folder first: the agents need to know where to work."
+       )}
     end
   end
 
   def handle_event("cancel_upload", %{"ref" => ref}, socket),
     do: {:noreply, cancel_upload(socket, :spec, ref)}
 
+  # The workflow the chat plans for, and the folder its agents work in.
+
+  def handle_event("pick_workflow", %{"id" => id}, socket) do
+    case Workflows.get(id) do
+      nil ->
+        {:noreply, socket}
+
+      workflow ->
+        {:noreply,
+         socket
+         # Picked here, picked everywhere: the Workflows page opens on it too.
+         |> assign(pick: elem(Workflows.set_current(workflow), 1), to: nil)
+         |> assign(base_ids: workflow.base_spec_ids)
+         |> save_setting("workflow_id", workflow.id)
+         |> save_setting("base_spec_ids", workflow.base_spec_ids)
+         |> load_agents()}
+    end
+  end
+
+  # Who messages go to: an agent, or "" for the factory itself (commands, specs).
+  def handle_event("to", %{"id" => id}, socket) do
+    to = Enum.find(socket.assigns.agents, &(to_string(&1.id) == to_string(id))) || :factory
+    socket = assign(socket, to: to)
+
+    if socket.assigns.focus,
+      do: {:noreply, push_patch(socket, to: chat_path(socket.assigns.run, recipient(nil, to)))},
+      else: {:noreply, socket}
+  end
+
+  # The run's spec (requirements, design, tasks) opens on the Spec page: Specs at the
+  # first step still to write, Plan at the tasks. A new chat is saved as a run first, so
+  # its workflow and folder go with it.
+  def handle_event("tasks", _, socket) do
+    if socket.assigns.dir_ok do
+      {:noreply, push_navigate(socket, to: spec_path(socket, step: "tasks"))}
+    else
+      {:noreply,
+       socket
+       |> assign(folder_warn: true)
+       |> put_flash(:error, "Choose the project folder first: Kiro reads it to make the plan.")}
+    end
+  end
+
+  def handle_event("specs", _, socket),
+    do: {:noreply, push_navigate(socket, to: spec_path(socket, []))}
+
+  def handle_event("browse", _, socket) do
+    browser = %{mode: "dir", hidden: false, listing: nil, error: nil}
+    # This chat's folder, else the one picked last.
+    start =
+      FileBrowser.start_dir(
+        if(socket.assigns.dir_ok, do: socket.assigns.dir, else: Factory.Prefs.project_dir())
+      )
+
+    {:noreply, assign(socket, browser: browse(browser, start))}
+  end
+
+  def handle_event("browse_go", %{"path" => path}, socket),
+    do: {:noreply, update(socket, :browser, &browse(&1, path))}
+
+  def handle_event("browse_hidden", _, socket) do
+    browser = %{socket.assigns.browser | hidden: !socket.assigns.browser.hidden}
+    {:noreply, assign(socket, browser: browse(browser, browser.listing && browser.listing.dir))}
+  end
+
+  def handle_event("browse_cancel", _, socket), do: {:noreply, assign(socket, browser: nil)}
+
+  def handle_event("browse_pick", %{"path" => path}, socket) do
+    {:noreply,
+     socket
+     |> assign(browser: nil, folder_warn: false)
+     |> tap(fn _ -> Factory.Prefs.remember_project_dir(path) end)
+     |> set_dir(path)
+     |> save_setting("project_dir", Path.expand(path))}
+  end
+
   def handle_event("action", %{"action" => action}, socket) do
     Chat.action(Runs.get_run(socket.assigns.run.id), action)
+    {:noreply, socket}
+  end
+
+  # Pause and Resume beside the workflow: the same as typing the command.
+  def handle_event("control", %{"command" => command}, socket)
+      when command in ["/pause", "/resume"] do
+    Chat.handle(Runs.get_run(socket.assigns.run.id), command)
     {:noreply, socket}
   end
 
@@ -149,11 +296,98 @@ defmodule FactoryWeb.ChatLive do
      socket |> assign(view: "chat") |> push_patch(to: chat_path(socket.assigns.run, agent))}
   end
 
+  # The Compact button on the context chip: /compact in this chat, which notes the result.
+  def handle_event("compact", %{"id" => id}, socket) do
+    agent = Enum.find(socket.assigns.agents, &("#{&1.id}" == id))
+
+    cond do
+      agent == nil ->
+        {:noreply, socket}
+
+      socket.assigns.run ->
+        Chat.handle(Runs.get_run(socket.assigns.run.id), "/compact", [], to: agent)
+        {:noreply, socket}
+
+      true ->
+        {:noreply, compact_flash(socket, agent, Kiro.compact(agent))}
+    end
+  end
+
   def handle_event(_flow_event, _params, socket), do: {:noreply, socket}
 
-  defp new_run do
-    {:ok, run} = Runs.create_run()
+  defp compact_flash(socket, agent, :ok),
+    do: put_flash(socket, :info, "Compacted #{agent.name}'s conversation.")
+
+  defp compact_flash(socket, agent, {:error, :no_gain}),
+    do: put_flash(socket, :info, "#{agent.name}'s conversation is already small.")
+
+  defp compact_flash(socket, agent, _error),
+    do: put_flash(socket, :error, "Couldn't compact #{agent.name}'s conversation right now.")
+
+  # The run's spec on the Spec page, at `query` (e.g. `step: "tasks"`).
+  defp spec_path(socket, query) do
+    spec = Factory.Specs.for_run(socket.assigns.run || new_run(socket))
+    ~p"/specs/#{spec.id}?#{query}"
+  end
+
+  defp send_message(socket, body) do
+    files =
+      consume_uploaded_entries(socket, :spec, fn %{path: path}, entry ->
+        {:ok, {entry.client_name, File.read!(path)}}
+      end)
+
+    if String.trim(body) == "" and files == [] do
+      {:noreply, socket}
+    else
+      run = if socket.assigns.run, do: Runs.get_run(socket.assigns.run.id), else: new_run(socket)
+      Chat.handle(run, body, files, to: recipient(socket.assigns.focus, socket.assigns.to))
+      socket = socket |> assign(draft: "", folder_warn: false) |> push_event("chat:sent", %{})
+
+      if socket.assigns.run,
+        do: {:noreply, socket},
+        else: {:noreply, push_patch(socket, to: chat_path(run, socket.assigns.focus))}
+    end
+  end
+
+  # A new chat keeps the workflow and folder chosen for it.
+  # A run for this chat: the latest empty one if there is one (opening Specs or Tasks
+  # from a fresh chat shouldn't pile up runs), else a new one named after the project.
+  defp new_run(socket) do
+    dir = if(socket.assigns.dir_ok, do: Path.expand(socket.assigns.dir))
+
+    run =
+      case Runs.latest_empty() do
+        nil ->
+          {:ok, run} = Runs.create_run(Runs.default_title(dir))
+          run
+
+        run ->
+          run
+      end
+
+    title =
+      if run.title in ["New run", "New chat"] or String.starts_with?(run.title, "New run ·"),
+        do: Runs.default_title(dir),
+        else: run.title
+
+    {:ok, run} =
+      Runs.update_run(run, %{
+        title: title,
+        settings: %{
+          "workflow_id" => socket.assigns.pick.id,
+          "base_spec_ids" => socket.assigns.base_ids,
+          "project_dir" => if(socket.assigns.dir_ok, do: Path.expand(socket.assigns.dir))
+        }
+      })
+
     run
+  end
+
+  defp browse(browser, dir) do
+    case FileBrowser.list(dir || System.user_home!(), hidden: browser.hidden) do
+      {:ok, listing} -> %{browser | listing: listing, error: nil}
+      {:error, reason} -> %{browser | error: reason}
+    end
   end
 
   def handle_info({:runs_changed}, socket), do: {:noreply, assign(socket, runs: Runs.list_runs())}
@@ -177,10 +411,17 @@ defmodule FactoryWeb.ChatLive do
   end
 
   # Re-render messages when the status changes so buttons like "Start run" disappear once used.
+  # A new plan's tasks, too: only the latest plan offers to implement.
   def handle_info({:run_updated, run}, socket) do
-    status_changed = socket.assigns.run && socket.assigns.run.status != run.status
+    old = socket.assigns.run
+
+    changed =
+      old &&
+        (old.status != run.status or
+           Enum.map(old.tasks, & &1.title) != Enum.map(run.tasks, & &1.title))
+
     socket = assign(socket, run: run, page_title: run.title)
-    {:noreply, if(status_changed, do: load_messages(socket), else: socket)}
+    {:noreply, if(changed, do: load_messages(socket), else: socket)}
   end
 
   def handle_info({:graph_changed}, socket) do
@@ -207,9 +448,59 @@ defmodule FactoryWeb.ChatLive do
 
     ~H"""
     <Layouts.app flash={@flash} usage={@usage_meter} active={:chat} full>
-      <div class="flex h-full flex-col bg-base-100">
-        <header class="flex min-h-13 shrink-0 items-center gap-3 px-4 pt-2 sm:px-6">
+      <div id="chat-page" phx-hook="ChatKeys" class="flex h-full flex-col bg-base-100">
+        <header class="flex min-h-11 shrink-0 flex-wrap items-center gap-x-2 gap-y-1.5 px-4 pt-1.5 sm:px-6">
           <.chat_switcher runs={@runs} run={@run} />
+          <.folder_button dir={@dir} ok={@dir_ok} warn={@folder_warn} locked={!settable?(@run)} />
+          <.workflow_picker
+            workflows={@workflows}
+            workflow={@workflow}
+            locked={!settable?(@run)}
+          />
+          <span class="mx-0.5 h-4 w-px bg-base-300" aria-hidden="true"></span>
+          <button
+            id="specs-button"
+            type="button"
+            phx-click="specs"
+            title="Base specs to follow, and this run's own spec"
+            class={[
+              "flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[13px] transition-colors hover:bg-base-content/[0.06]",
+              if(spec_count(assigns) > 0,
+                do: "border-primary/40",
+                else: "border-dashed border-base-300 text-base-content/65"
+              )
+            ]}
+          >
+            <.icon name="hero-document-text-mini" class="size-4 text-primary" /> Specs
+            <span
+              :if={spec_count(assigns) > 0}
+              class="rounded-full bg-primary/15 px-1.5 text-xs tabular-nums text-primary"
+            >
+              {spec_count(assigns)}
+            </span>
+          </button>
+          <button
+            :if={settable?(@run)}
+            id="tasks-button"
+            type="button"
+            phx-click="tasks"
+            title="Describe it or upload a file; Kiro studies the code and specs and makes the plan"
+            class={[
+              "flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[13px] transition-colors hover:bg-base-content/[0.06]",
+              if(@run && @run.tasks != [],
+                do: "border-success/40",
+                else: "border-dashed border-base-300 text-base-content/65"
+              )
+            ]}
+          >
+            <.icon name="hero-list-bullet-mini" class="size-4 text-success" /> Plan
+            <span
+              :if={@run && @run.tasks != []}
+              class="rounded-full bg-success/15 px-1.5 text-xs tabular-nums text-success"
+            >
+              {length(@run.tasks)}
+            </span>
+          </button>
           <Layouts.status_badge :if={@run} status={@run.status} />
           <span
             :if={@run_usage.turns > 0}
@@ -225,10 +516,18 @@ defmodule FactoryWeb.ChatLive do
           <span :if={@run && @run.tasks != []} class="hidden text-sm text-base-content/50 sm:inline">
             {Enum.count(@run.tasks, &(&1.status == "done"))} of {length(@run.tasks)} tasks done
           </span>
+          <.link
+            :if={@run && @run.kind}
+            id="run-details"
+            navigate={~p"/runs/#{@run.id}"}
+            class="hidden text-sm text-base-content/50 hover:text-base-content sm:inline"
+          >
+            Run details
+          </.link>
           <.view_switch view={@view} />
         </header>
 
-        <.agent_strip agents={@agents} focus={@focus} run={@run} />
+        <.flow_strip steps={@steps} focus={@focus} run={@run} />
 
         <%!-- Hidden rather than removed: the message stream isn't kept on the server, so re-adding it would come back empty. --%>
         <section
@@ -266,7 +565,17 @@ defmodule FactoryWeb.ChatLive do
             :if={@empty}
             class="flex min-h-0 flex-1 items-center justify-center overflow-hidden px-4 pb-40"
           >
-            <.greeting focus={@focus} />
+            <.greeting
+              focus={@focus}
+              to={@to}
+              dir={@dir}
+              dir_ok={@dir_ok}
+              workflow={@workflow}
+              uploads={@uploads}
+              specs={spec_count(assigns)}
+              chain={for st <- @steps, st.kind != "action", do: st.name}
+              last_run={last_run(@runs, @run)}
+            />
           </div>
 
           <div class="pointer-events-none absolute inset-x-0 bottom-0 bg-linear-to-t from-base-200 from-60% to-transparent px-4 pb-4 pt-10">
@@ -277,7 +586,9 @@ defmodule FactoryWeb.ChatLive do
               commands={@commands}
               agents={@agents}
               focus={@focus}
+              to={@to}
               run={@run}
+              glow={@empty and @dir_ok and @focus == nil}
             />
           </div>
 
@@ -310,7 +621,99 @@ defmodule FactoryWeb.ChatLive do
           </.link>
         </section>
       </div>
+
+      <div
+        :if={@browser}
+        id="folder-picker"
+        class="fixed inset-0 z-50 grid place-items-center bg-base-content/25 p-4 backdrop-blur-[2px]"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Choose the project folder"
+        phx-window-keydown="browse_cancel"
+        phx-key="Escape"
+      >
+        <div class="absolute inset-0" phx-click="browse_cancel" aria-hidden="true"></div>
+        <div class="relative w-full max-w-xl overflow-hidden rounded-2xl border border-base-300 bg-base-100 shadow-2xl">
+          <FactoryWeb.SourceParts.browser browser={@browser} />
+        </div>
+      </div>
     </Layouts.app>
+    """
+  end
+
+  attr :dir, :string, required: true
+  attr :ok, :boolean, required: true
+  attr :warn, :boolean, required: true
+  attr :locked, :boolean, required: true
+
+  # Where the agents work: red until a folder is chosen, green once it is.
+  defp folder_button(assigns) do
+    ~H"""
+    <button
+      id="folder-button"
+      type="button"
+      phx-click={!@locked && "browse"}
+      disabled={@locked}
+      title={if @ok, do: @dir, else: "Choose the folder the agents work in"}
+      class={[
+        "flex max-w-64 items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[13px] transition-colors disabled:cursor-default",
+        if(@ok,
+          do: "border-success/40 bg-success/[0.07] hover:border-success/70",
+          else: "border-error/50 bg-error/[0.08] text-error hover:border-error"
+        ),
+        @warn && !@ok && "animate-pulse ring-2 ring-error/40"
+      ]}
+    >
+      <span class={["size-2 shrink-0 rounded-full", if(@ok, do: "bg-success", else: "bg-error")]}></span>
+      <.icon name="hero-folder-mini" class="size-4 shrink-0 opacity-70" />
+      <span class="truncate">{if @ok, do: Path.basename(@dir), else: "Choose folder"}</span>
+    </button>
+    """
+  end
+
+  attr :workflows, :list, required: true
+  attr :workflow, :map, required: true
+  attr :locked, :boolean, required: true
+
+  # The workflow the chat plans for: "Build a feature" unless another is picked.
+  defp workflow_picker(assigns) do
+    ~H"""
+    <details
+      id="workflow-picker"
+      class="relative"
+      phx-click-away={JS.remove_attribute("open", to: "#workflow-picker")}
+    >
+      <summary class={[
+        "flex cursor-pointer list-none items-center gap-1.5 rounded-full border border-base-300 px-2.5 py-0.5 text-[13px] hover:bg-base-content/[0.06]",
+        @locked && "pointer-events-none"
+      ]}>
+        <.icon
+          name={FactoryWeb.RunParts.workflow_icon(@workflow, :micro)}
+          class="size-4 text-primary"
+        />
+        <span class="max-w-48 truncate">{@workflow.name}</span>
+        <.icon :if={!@locked} name="hero-chevron-down-mini" class="size-4 opacity-50" />
+      </summary>
+      <div class="absolute left-0 z-30 mt-1 w-72 rounded-2xl border border-base-content/10 bg-surface p-1.5 shadow-xl">
+        <p class="px-3 pb-1 pt-1.5 text-xs text-base-content/45">Workflow</p>
+        <button
+          :for={w <- @workflows}
+          type="button"
+          phx-click={
+            JS.push("pick_workflow", value: %{id: w.id})
+            |> JS.remove_attribute("open", to: "#workflow-picker")
+          }
+          class={[
+            "flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left text-sm hover:bg-base-content/[0.06]",
+            w.id == @workflow.id && "bg-base-200"
+          ]}
+        >
+          <.icon name={FactoryWeb.RunParts.workflow_icon(w, :micro)} class="size-4 text-primary" />
+          <span class="flex-1 truncate">{w.name}</span>
+          <.icon :if={w.id == @workflow.id} name="hero-check-mini" class="size-4" />
+        </button>
+      </div>
+    </details>
     """
   end
 
@@ -336,7 +739,7 @@ defmodule FactoryWeb.ChatLive do
         phx-click="view"
         phx-value-view={key}
         class={[
-          "flex items-center gap-1.5 rounded-md px-3 py-1 text-sm transition-colors",
+          "flex items-center gap-1.5 rounded-md px-2.5 py-0.5 text-[13px] transition-colors",
           if(@view == key,
             do: "bg-base-content/10 font-medium text-base-content",
             else: "text-base-content/55 hover:text-base-content"
@@ -360,8 +763,8 @@ defmodule FactoryWeb.ChatLive do
       class="relative min-w-0"
       phx-click-away={JS.remove_attribute("open", to: "#chat-switcher")}
     >
-      <summary class="flex cursor-pointer list-none items-center gap-1 rounded-lg px-2 py-1 hover:bg-base-content/[0.06]">
-        <span class="truncate font-semibold">{if @run, do: @run.title, else: "New chat"}</span>
+      <summary class="flex cursor-pointer list-none items-center gap-1 rounded-full px-3 py-1 hover:bg-base-content/[0.06]">
+        <span class="truncate text-[15px] font-semibold">{if @run, do: @run.title, else: "New run"}</span>
         <.icon name="hero-chevron-down-mini" class="size-4 shrink-0 opacity-50" />
       </summary>
       <div class="absolute left-0 z-30 mt-1 w-72 rounded-2xl border border-base-content/10 bg-surface p-1.5 shadow-xl">
@@ -369,7 +772,7 @@ defmodule FactoryWeb.ChatLive do
           navigate={~p"/chat"}
           class="flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-medium hover:bg-base-content/[0.06]"
         >
-          <.icon name="hero-pencil-square-mini" class="size-4" /> New chat
+          <.icon name="hero-pencil-square-mini" class="size-4" /> New run
         </.link>
         <p :if={@runs != []} class="px-3 pb-1 pt-2 text-xs text-base-content/45">Recent</p>
         <nav class="max-h-80 overflow-y-auto" aria-label="Chats">
@@ -394,22 +797,29 @@ defmodule FactoryWeb.ChatLive do
     """
   end
 
-  attr :agents, :list, required: true
+  attr :steps, :list, required: true
   attr :focus, :any, required: true
   attr :run, :any, required: true
 
-  # Who is busy with what. Click an agent to chat with just that agent; "All" shows everything.
-  defp agent_strip(assigns) do
+  # The workflow drawn small and live: who's busy, what's done, where it stopped. Click
+  # an agent to chat with just that agent (again to go back); "All" shows everything.
+  defp flow_strip(assigns) do
+    states = WorkflowMap.states(assigns.steps, assigns.run)
+
+    assigns =
+      assign(assigns, states: states, caption: caption(assigns.steps, states, assigns.run))
+
     ~H"""
     <nav
-      class="flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-base-300 px-4 pb-2.5 pt-1 sm:px-6"
-      aria-label="Agents"
+      id="flow-strip"
+      class="flex shrink-0 items-center gap-3 border-b border-base-300 px-4 sm:px-6"
+      aria-label="Workflow"
     >
       <.link
         id="agent-all"
         patch={chat_path(@run, nil)}
         class={[
-          "flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1 text-sm transition-colors",
+          "flex shrink-0 items-center rounded-full px-3 py-1 text-sm transition-colors",
           if(@focus == nil,
             do: "bg-base-content/10 font-medium text-base-content",
             else: "text-base-content/60 hover:bg-base-content/[0.06] hover:text-base-content"
@@ -418,77 +828,310 @@ defmodule FactoryWeb.ChatLive do
       >
         All
       </.link>
-      <span class="mx-1 h-4 w-px shrink-0 bg-base-300"></span>
-      <.link
-        :for={a <- @agents}
-        id={"agent-chip-#{a.id}"}
-        patch={chat_path(@run, if(@focus && @focus.id == a.id, do: nil, else: a))}
-        title={if a.role != "", do: a.role, else: "Chat with #{a.name}"}
-        class={[
-          "flex shrink-0 items-center gap-2 rounded-full border px-3 py-1 text-sm transition-colors",
-          cond do
-            @focus && @focus.id == a.id ->
-              "border-primary/50 bg-primary/10 text-base-content"
-
-            a.status in ["running", "waiting", "error"] ->
-              "border-base-content/15 hover:bg-base-content/[0.06]"
-
-            true ->
-              "border-transparent hover:bg-base-content/[0.06]"
-          end
-        ]}
+      <span class="h-5 w-px shrink-0 bg-base-300"></span>
+      <div
+        :if={@steps != []}
+        class="min-w-0 flex-1 overflow-x-auto px-1.5 py-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       >
-        <span class="relative flex size-2">
-          <span
-            :if={a.status == "running"}
-            class="absolute inline-flex size-full animate-ping rounded-full bg-info opacity-60 motion-reduce:hidden"
-          ></span>
-          <span class={["relative inline-flex size-2 rounded-full", Layouts.status_dot(a.status)]}></span>
-        </span>
-        <.icon name={FactoryWeb.AgentKinds.icon(a.kind)} class="-mx-0.5 size-4 opacity-70" />
-        <span class="font-medium">{a.name}</span>
-        <span
-          :if={a.usage["context_pct"]}
-          class="rounded-full bg-base-content/10 px-1.5 text-[11px] tabular-nums text-base-content/60"
-          title={"Context: " <> (FactoryWeb.Usage.context(a.usage) || "")}
-        >
-          {FactoryWeb.Usage.pct(a.usage["context_pct"])}
-        </span>
-        <span class={[
-          "max-w-56 truncate",
-          if(@focus && @focus.id == a.id, do: "opacity-70", else: Layouts.status_text(a.status))
-        ]}>
-          {agent_activity(a)}
-        </span>
-      </.link>
+        <WorkflowMap.map
+          id="chat-map"
+          steps={Enum.reject(@steps, &(&1.kind == "action"))}
+          states={@states}
+          focus={@focus && "agent-#{@focus.id}"}
+          link={&agent_link(&1, @run, @focus)}
+          patch
+        />
+      </div>
       <.link
-        :if={@agents == []}
+        :if={@steps == []}
         navigate={~p"/workflows"}
-        class="text-sm text-base-content/55 hover:underline"
+        class="flex-1 py-3.5 text-sm text-base-content/55 hover:underline"
       >
         No agents yet. Add them in Workflows.
       </.link>
+      <p
+        :if={@caption}
+        id="flow-caption"
+        class="hidden max-w-sm shrink-0 items-center gap-2 text-sm text-base-content/65 lg:flex"
+      >
+        <span class={["size-1.5 shrink-0 rounded-full", caption_dot(elem(@caption, 0))]}></span>
+        <span class="truncate">{elem(@caption, 1)}</span>
+      </p>
+      <button
+        :if={@run && @run.status in ["queued", "running"]}
+        id="pause-run"
+        type="button"
+        phx-click="control"
+        phx-value-command="/pause"
+        title="Pause after the step that's working now"
+        class="btn btn-ghost btn-xs shrink-0 gap-1"
+      >
+        <.icon name="hero-pause-mini" class="size-4" /> Pause
+      </button>
+      <button
+        :if={@run && @run.status == "paused"}
+        id="resume-run"
+        type="button"
+        phx-click="control"
+        phx-value-command="/resume"
+        title="Go on from the step it stopped at"
+        class="btn btn-xs shrink-0 gap-1"
+      >
+        <.icon name="hero-play-mini" class="size-4" /> Resume
+      </button>
     </nav>
     """
   end
 
-  defp agent_activity(%{status: "idle"}), do: "Idle"
+  # An agent's card opens the chat with it, or back with everyone if it's open already.
+  defp agent_link(%{kind: "action"}, _run, _focus), do: nil
+  defp agent_link(%{agent: nil}, _run, _focus), do: nil
 
-  defp agent_activity(%{activity: activity, status: status}),
-    do: activity || Layouts.status_label(status)
+  defp agent_link(%{agent: agent}, run, focus),
+    do: chat_path(run, if(focus && focus.id == agent.id, do: nil, else: agent))
+
+  # One line on where the workflow is: who's working on what, or where it stopped.
+  defp caption(steps, states, run) do
+    busy = Enum.find(steps, &(states[&1.id] == :busy))
+    stuck = run && Enum.find(steps, &(states[&1.id] in [:error, :paused]))
+
+    cond do
+      busy ->
+        {:busy, "#{busy.name}: #{(busy.agent && busy.agent.activity) || "working"}"}
+
+      stuck && states[stuck.id] == :error ->
+        {:error, "Stopped at #{stuck.name}. Fix the cause, then /resume."}
+
+      stuck ->
+        {:paused, "Paused at #{stuck.name}. /resume to go on."}
+
+      run && run.status == "done" ->
+        {:done, "Done: all #{length(steps)} steps ran."}
+
+      run && run.status == "queued" ->
+        {:queued, "Queued, starting…"}
+
+      true ->
+        nil
+    end
+  end
+
+  defp caption_dot(:busy), do: "bg-primary animate-pulse"
+  defp caption_dot(:error), do: "bg-error"
+  defp caption_dot(:paused), do: "bg-warning"
+  defp caption_dot(:done), do: "bg-success"
+  defp caption_dot(_), do: "bg-base-content/30"
 
   attr :focus, :any, required: true
+  attr :to, :any, default: nil
+  attr :dir, :string, default: ""
+  attr :dir_ok, :boolean, default: false
+  attr :workflow, :map, default: nil
+  attr :uploads, :map, default: nil
+  attr :specs, :integer, default: 0
+  attr :chain, :list, default: []
+  attr :last_run, :any, default: nil
+
+  # A new chat: three quick steps, then describe the change and the planner plans it.
+  # Set up (a folder is chosen): what the run is, in a small table you can change in
+  # place, and the two ways to plan it. Left-aligned with the message box it leads to.
+  defp greeting(%{focus: nil, dir_ok: true} = assigns) do
+    ~H"""
+    <div id="chat-ready" class="relative w-full max-w-3xl px-1">
+      <p class="text-xs font-medium uppercase tracking-[0.12em] text-base-content/45">
+        New run · {Calendar.strftime(Date.utc_today(), "%-d %b")}
+      </p>
+      <h1 class="mt-1.5 text-[28px] font-semibold leading-tight tracking-tight font-stretch-semi-condensed">
+        What are we building in <span class="text-primary">{Path.basename(@dir)}</span>?
+      </h1>
+
+      <dl class="mt-6 space-y-0.5 text-sm">
+        <div class="group/row -mx-2 grid grid-cols-[1.75rem_5rem_minmax(0,1fr)_auto] items-center gap-3 rounded-lg px-2 py-2 transition-colors hover:bg-base-content/[0.03]">
+          <span class="grid size-7 place-items-center rounded-md bg-success/12 text-success">
+            <.icon name="hero-folder-mini" class="size-4" />
+          </span>
+          <dt class="text-base-content/50">Project</dt>
+          <dd class="truncate font-mono text-[12.5px] text-base-content/80" title={@dir}>
+            {short_dir(@dir)}
+          </dd>
+          <button
+            type="button"
+            phx-click="browse"
+            class="rounded-md px-2 py-0.5 text-xs text-base-content/45 transition-colors hover:bg-base-content/[0.06] hover:text-base-content group-hover/row:text-base-content/70"
+          >
+            Change
+          </button>
+        </div>
+        <div class="group/row -mx-2 grid grid-cols-[1.75rem_5rem_minmax(0,1fr)_auto] items-center gap-3 rounded-lg px-2 py-2 transition-colors hover:bg-base-content/[0.03]">
+          <span class="grid size-7 place-items-center rounded-md bg-primary/12 text-primary">
+            <.icon name={FactoryWeb.RunParts.workflow_icon(@workflow, :micro)} class="size-4" />
+          </span>
+          <dt class="text-base-content/50">Workflow</dt>
+          <dd class="min-w-0 truncate">
+            {@workflow.name}
+            <span :if={@chain != []} class="text-base-content/45">
+              · {Enum.join(@chain, " → ")}
+            </span>
+          </dd>
+          <button
+            type="button"
+            phx-click={JS.set_attribute({"open", ""}, to: "#workflow-picker")}
+            class="rounded-md px-2 py-0.5 text-xs text-base-content/45 transition-colors hover:bg-base-content/[0.06] hover:text-base-content group-hover/row:text-base-content/70"
+          >
+            Change
+          </button>
+        </div>
+        <div class="group/row -mx-2 grid grid-cols-[1.75rem_5rem_minmax(0,1fr)_auto] items-center gap-3 rounded-lg px-2 py-2 transition-colors hover:bg-base-content/[0.03]">
+          <span class={[
+            "grid size-7 place-items-center rounded-md",
+            if(@specs == 0, do: "bg-warning/12 text-warning", else: "bg-primary/12 text-primary")
+          ]}>
+            <.icon name="hero-document-text-mini" class="size-4" />
+          </span>
+          <dt class="text-base-content/50">Specs</dt>
+          <dd :if={@specs == 0} class="min-w-0 truncate text-base-content/55">
+            None. Agents follow only what you write; add your standards so they follow those too.
+          </dd>
+          <dd :if={@specs > 0} class="min-w-0 truncate">
+            {@specs} attached
+          </dd>
+          <button
+            type="button"
+            phx-click="specs"
+            class={[
+              "text-xs hover:text-base-content",
+              if(@specs == 0, do: "font-medium text-warning", else: "text-base-content/45")
+            ]}
+          >
+            {if @specs == 0, do: "Add", else: "Change"}
+          </button>
+        </div>
+      </dl>
+
+      <p class="mt-6 max-w-2xl text-[15px] leading-relaxed text-base-content/65">
+        Describe the change below. {if is_map(@to), do: @to.name, else: "The planner"} reads
+        the code, asks about anything unclear, and lists the tasks for you to refine. Starting
+        from a requirements document instead?
+        <button
+          id="open-plan"
+          type="button"
+          phx-click="tasks"
+          class="font-medium text-base-content underline decoration-base-content/30 underline-offset-4 hover:decoration-base-content"
+        >
+          Open Plan
+        </button>
+      </p>
+
+      <div :if={examples(@workflow) != []} id="examples" class="mt-5 flex flex-wrap gap-2">
+        <button
+          :for={ex <- examples(@workflow)}
+          type="button"
+          phx-click={JS.dispatch("factory:fill", to: "#chat-input", detail: %{text: ex})}
+          class="rounded-full border border-base-300 px-3 py-1 text-[13px] text-base-content/70 transition-colors hover:border-primary/40 hover:bg-primary/[0.05] hover:text-base-content"
+        >
+          {ex}
+        </button>
+      </div>
+
+      <div class="mt-8 flex flex-wrap items-center gap-3 border-t border-base-300/60 pt-4 text-xs text-base-content/50">
+        <.link
+          :if={@last_run}
+          id="last-run"
+          navigate={~p"/chat/#{@last_run.id}"}
+          class="flex min-w-0 items-center gap-2 hover:text-base-content"
+        >
+          <span class={["size-1.5 shrink-0 rounded-full", Layouts.status_dot(@last_run.status)]}></span>
+          <span class="truncate">
+            Last: <span class="text-base-content/75">{@last_run.title}</span>
+            · {Layouts.status_label(@last_run.status)}
+          </span>
+          <span :if={@last_run.status == "paused"} class="shrink-0 font-medium text-warning">
+            Resume →
+          </span>
+        </.link>
+        <span class="ml-auto hidden items-center gap-3 sm:flex">
+          <span><kbd class="launcher-kbd">⌘K</kbd> type</span>
+          <span><kbd class="launcher-kbd">P</kbd> Plan</span>
+        </span>
+      </div>
+    </div>
+    """
+  end
 
   defp greeting(%{focus: nil} = assigns) do
     ~H"""
-    <div class="mb-8 max-w-xl text-center">
-      <h1 class="text-4xl font-semibold tracking-tight font-stretch-semi-condensed">
-        What should the factory build?
+    <div id="chat-start" class="mb-8 w-full max-w-xl">
+      <h1 class="text-center text-4xl font-semibold tracking-tight font-stretch-semi-condensed">
+        What should we build?
       </h1>
-      <p class="mt-3 text-base-content/60">
-        Drop a spec (requirements.md, design.md, tasks.md) and I'll read the tasks from it.
-        Pick an agent above to talk to it directly.
+      <p class="mt-3 text-center text-base-content/60">
+        Describe the change and {if is_map(@to), do: @to.name, else: "the planner"} turns it into tasks.
+        Refine them together, then implement.
       </p>
+
+      <ol class="mt-8 space-y-2">
+        <li>
+          <button
+            type="button"
+            phx-click="browse"
+            class={[
+              "flex w-full items-center gap-3 rounded-2xl border px-4 py-3 text-left transition-colors",
+              if(@dir_ok,
+                do: "border-success/40 bg-success/[0.06] hover:border-success/70",
+                else: "border-error/50 bg-error/[0.06] hover:border-error"
+              )
+            ]}
+          >
+            <span class={[
+              "grid size-6 shrink-0 place-items-center rounded-full text-xs font-medium",
+              if(@dir_ok, do: "bg-success text-success-content", else: "bg-error text-error-content")
+            ]}>
+              <.icon :if={@dir_ok} name="hero-check-micro" class="size-4" />
+              <span :if={!@dir_ok}>1</span>
+            </span>
+            <span class="min-w-0 flex-1">
+              <span class="block text-sm font-medium">
+                {if @dir_ok,
+                  do: "Working in #{Path.basename(@dir)}",
+                  else: "Choose the project folder"}
+              </span>
+              <span class="block truncate text-xs text-base-content/55">
+                {if @dir_ok, do: @dir, else: "Required: where the agents read and change code"}
+              </span>
+            </span>
+            <span class="text-xs text-base-content/55">{if @dir_ok, do: "Change", else: "Browse…"}</span>
+          </button>
+        </li>
+        <li class="flex items-center gap-3 rounded-2xl border border-base-300/70 px-4 py-3">
+          <span class="grid size-6 shrink-0 place-items-center rounded-full bg-success text-success-content">
+            <.icon name="hero-check-micro" class="size-4" />
+          </span>
+          <span class="min-w-0 flex-1">
+            <span class="block text-sm font-medium">{@workflow && @workflow.name}</span>
+            <span class="block text-xs text-base-content/55">
+              The workflow. Change it at the top.
+            </span>
+          </span>
+        </li>
+        <li :if={@uploads}>
+          <button
+            id="add-spec"
+            type="button"
+            phx-click="specs"
+            class="flex w-full cursor-pointer items-center gap-3 rounded-2xl border border-dashed border-base-300 px-4 py-3 text-left transition-colors hover:border-base-content/30"
+          >
+            <span class="grid size-6 shrink-0 place-items-center rounded-full border border-base-content/25 text-base-content/55">
+              <.icon name="hero-document-plus-micro" class="size-3.5" />
+            </span>
+            <span class="min-w-0 flex-1">
+              <span class="block text-sm font-medium">Add a spec or requirements</span>
+              <span class="block text-xs text-base-content/55">
+                Optional: your base specs, or this run's own. Or just describe the change below.
+              </span>
+            </span>
+          </button>
+        </li>
+      </ol>
     </div>
     """
   end
@@ -502,15 +1145,9 @@ defmodule FactoryWeb.ChatLive do
       <h1 class="mt-4 text-4xl font-semibold tracking-tight font-stretch-semi-condensed">
         Chat with {@focus.name}
       </h1>
-      <p :if={@focus.runtime == "kiro_v3"} class="mt-3 text-base-content/60">
-        Runs on Kiro v3 with {@focus.model} in {@focus.kiro_mode} mode. {if @focus.role != "",
+      <p class="mt-3 text-base-content/60">
+        Runs on Kiro with {@focus.model} in {@focus.kiro_mode} mode. {if @focus.role != "",
           do: @focus.role <> "."}
-      </p>
-      <p :if={@focus.runtime != "kiro_v3"} class="mt-3 text-base-content/60">
-        {@focus.name} isn't connected to Kiro yet.
-        <.link navigate={~p"/workflows/#{@focus.id}"} class="text-primary hover:underline">
-          Connect it in Workflows
-        </.link>
       </p>
     </div>
     """
@@ -539,7 +1176,27 @@ defmodule FactoryWeb.ChatLive do
   defp message(%{message: %{author: author}} = assigns) when is_binary(author) do
     ~H"""
     <div id={@id}>
+      <p
+        :if={@message.meta["unclear"]}
+        class="mb-2 inline-flex items-center gap-1.5 rounded-full bg-warning/12 px-2.5 py-0.5 text-xs font-medium text-warning"
+      >
+        <.icon name="hero-question-mark-circle-mini" class="size-4" />
+        Not clear enough to plan yet: more information needed
+      </p>
       <.agent_reply id={"md-#{@id}"} name={@message.author} body={@message.body} meta={@message.meta} />
+      <p :if={@message.meta["unclear"]} class="mt-2 text-sm text-base-content/55">
+        Answer below, and I'll make the tasks.
+      </p>
+      <.plan_card
+        :if={@message.meta["tasks"] not in [nil, []]}
+        id={"plan-#{@message.id}"}
+        tasks={@message.meta["tasks"]}
+        spec_hint={@message.meta["spec_hint"]}
+        startable={
+          "start" in @message.actions and startable?(@run) and
+            Enum.map(@run.tasks, & &1.title) == @message.meta["tasks"]
+        }
+      />
     </div>
     """
   end
@@ -565,6 +1222,58 @@ defmodule FactoryWeb.ChatLive do
       >
         <.icon name="hero-play-mini" class="size-4" /> Start run
       </button>
+    </div>
+    """
+  end
+
+  attr :id, :string, required: true
+  attr :tasks, :list, required: true
+  attr :spec_hint, :boolean, default: false
+  attr :startable, :boolean, required: true
+
+  # The planner's tasks, and the question whether to build them.
+  defp plan_card(assigns) do
+    ~H"""
+    <div id={@id} class="task-card-active mt-3 rounded-2xl border p-4">
+      <p class="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-base-content/55">
+        <.icon name="hero-clipboard-document-list-mini" class="size-4 text-primary" />
+        Created {length(@tasks)} {if length(@tasks) == 1, do: "task", else: "tasks"}
+      </p>
+      <ol class="mt-3 space-y-1.5">
+        <li :for={{title, i} <- Enum.with_index(@tasks, 1)} class="flex gap-3 text-sm">
+          <span class="w-5 shrink-0 text-right tabular-nums text-base-content/45">{i}.</span>
+          <span>{title}</span>
+        </li>
+      </ol>
+      <p
+        :if={@spec_hint && @startable}
+        class="mt-3 flex items-center gap-2 text-xs text-base-content/55"
+      >
+        <.icon name="hero-document-plus-mini" class="size-4" />
+        Have a spec or requirements? Add them in Specs above and I'll plan again. Or go on without.
+      </p>
+      <div
+        :if={@startable}
+        class="mt-4 flex flex-wrap items-center gap-3 border-t border-base-content/10 pt-4"
+      >
+        <span class="mr-auto text-sm font-medium">Do you want to implement these changes?</span>
+        <button
+          type="button"
+          phx-click={JS.focus(to: "#chat-input")}
+          class="btn btn-ghost btn-sm"
+        >
+          Keep refining
+        </button>
+        <button
+          id={"implement-#{@id}"}
+          type="button"
+          phx-click="action"
+          phx-value-action="start"
+          class="btn btn-primary btn-sm"
+        >
+          <.icon name="hero-play-mini" class="size-4" /> Yes, implement
+        </button>
+      </div>
     </div>
     """
   end
@@ -687,13 +1396,71 @@ defmodule FactoryWeb.ChatLive do
 
   defp escape(text), do: text |> Phoenix.HTML.html_escape() |> Phoenix.HTML.safe_to_string()
 
+  attr :agent, :any, required: true
+
+  # How full the addressed agent's Kiro context is, and a button to compact it. Shown
+  # while its session runs, or right after a compaction until the next reply.
+  defp context_chip(%{agent: %{usage: usage}} = assigns) when is_map(usage) do
+    pct = usage["context_pct"]
+    assigns = assign(assigns, pct: pct, usage: usage, level: FactoryWeb.Usage.level(pct))
+
+    ~H"""
+    <div
+      :if={@pct || @usage["compacted_from"]}
+      id="context-chip"
+      class={[
+        "ctx-chip flex h-8 items-center overflow-hidden rounded-full border text-xs tabular-nums",
+        @level && "is-#{@level}"
+      ]}
+    >
+      <span
+        class="flex items-center gap-1.5 pl-2.5 pr-2"
+        title={
+          "#{@agent.name}'s context: #{FactoryWeb.Usage.context(@usage)}. " <>
+            "It's compacted automatically before the next message at #{FactoryWeb.Usage.compact_at()}%."
+        }
+      >
+        <svg :if={@pct} viewBox="0 0 16 16" class="ctx-ring size-4 -rotate-90" aria-hidden="true">
+          <circle cx="8" cy="8" r="6" pathLength="100" class="ctx-track" />
+          <circle
+            cx="8"
+            cy="8"
+            r="6"
+            pathLength="100"
+            class="ctx-fill"
+            stroke-dasharray={"#{min(@pct, 100)} 100"}
+          />
+        </svg>
+        <.icon :if={!@pct} name="hero-arrows-pointing-in-mini" class="size-4 opacity-60" />
+        <span :if={@pct}>{FactoryWeb.Usage.pct(@pct)}</span>
+        <span :if={!@pct} class="text-base-content/55">Compacted</span>
+      </span>
+      <button
+        :if={@pct}
+        id="compact-chip"
+        type="button"
+        phx-click="compact"
+        phx-value-id={@agent.id}
+        class="flex h-full items-center gap-1 border-l border-current/15 px-2.5 font-medium transition-colors hover:bg-base-content/[0.07]"
+        title="Summarize the conversation by fixed rules (the latest messages stay word for word) and continue in a fresh Kiro session"
+      >
+        <.icon name="hero-arrows-pointing-in-mini" class="size-3.5" /> Compact
+      </button>
+    </div>
+    """
+  end
+
+  defp context_chip(assigns), do: ~H""
+
   attr :form, :any, required: true
   attr :uploads, :map, required: true
   attr :draft, :string, required: true
   attr :commands, :list, required: true
   attr :agents, :list, required: true
   attr :focus, :any, required: true
+  attr :to, :any, default: nil
   attr :run, :any, required: true
+  attr :glow, :boolean, default: false
 
   # Rounded card: attachments, the message, then a toolbar with attach, recipient and send.
   defp composer(assigns) do
@@ -733,7 +1500,10 @@ defmodule FactoryWeb.ChatLive do
         </li>
       </ul>
 
-      <div class="composer-box rounded-[26px] border border-base-content/15 shadow-[0_1px_2px_rgb(0_0_0/0.06),0_8px_28px_-8px_rgb(0_0_0/0.28)] transition-[border-color,box-shadow] focus-within:border-base-content/30 focus-within:shadow-[0_1px_2px_rgb(0_0_0/0.06),0_10px_32px_-8px_rgb(0_0_0/0.36)]">
+      <div class={[
+        "composer-box rounded-[26px] border border-base-content/15 shadow-[0_1px_2px_rgb(0_0_0/0.06),0_8px_28px_-8px_rgb(0_0_0/0.28)] transition-[border-color,box-shadow] focus-within:border-base-content/30 focus-within:shadow-[0_1px_2px_rgb(0_0_0/0.06),0_10px_32px_-8px_rgb(0_0_0/0.36)]",
+        @glow && "is-glow"
+      ]}>
         <div :if={@uploads.spec.entries != []} class="flex flex-wrap gap-2 px-4 pt-4">
           <span
             :for={entry <- @uploads.spec.entries}
@@ -769,11 +1539,7 @@ defmodule FactoryWeb.ChatLive do
           phx-hook="ChatInput"
           phx-debounce="100"
           rows="1"
-          placeholder={
-            if @focus,
-              do: "Message #{@focus.name}…",
-              else: "Message the factory, or type / for commands"
-          }
+          placeholder={placeholder(recipient(@focus, @to), @run)}
           class="block max-h-[240px] min-h-[52px] w-full resize-none bg-transparent px-5 pb-1 pt-4 text-[15px] leading-6 outline-none placeholder:text-base-content/40 focus-visible:outline-none"
           aria-label="Message"
         ></textarea>
@@ -789,7 +1555,8 @@ defmodule FactoryWeb.ChatLive do
           </label>
           <.live_file_input upload={@uploads.spec} class="sr-only" />
 
-          <.recipient_picker agents={@agents} focus={@focus} run={@run} />
+          <.recipient_picker agents={@agents} focus={@focus} to={@to} run={@run} />
+          <.context_chip agent={recipient(@focus, @to)} />
 
           <span class="ml-auto hidden pr-1 text-xs text-base-content/35 sm:inline">
             Enter to send · Shift+Enter for a new line
@@ -817,54 +1584,68 @@ defmodule FactoryWeb.ChatLive do
 
   attr :agents, :list, required: true
   attr :focus, :any, required: true
+  attr :to, :any, default: nil
   attr :run, :any, required: true
 
-  # "To: Factory ▾" — who the message goes to.
+  # "To: Planner ▾" — who the message goes to: the planner unless another is picked.
   defp recipient_picker(assigns) do
+    assigns =
+      assign(assigns,
+        current: recipient(assigns.focus, assigns.to),
+        run_draft: settable?(assigns.run)
+      )
+
     ~H"""
     <details
       id="recipient"
       class="relative"
       phx-click-away={JS.remove_attribute("open", to: "#recipient")}
     >
-      <summary class="flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-full px-3 text-sm text-base-content/70 transition-colors hover:bg-base-content/[0.06] hover:text-base-content">
+      <summary class={[
+        "flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-full px-3 text-sm transition-colors hover:bg-base-content/[0.06] hover:text-base-content",
+        if(@current, do: "bg-primary/10 text-base-content", else: "text-base-content/70")
+      ]}>
         <.icon
-          name={if @focus, do: "hero-cpu-chip-mini", else: "hero-bolt-mini"}
-          class="size-4"
+          name={if @current, do: FactoryWeb.RunParts.kind_icon(@current.kind), else: "hero-bolt-mini"}
+          class={["size-4", @current && "text-primary"]}
         />
-        <span class="max-w-40 truncate">{if @focus, do: @focus.name, else: "Factory"}</span>
+        <span class="max-w-40 truncate">{if @current, do: @current.name, else: "Factory"}</span>
         <.icon name="hero-chevron-down-mini" class="size-4 opacity-50" />
       </summary>
-      <div class="absolute bottom-full left-0 z-30 mb-2 w-64 rounded-2xl border border-base-content/10 bg-surface p-1.5 shadow-xl">
+      <div class="absolute bottom-full left-0 z-30 mb-2 w-72 rounded-2xl border border-base-content/10 bg-surface p-1.5 shadow-xl">
         <p class="px-3 pb-1 pt-1.5 text-xs text-base-content/45">Send to</p>
-        <.link
-          patch={chat_path(@run, nil)}
-          class={[
-            "flex items-center gap-2.5 rounded-xl px-3 py-2 text-sm hover:bg-base-content/[0.06]",
-            @focus == nil && "bg-base-200"
-          ]}
-        >
-          <.icon name="hero-bolt-mini" class="size-4" />
-          <span class="flex-1">Factory <span class="text-base-content/45">commands, specs</span></span>
-          <.icon :if={@focus == nil} name="hero-check-mini" class="size-4" />
-        </.link>
-        <.link
+        <button
           :for={a <- @agents}
-          patch={chat_path(@run, a)}
+          type="button"
+          phx-click={
+            JS.push("to", value: %{id: a.id}) |> JS.remove_attribute("open", to: "#recipient")
+          }
           class={[
-            "flex items-center gap-2.5 rounded-xl px-3 py-2 text-sm hover:bg-base-content/[0.06]",
-            @focus && @focus.id == a.id && "bg-base-200"
+            "flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left text-sm hover:bg-base-content/[0.06]",
+            @current && @current.id == a.id && "bg-base-200"
           ]}
         >
           <span class={["size-2 rounded-full", Layouts.status_dot(a.status)]}></span>
           <span class="flex-1 truncate">
             {a.name}
             <span class="text-base-content/45">
-              {if a.runtime == "kiro_v3", do: a.model, else: "not connected"}
+              {if a.kind == "planner" and @run_draft, do: "plans the tasks", else: a.model}
             </span>
           </span>
-          <.icon :if={@focus && @focus.id == a.id} name="hero-check-mini" class="size-4" />
-        </.link>
+          <.icon :if={@current && @current.id == a.id} name="hero-check-mini" class="size-4" />
+        </button>
+        <button
+          type="button"
+          phx-click={JS.push("to", value: %{id: ""}) |> JS.remove_attribute("open", to: "#recipient")}
+          class={[
+            "flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left text-sm hover:bg-base-content/[0.06]",
+            @current == nil && "bg-base-200"
+          ]}
+        >
+          <.icon name="hero-bolt-mini" class="size-4" />
+          <span class="flex-1">Factory <span class="text-base-content/45">commands, specs</span></span>
+          <.icon :if={@current == nil} name="hero-check-mini" class="size-4" />
+        </button>
       </div>
     </details>
     """
@@ -874,4 +1655,41 @@ defmodule FactoryWeb.ChatLive do
   defp upload_error(:not_accepted), do: "only .md and .txt files"
   defp upload_error(:too_many_files), do: "up to 5 files at a time"
   defp upload_error(err), do: to_string(err)
+
+  defp short_dir(dir) do
+    home = System.user_home!()
+    if String.starts_with?(dir, home), do: "~" <> String.replace_prefix(dir, home, ""), else: dir
+  end
+
+  # Starting points for the message box, by the kind of job the workflow does.
+  @examples %{
+    "feature" => [
+      "Add a dark mode toggle to the settings page",
+      "Let users export the list as CSV",
+      "Add search with filters to the main list"
+    ],
+    "bug" => [
+      "Saving the form logs the user out",
+      "The page crashes when the list is empty",
+      "Dates show in the wrong time zone"
+    ],
+    "issue" => [
+      "Resolve this issue: (paste the link or the text)",
+      "Triage the open issue about slow page loads"
+    ],
+    "deps" => [
+      "Update all dependencies to their latest minor versions",
+      "Upgrade the framework to its newest major version",
+      "Fix the security advisories in our dependencies"
+    ]
+  }
+
+  defp examples(workflow), do: Map.get(@examples, Workflows.kind(workflow), [])
+
+  # The run worked on last, other than this one: one that has started or has tasks.
+  defp last_run(runs, current) do
+    Enum.find(runs, fn r ->
+      (current == nil or r.id != current.id) and (r.status != "draft" or r.tasks != [])
+    end)
+  end
 end

@@ -21,6 +21,9 @@ defmodule Factory.Usage do
     "improve_task" => "Improve task",
     "draft_task" => "Refine new task",
     "plan_run" => "Plan run",
+    "plan_chat" => "Plan in chat",
+    "run_step" => "Run step",
+    "title" => "Chat title",
     "other" => "Other"
   }
 

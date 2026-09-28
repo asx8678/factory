@@ -9,3 +9,6 @@ if Repo.aggregate(Agents.Agent, :count) == 0 do
       model: "claude-opus-5-5"
     })
 end
+
+# Example base specs (coding standards, testing, security…) to include in runs.
+Factory.Specs.Examples.install()

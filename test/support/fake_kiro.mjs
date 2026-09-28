@@ -46,6 +46,16 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       cost(sessionId, 0.25)
       return out({ id: m.id, result: { stopReason: "end_turn" } })
     }
+    // Planning in a chat: a short reply and tasks; asked again, one more task.
+    if (text.includes('<task-planning step="chat">')) {
+      update(sessionId, { sessionUpdate: "tool_call", kind: "read", title: "Read File", locations: [{ path: process.cwd() + "/mix.exs" }] })
+      const again = !text.includes("None yet.")
+      const tasks = [{ title: "Add the export button to the invoices page", details: ["In `lib/app_web/live/invoices_live.ex`."] }, { title: "Write the CSV for the invoices shown", details: ["New `lib/app/invoices/csv.ex`.", "Test it in `test/app/invoices/csv_test.exs`."] }]
+      if (again) tasks.push({ title: "Test an empty month", details: ["Returns just the header row."] })
+      update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: JSON.stringify({ reply: again ? "Added a test for an empty month." : "The invoices page lists invoices in invoices_live.ex; I'd add a button there and a small CSV module.", tasks }) } })
+      cost(sessionId, 0.3)
+      return out({ id: m.id, result: { stopReason: "end_turn" } })
+    }
     // Planning a factory run: requirements, design, tasks; the workflow and model when asked.
     // An overview containing "no plan" gets a reply without tasks.
     if (text.includes('<task-planning step="run">')) {
@@ -56,8 +66,6 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
         tasks: text.includes("no plan") ? [] : [{ title: "Add a failing test for the redirect", details: ["In `test/session_test.exs`."], requirements: ["1"] }, { title: "Keep the return path", details: [], requirements: ["1"] }],
         why: "The redirect lives in session_controller.ex.",
       }
-      if (text.includes('Put it in "workflow"')) plan.workflow = [{ kind: "researcher", name: "Sleuth", does: "Finds it" }, { kind: "coder", name: "Fixer", does: "Fixes it" }, { kind: "wizard", name: "Nope" }]
-      if (text.includes('Put it in "model"')) plan.model = "claude-haiku-4.5"
       cost(sessionId, 0.4)
       update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: JSON.stringify(plan) } })
       return out({ id: m.id, result: { stopReason: "end_turn" } })
@@ -81,11 +89,21 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     }
     // A spec review answers with JSON in a fence, split over chunks like Kiro streams it;
     // a spec containing "unreadable" gets prose instead.
+    if (text.includes("<run-title>")) {
+      update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: '"Login redirect after draft save."\n' } })
+      return out({ id: m.id, result: { stopReason: "end_turn" } })
+    }
     if (text.includes("<spec-review>")) {
       const review = { score: 62, summary: "Clear goal, but most requirements lack acceptance criteria.", checks: [{ id: "acceptance", status: "fail", note: "Requirement 2 has no acceptance criteria." }, { id: "requirements", status: "pass", note: "Each requirement is specific." }, { id: "made_up", status: "pass", note: "ignored" }], improvements: ["Add WHEN/THEN criteria to Requirement 2."] }
       const reply = text.includes("unreadable") ? "This spec looks fine to me." : "```json\n" + JSON.stringify(review) + "\n```"
       for (const part of [reply.slice(0, 20), reply.slice(20)]) update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: part } })
       cost(sessionId, 0.25)
+      return out({ id: m.id, result: { stopReason: "end_turn" } })
+    }
+    // A step told to send the work back does, until it's another pass.
+    if (text.includes("[test:send-back]") && text.includes("Send back: <what to fix>")) {
+      const again = text.includes("This is another pass")
+      update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: again ? "Checked.\nApproved" : "Checked.\nSend back: add the missing test" } })
       return out({ id: m.id, result: { stopReason: "end_turn" } })
     }
     const finish = () => {
@@ -98,7 +116,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     }
     if (text.includes("write")) {
       waiting = (reply) => { waiting = null; update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `[${reply.result.outcome.optionId}] ` } }); finish() }
-      out({ id: 900, method: "session/request_permission", params: { sessionId, toolCall: { title: "Write notes.md" }, options: [{ optionId: "allow", kind: "allow_once" }, { optionId: "deny", kind: "reject_once" }] } })
+      out({ id: 900, method: "session/request_permission", params: { sessionId, toolCall: { title: "Write notes.md", kind: "edit" }, options: [{ optionId: "allow", kind: "allow_once" }, { optionId: "deny", kind: "reject_once" }] } })
     } else finish()
   }
 })

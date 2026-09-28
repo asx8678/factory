@@ -12,7 +12,7 @@ defmodule FactoryWeb.WorkflowsLive do
 
   # Model and mode are switched per message, and prompt edits are re-sent, so only these
   # need a fresh session: its folder, or which session the agent talks in.
-  @restart_fields [:runtime, :workdir, :session]
+  @restart_fields [:session]
 
   def mount(_params, _session, socket) do
     if connected?(socket), do: Agents.subscribe()
@@ -32,12 +32,20 @@ defmodule FactoryWeb.WorkflowsLive do
        source_kind: nil,
        source_form: nil,
        editing_source: nil,
+       # Where the source form goes after Save or Back: the list it came from, or
+       # nil to close (opened from its card on the canvas, or to add a source).
+       source_return: nil,
+       # The arrow whose hand-off prompt is being edited: %{link:, from:, to:}.
+       link_prompt: nil,
        browser: nil,
        source_agents: [],
        attached: MapSet.new(),
        action_result: nil,
        action_draft: nil,
-       new_action_id: nil
+       new_action_id: nil,
+       # The window choosing the base specs this workflow's runs start with.
+       base_window: false,
+       base_specs: []
      )
      |> allow_upload(:source_file,
        accept: ~w(.md .markdown .txt),
@@ -83,12 +91,18 @@ defmodule FactoryWeb.WorkflowsLive do
     end
   end
 
+  # The workflow picked here is the one picked everywhere: the chat plans with it too.
   def handle_params(params, uri, socket) do
     workflow =
       case params["workflow_id"] do
-        nil -> Workflows.current()
+        nil -> Workflows.picked()
         id -> Workflows.get(id)
       end
+
+    workflow =
+      if workflow && !workflow.current,
+        do: elem(Workflows.set_current(workflow), 1),
+        else: workflow
 
     if workflow do
       socket
@@ -346,6 +360,26 @@ defmodule FactoryWeb.WorkflowsLive do
     end
   end
 
+  # Base specs: the ones this workflow's runs start with.
+
+  def handle_event("wf_base_specs", _, socket),
+    do: {:noreply, assign(socket, base_window: true, base_specs: Factory.Specs.list_base_specs())}
+
+  def handle_event("wf_base_close", _, socket), do: {:noreply, assign(socket, base_window: false)}
+
+  def handle_event("wf_toggle_base", %{"id" => id}, socket) do
+    id = String.to_integer(id)
+    w = socket.assigns.workflow
+
+    ids =
+      if id in w.base_spec_ids,
+        do: List.delete(w.base_spec_ids, id),
+        else: w.base_spec_ids ++ [id]
+
+    {:ok, w} = Workflows.set_base_specs(w, ids)
+    {:noreply, assign(socket, workflow: w)}
+  end
+
   def handle_event("wf_clone", _, socket) do
     {:ok, copy} = Workflows.clone(socket.assigns.workflow)
 
@@ -381,14 +415,27 @@ defmodule FactoryWeb.WorkflowsLive do
     end
   end
 
-  def handle_event("wf_use", _, socket) do
-    {:ok, w} = Workflows.set_current(socket.assigns.workflow)
+  # An arrow's hand-off prompt: said to the receiving agent when work passes along it.
+  # Canvas edge ids are "lID".
 
-    {:noreply,
-     socket
-     |> assign(workflow: w, workflows: Workflows.list())
-     |> put_flash(:info, "Plain chats now use “#{w.name}”.")}
+  def handle_event("link_prompt_edit", %{"id" => "l" <> id}, socket) do
+    with %{} = link <- Agents.get_link(String.to_integer(id)),
+         %{} = from <- Agents.get_agent(link.source_id),
+         %{} = to <- Agents.get_agent(link.target_id),
+         true <- from.workflow_id == socket.assigns.workflow.id do
+      {:noreply, assign(socket, link_prompt: %{link: link, from: from, to: to})}
+    else
+      _ -> {:noreply, socket}
+    end
   end
+
+  def handle_event("link_prompt_save", %{"prompt" => prompt}, socket),
+    do: save_link_prompt(socket, prompt)
+
+  def handle_event("link_prompt_remove", _, socket), do: save_link_prompt(socket, "")
+
+  def handle_event("link_prompt_close", _, socket),
+    do: {:noreply, assign(socket, link_prompt: nil)}
 
   # Data sources: the window lists them, offers the kinds to add, and edits one.
 
@@ -410,6 +457,7 @@ defmodule FactoryWeb.WorkflowsLive do
     {:noreply,
      assign(socket,
        sources_view: :form,
+       source_return: if(socket.assigns.sources_view == :list, do: :list),
        source_kind: kind,
        source_form: form,
        editing_source: nil,
@@ -425,6 +473,7 @@ defmodule FactoryWeb.WorkflowsLive do
     {:noreply,
      assign(socket,
        sources_view: :form,
+       source_return: if(socket.assigns.sources_view == :list, do: :list),
        source_kind: source.kind,
        source_form: form,
        editing_source: source,
@@ -467,18 +516,33 @@ defmodule FactoryWeb.WorkflowsLive do
          socket
          |> assign(
            sources: Sources.list(socket.assigns.workflow.id),
-           sources_view: :list,
+           sources_view: socket.assigns.source_return,
            editing_source: nil
          )
          |> refresh()
          |> put_flash(
            :info,
-           "#{source.name} is a data source of #{socket.assigns.workflow.name}."
+           if(socket.assigns.editing_source,
+             do: "Saved #{source.name}.",
+             else: "#{source.name} is a data source of #{socket.assigns.workflow.name}."
+           )
          )}
 
       {:error, changeset} ->
         {:noreply, assign(socket, source_form: to_form(changeset, as: :source))}
     end
+  end
+
+  # Back from the form: to where it was opened from, or the kinds when adding.
+  def handle_event("source_back", _, socket) do
+    view =
+      cond do
+        socket.assigns.source_return -> socket.assigns.source_return
+        socket.assigns.editing_source -> nil
+        true -> :pick
+      end
+
+    {:noreply, assign(socket, sources_view: view, editing_source: nil)}
   end
 
   def handle_event("source_toggle", %{"id" => id}, socket) do
@@ -612,7 +676,10 @@ defmodule FactoryWeb.WorkflowsLive do
       case agent && Kiro.compact(agent) do
         :ok ->
           {:info,
-           "Compacting #{agent.name}'s context. Kiro shows the new size after its next reply."}
+           "Compacted #{agent.name}'s conversation. Its next message starts a fresh Kiro session with the summary; the new size shows after the reply."}
+
+        {:error, :no_gain} ->
+          {:info, "#{agent.name}'s conversation is already small: compacting wouldn't save room."}
 
         {:error, :busy} ->
           {:error, "#{agent.name} is answering right now. Compact when it's idle."}
@@ -866,6 +933,47 @@ defmodule FactoryWeb.WorkflowsLive do
           agents={@source_agents}
           attached={@attached}
         />
+        <.link_prompt_window :if={@link_prompt} {@link_prompt} />
+        <div
+          :if={@base_window}
+          id="workflow-base-specs"
+          class="fixed inset-0 z-50 grid place-items-center bg-base-content/25 p-4 backdrop-blur-[2px]"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Base specs"
+          phx-window-keydown="wf_base_close"
+          phx-key="Escape"
+        >
+          <div class="absolute inset-0" phx-click="wf_base_close" aria-hidden="true"></div>
+          <div class="relative flex max-h-full w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-base-300 bg-base-100 shadow-2xl">
+            <header class="border-b border-base-300 px-5 py-4">
+              <h2 class="font-semibold">Base specs for {@workflow.name}</h2>
+              <p class="text-sm text-base-content/55">
+                Every run on this workflow starts with these. A run can still add or leave
+                out any of them in its chat.
+              </p>
+            </header>
+            <div class="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+              <FactoryWeb.SpecParts.base_picker
+                id="workflow-base-picker"
+                specs={@base_specs}
+                selected={@workflow.base_spec_ids}
+                event="wf_toggle_base"
+              />
+            </div>
+            <footer class="flex items-center gap-2 border-t border-base-300 px-5 py-3">
+              <.link
+                navigate={~p"/specs"}
+                class="text-sm text-base-content/55 hover:text-base-content"
+              >
+                Write base specs →
+              </.link>
+              <button type="button" phx-click="wf_base_close" class="btn btn-primary btn-sm ml-auto">
+                Done
+              </button>
+            </footer>
+          </div>
+        </div>
         <div class="flex min-h-0 flex-1">
           <div
             class="relative min-h-0 min-w-0 flex-1 bg-base-200 dark:bg-base-100"
@@ -955,56 +1063,37 @@ defmodule FactoryWeb.WorkflowsLive do
                         options={for {k, l, _} <- FactoryWeb.AgentKinds.all(), do: {l, k}}
                       />
                     </.prop>
-                    <.prop label="Runs on">
-                      <.plain_select field={@form[:runtime]} options={Agent.runtimes()} />
+                    <.prop label="Model">
+                      <.plain_select field={@form[:model]} options={Kiro.models()} />
                     </.prop>
-                    <%= if Ecto.Changeset.get_field(@form.source, :runtime) == "kiro_v3" do %>
-                      <.prop label="Model">
-                        <.plain_select field={@form[:model]} options={Kiro.models()} />
-                      </.prop>
-                      <.prop label="Mode">
-                        <.plain_select field={@form[:kiro_mode]} options={Kiro.modes()} />
-                      </.prop>
-                      <.prop label="Session">
-                        <.plain_select
-                          field={@form[:session]}
-                          options={[{"Own session", "own"}, {"Shared session", "shared"}]}
-                        />
-                      </.prop>
-                      <.prop
-                        :if={Ecto.Changeset.get_field(@form.source, :session) != "shared"}
-                        label="Folder"
-                      >
-                        <input
-                          type="text"
-                          name={@form[:workdir].name}
-                          value={@form[:workdir].value}
-                          phx-debounce="500"
-                          placeholder="Default workspace"
-                          title={@form[:workdir].value || Kiro.config(:workspace)}
-                          class="w-full truncate rounded-md border border-transparent bg-transparent px-1.5 py-1 outline-none placeholder:text-base-content/40 hover:border-base-content/10 focus:border-base-content/25 focus-visible:outline-none"
-                        />
-                      </.prop>
-                      <.prop label="Kiro">
-                        <span :if={!Kiro.running?(@selected)} class="px-1.5 text-base-content/50">
-                          Starts on first message
-                        </span>
-                        <span :if={Kiro.running?(@selected)} class="flex items-center gap-2 px-1.5">
-                          <span class="size-1.5 rounded-full bg-success"></span>
-                          {if @selected.session == "shared",
-                            do: "Shared session running",
-                            else: "Running"}
-                          <button
-                            id="stop-kiro"
-                            type="button"
-                            phx-click="stop_kiro"
-                            class="text-xs text-base-content/50 underline-offset-2 hover:text-base-content hover:underline"
-                          >
-                            Stop
-                          </button>
-                        </span>
-                      </.prop>
-                    <% end %>
+                    <.prop label="Mode">
+                      <.plain_select field={@form[:kiro_mode]} options={Kiro.modes()} />
+                    </.prop>
+                    <.prop label="Session">
+                      <.plain_select
+                        field={@form[:session]}
+                        options={[{"Own session", "own"}, {"Shared session", "shared"}]}
+                      />
+                    </.prop>
+                    <.prop label="Kiro">
+                      <span :if={!Kiro.running?(@selected)} class="px-1.5 text-base-content/50">
+                        Starts on first message
+                      </span>
+                      <span :if={Kiro.running?(@selected)} class="flex items-center gap-2 px-1.5">
+                        <span class="size-1.5 rounded-full bg-success"></span>
+                        {if @selected.session == "shared",
+                          do: "Shared session running",
+                          else: "Running"}
+                        <button
+                          id="stop-kiro"
+                          type="button"
+                          phx-click="stop_kiro"
+                          class="text-xs text-base-content/50 underline-offset-2 hover:text-base-content hover:underline"
+                        >
+                          Stop
+                        </button>
+                      </span>
+                    </.prop>
                     <.prop label="Usage">
                       <div id="agent-usage" class="space-y-1.5 px-1.5 py-1">
                         <span :if={!@selected.usage["turns"]} class="text-base-content/40">
@@ -1029,19 +1118,26 @@ defmodule FactoryWeb.WorkflowsLive do
                           :if={@selected.usage["context_pct"]}
                           title="Current Kiro session. The window size is estimated from Kiro's numbers."
                         >
-                          <div class="h-1 overflow-hidden rounded-full bg-base-content/10">
+                          <div class="relative h-1 rounded-full bg-base-content/10">
                             <div
                               class={[
                                 "h-full rounded-full",
-                                cond do
-                                  @selected.usage["context_pct"] >= 80 -> "bg-error"
-                                  @selected.usage["context_pct"] >= 50 -> "bg-warning"
-                                  true -> "bg-info"
+                                case FactoryWeb.Usage.level(@selected.usage["context_pct"]) do
+                                  "high" -> "bg-error"
+                                  "mid" -> "bg-warning"
+                                  _ -> "bg-info"
                                 end
                               ]}
-                              style={"width: #{max(@selected.usage["context_pct"], 2)}%"}
+                              style={"width: #{min(max(@selected.usage["context_pct"], 2), 100)}%"}
                             >
                             </div>
+                            <%!-- Where the session compacts before its next message. --%>
+                            <span
+                              id="compact-at"
+                              class="absolute -top-0.5 h-2 w-px bg-base-content/40"
+                              style={"left: #{FactoryWeb.Usage.compact_at()}%"}
+                              title={"Compacts before the next message from #{FactoryWeb.Usage.compact_at()}%"}
+                            ></span>
                           </div>
                           <p class="mt-1 flex items-center justify-between gap-2 text-[11px] text-base-content/50">
                             <span>Context {FactoryWeb.Usage.context(@selected.usage)}</span>
@@ -1051,7 +1147,7 @@ defmodule FactoryWeb.WorkflowsLive do
                               type="button"
                               phx-click="compact"
                               phx-value-id={@selected.id}
-                              title="Ask Kiro to summarize the conversation so it takes less room"
+                              title="Summarize the conversation by fixed rules (the latest messages stay word for word) and continue in a fresh Kiro session"
                               class="flex shrink-0 items-center gap-0.5 rounded px-1 text-error/80 hover:bg-error/10 hover:text-error"
                             >
                               <.icon name="hero-document-minus-mini" class="size-3.5" /> Compact
@@ -1441,6 +1537,9 @@ defmodule FactoryWeb.WorkflowsLive do
         >
           Rename
         </.bar_button>
+        <.bar_button id="wf-base-specs" event="wf_base_specs" icon="hero-building-library-mini">
+          Base specs{if @workflow.base_spec_ids != [], do: " · #{length(@workflow.base_spec_ids)}"}
+        </.bar_button>
         <.bar_button id="wf-clone" event="wf_clone" icon="hero-document-duplicate-mini">
           Clone
         </.bar_button>
@@ -1453,14 +1552,6 @@ defmodule FactoryWeb.WorkflowsLive do
           disabled={!@modified}
         >
           Restore default
-        </.bar_button>
-        <.bar_button
-          :if={!@workflow.current}
-          id="wf-use"
-          event="wf_use"
-          icon="hero-chat-bubble-left-right-mini"
-        >
-          Use in chat
         </.bar_button>
         <.bar_button
           :if={!@workflow.key}
@@ -1553,6 +1644,103 @@ defmodule FactoryWeb.WorkflowsLive do
     >
       {a.name}
     </.link>
+    """
+  end
+
+  defp save_link_prompt(
+         %{assigns: %{link_prompt: %{link: link, from: from, to: to}}} = socket,
+         prompt
+       ) do
+    case Agents.set_link_prompt(link, prompt) do
+      {:ok, link} ->
+        message =
+          if link.prompt == "",
+            do: "Removed the hand-off prompt from #{from.name} to #{to.name}.",
+            else: "#{to.name} gets this prompt when #{from.name} hands over."
+
+        {:noreply, socket |> assign(link_prompt: nil) |> refresh() |> put_flash(:info, message)}
+
+      {:error, _} ->
+        {:noreply,
+         put_flash(socket, :error, "That prompt is too long (20,000 characters at most).")}
+    end
+  end
+
+  defp save_link_prompt(socket, _prompt), do: {:noreply, socket}
+
+  attr :link, :map, required: true
+  attr :from, :map, required: true
+  attr :to, :map, required: true
+
+  # Editing what an arrow says on its hand-off.
+  defp link_prompt_window(assigns) do
+    ~H"""
+    <div
+      id="link-prompt-window"
+      class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 backdrop-blur-sm sm:items-center"
+      phx-window-keydown="link_prompt_close"
+      phx-key="Escape"
+    >
+      <.form
+        for={%{}}
+        id="link-prompt-form"
+        phx-submit="link_prompt_save"
+        phx-click-away="link_prompt_close"
+        class="drawer-in w-full max-w-xl overflow-hidden rounded-2xl border border-base-content/10 bg-surface shadow-2xl"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="link-prompt-title"
+      >
+        <header class="flex items-center gap-3 border-b border-base-content/10 px-5 py-4">
+          <span class="grid size-9 place-items-center rounded-xl bg-info/15 text-info">
+            <.icon name="hero-chat-bubble-bottom-center-text" class="size-5" />
+          </span>
+          <div class="min-w-0 flex-1">
+            <h2 id="link-prompt-title" class="truncate font-semibold">
+              {@from.name}
+              <.icon name="hero-arrow-long-right-mini" class="size-4 text-base-content/40" />
+              {@to.name}
+            </h2>
+            <p class="text-xs text-base-content/55">
+              Added to {@to.name}'s context each time {@from.name} hands work over.
+            </p>
+          </div>
+          <button
+            type="button"
+            phx-click="link_prompt_close"
+            aria-label="Close"
+            class="grid size-8 place-items-center rounded-lg text-base-content/50 hover:bg-base-content/[0.06] hover:text-base-content"
+          >
+            <.icon name="hero-x-mark-mini" class="size-5" />
+          </button>
+        </header>
+        <div class="px-5 py-4">
+          <textarea
+            id="link-prompt-text"
+            name="prompt"
+            rows="7"
+            phx-mounted={JS.focus()}
+            placeholder={"e.g. Only pass on the tasks that touch the API, and list the files you changed so #{@to.name} can start there."}
+            class="textarea w-full text-sm leading-relaxed"
+          >{@link.prompt}</textarea>
+        </div>
+        <footer class="flex items-center gap-2 border-t border-base-content/10 px-5 py-3">
+          <button type="submit" class="btn btn-primary btn-sm">Save prompt</button>
+          <button type="button" phx-click="link_prompt_close" class="btn btn-ghost btn-sm">
+            Cancel
+          </button>
+          <button
+            :if={@link.prompt != ""}
+            id="link-prompt-remove"
+            type="button"
+            phx-click="link_prompt_remove"
+            class="btn btn-ghost btn-sm ml-auto text-error"
+          >
+            <.icon name="hero-trash-micro" class="size-4" /> Remove
+          </button>
+        </footer>
+      </.form>
+    </div>
     """
   end
 end

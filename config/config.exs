@@ -44,6 +44,15 @@ config :factory, :kiro,
   log_dir: Path.expand("../tmp/kiro-logs", __DIR__),
   prompt_timeout: :timer.minutes(10)
 
+# Deterministic context management (Factory.Context). A Kiro session compacts before its
+# next message once its context is this full (Kiro's own summarizer starts at 80%); the
+# latest messages stay word for word within keep_recent_tokens. A run step's prompt is
+# kept within run_prompt_bytes.
+config :factory, :context,
+  compact_at: 70,
+  keep_recent_tokens: 20_000,
+  run_prompt_bytes: 256 * 1024
+
 # Configure tailwind (the version is required)
 config :tailwind,
   version: "4.3.3",

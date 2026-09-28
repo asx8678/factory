@@ -35,6 +35,10 @@ defmodule Factory.Workflows do
 
   def get(id), do: Repo.get(Workflow, id)
 
+  @doc "The kind of job a run on this workflow is (see `Factory.Runs.Types`): its key, or \"other\"."
+  def kind(%Workflow{key: key}) when key in @standard, do: key
+  def kind(%Workflow{}), do: "other"
+
   @doc "The standard workflow for a run type, or nil (e.g. for \"other\")."
   def standard(key) when key in @standard do
     ensure_standard()
@@ -56,6 +60,22 @@ defmodule Factory.Workflows do
         w ->
           w
       end
+  end
+
+  @doc """
+  The workflow picked for new runs, in the chat and on the Workflows page: the current
+  one if it has agents, else "Build a feature" (which becomes the current one), so a
+  fresh install starts with a team that can plan and build.
+  """
+  def picked do
+    w = current()
+
+    if Agents.list_agents(w.id) != [] do
+      w
+    else
+      {:ok, feature} = set_current(standard("feature"))
+      feature
+    end
   end
 
   @doc "The workflow a run's chat talks to: the run's own, else the current one."
@@ -82,6 +102,11 @@ defmodule Factory.Workflows do
     |> changed()
   end
 
+  @doc "Sets the base specs (ids) this workflow's runs start with."
+  def set_base_specs(%Workflow{} = w, ids) do
+    w |> Ecto.Changeset.change(base_spec_ids: Enum.uniq(ids)) |> Repo.update() |> changed()
+  end
+
   def rename(%Workflow{} = w, name),
     do: w |> Workflow.changeset(%{name: name}) |> Repo.update() |> changed()
 
@@ -97,15 +122,14 @@ defmodule Factory.Workflows do
   @doc "Copies a workflow (agents, prompts, settings, hand-offs) as a new custom one."
   def clone(%Workflow{} = w, name \\ nil) do
     Repo.transact(fn ->
-      with {:ok, copy} <- create(name || copy_name(w.name), w.description) do
+      with {:ok, copy} <- create(name || copy_name(w.name), w.description),
+           {:ok, copy} <- set_base_specs(copy, w.base_spec_ids) do
         ids =
           Map.new(Agents.list_agents(w.id), fn a ->
             {:ok, new} =
               Agents.create_agent(
                 a
-                |> Map.take(
-                  ~w(name role kind prompt model runtime kiro_mode session workdir x y action)a
-                )
+                |> Map.take(~w(name role kind prompt model kiro_mode session x y action)a)
                 |> Map.put(:workflow_id, copy.id)
               )
 
@@ -115,7 +139,8 @@ defmodule Factory.Workflows do
         for l <- links(w.id) do
           Agents.link(ids[l.source_id], ids[l.target_id], %{
             source: l.source_handle,
-            target: l.target_handle
+            target: l.target_handle,
+            prompt: l.prompt
           })
         end
 
@@ -186,14 +211,6 @@ defmodule Factory.Workflows do
         do: %{"kind" => a.kind, "name" => a.name, "does" => a.role, "agent_id" => a.id}
   end
 
-  @doc "The steps a run type recommends: its standard workflow's, else the built-in default."
-  def recommended_steps(type) do
-    case standard(type) do
-      nil -> Types.workflow(type)
-      w -> with [] <- steps(w), do: Types.workflow(type)
-    end
-  end
-
   @doc """
   Agents in hand-off order: following the arrows from agents nothing hands to, and
   top to bottom, left to right where the arrows don't decide.
@@ -225,7 +242,8 @@ defmodule Factory.Workflows do
     end
   end
 
-  defp links(workflow_id) do
+  @doc "The hand-off arrows between a workflow's cards."
+  def links(workflow_id) do
     Repo.all(
       from l in Link,
         join: a in Agent,
@@ -270,7 +288,6 @@ defmodule Factory.Workflows do
             kind: step["kind"],
             role: step["does"],
             prompt: prompt(step),
-            runtime: "kiro_v3",
             model: "auto",
             x: 0.0,
             y: i * 190.0

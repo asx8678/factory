@@ -455,8 +455,7 @@ defmodule FactoryWeb.SourceParts do
         </button>
         <button
           type="button"
-          phx-click="source_view"
-          phx-value-view={if @editing, do: "list", else: "pick"}
+          phx-click="source_back"
           class="btn btn-ghost btn-sm"
         >
           Back
@@ -468,8 +467,12 @@ defmodule FactoryWeb.SourceParts do
 
   attr :browser, :map, required: true
 
-  # Picking a folder or file on this machine, inside the window.
-  defp browser(assigns) do
+  @doc """
+  Picking a folder or file on this machine: `browser` is `%{mode:, hidden:, listing:, error:}`
+  with `listing` from `Factory.FileBrowser.list/2`. The page handles `browse_go`
+  (`path`), `browse_hidden`, `browse_cancel` and `browse_pick` (`path`).
+  """
+  def browser(assigns) do
     ~H"""
     <div id="file-browser" class="flex max-h-[70vh] flex-col">
       <div class="border-b border-base-content/10 px-5 py-3">

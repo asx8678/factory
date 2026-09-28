@@ -151,7 +151,8 @@ defmodule Factory.Agents do
       source_id: source_id,
       target_id: target_id,
       source_handle: handles[:source],
-      target_handle: handles[:target]
+      target_handle: handles[:target],
+      prompt: handles[:prompt] || ""
     })
     |> Repo.insert(
       on_conflict: {:replace, [:source_handle, :target_handle, :updated_at]},
@@ -170,8 +171,10 @@ defmodule Factory.Agents do
   @doc "Moves one end of a link to a different agent."
   def relink({old_source, old_target}, {source, target}, handles \\ %{}) do
     Repo.transact(fn ->
+      # The arrow keeps its hand-off prompt when an end moves.
+      old = Repo.get_by(Link, source_id: old_source, target_id: old_target)
       delete_link(old_source, old_target)
-      insert_link(source, target, handles)
+      insert_link(source, target, Map.put(handles, :prompt, old && old.prompt))
     end)
     |> changed()
   end
@@ -192,14 +195,14 @@ defmodule Factory.Agents do
             status: a.status,
             x: a.x,
             y: a.y,
-            kiro: a.runtime == "kiro_v3",
+            kiro: true,
             activity: a.activity,
             kind: a.kind,
             has_context: String.trim(a.prompt || "") != "",
             usage: a.usage,
             shared: a.session == "shared",
             # whether the Kiro session this agent talks in is running right now
-            live: a.runtime == "kiro_v3" and Factory.Kiro.running?(a),
+            live: Factory.Kiro.running?(a),
             role: a.role,
             action: if(a.kind == "action", do: a.action),
             missing: if(a.kind == "action", do: Factory.Actions.missing(a), else: [])
@@ -212,10 +215,18 @@ defmodule Factory.Agents do
             source: to_string(l.source_id),
             target: to_string(l.target_id),
             source_handle: l.source_handle,
-            target_handle: l.target_handle
+            target_handle: l.target_handle,
+            prompt: l.prompt || ""
           }
         end
     }
+  end
+
+  def get_link(id), do: Repo.get(Link, id)
+
+  @doc "Sets the prompt said on an arrow's hand-off; \"\" removes it."
+  def set_link_prompt(%Link{} = link, prompt) do
+    link |> Link.changeset(%{prompt: prompt || ""}) |> Repo.update() |> changed()
   end
 
   @doc "Ids of agents that hand off to, and receive from, the given agent."

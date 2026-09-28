@@ -1,15 +1,17 @@
 defmodule Factory.Chat do
   @moduledoc """
-  Handles what a person types into a run's chat. Slash commands are carried
-  out here in Elixir; plain-language messages get a pointer to /help until a
-  model is connected.
+  Handles what a person types into a run's chat. Slash commands are carried out
+  here in Elixir. Written to an agent, a message goes to its Kiro session; written to
+  the workflow's planner before the run starts, it's planned into the run's spec
+  (`Factory.ChatPlanner`). Spec files dropped in go into the run's spec too.
   """
-  alias Factory.{Agents, Kiro, Runs, Spec}
+  alias Factory.{Agents, Kiro, Runs, Spec, Specs}
   alias Factory.Runs.Run
 
   @commands [
     {"/help", "Show the commands"},
     {"/ask", "Ask an agent on Kiro, e.g. /ask Coder what does mix.exs do?"},
+    {"/compact", "Shorten an agent's conversation to save context, e.g. /compact Coder"},
     {"/run", "Start the run with the attached spec"},
     {"/status", "Show progress"},
     {"/tasks", "List the tasks"},
@@ -28,6 +30,8 @@ defmodule Factory.Chat do
 
   With `to: agent` the chat is focused on one agent: plain text goes straight
   to that agent, and every reply is tagged with it so it shows in that agent's view.
+  Before a run starts, what's written to a planner is planned into tasks
+  (`Factory.ChatPlanner`), and files attached with it are its spec.
   """
   def handle(%Run{} = run, text, files \\ [], opts \\ []) do
     text = String.trim(text)
@@ -38,29 +42,51 @@ defmodule Factory.Chat do
     Runs.post(run, "user", text, attachments: Enum.map(files, &elem(&1, 0)), meta: to_meta)
 
     tagged(agent, fn ->
-      run = if files != [], do: attach(run, files), else: run
+      if planning?(run, agent, text) do
+        run = if files != [], do: Factory.ChatPlanner.keep_files(run, files), else: run
+        Factory.ChatPlanner.start(run, agent)
+      else
+        run = if files != [], do: attach(run, files), else: run
 
-      cond do
-        text == "" -> :ok
-        agent && not String.starts_with?(text, "/") -> ask_agent(run, agent, text)
-        true -> command(run, text)
+        cond do
+          text == "" -> :ok
+          agent && not String.starts_with?(text, "/") -> ask_agent(run, agent, text)
+          true -> command(run, text)
+        end
       end
     end)
 
+    if text != "" and Factory.Runs.Titles.chat_message?(run), do: Factory.Runs.Titles.start(run)
     :ok
   end
+
+  # A planner plans the tasks until the run starts; after that it's an agent to talk to.
+  defp planning?(%Run{status: "draft"}, %{kind: "planner"}, "/" <> _), do: false
+  defp planning?(%Run{status: "draft"}, %{kind: "planner"}, _text), do: true
+  defp planning?(_run, _agent, _text), do: false
 
   @doc "Runs a button action shown under a factory message."
   def action(%Run{} = run, "start"), do: command(run, "/run")
 
-  @doc "Attaches spec files (`[{name, content}]`) to a run and posts the tasks found in them."
-  def attach_spec(%Run{} = run, files), do: attach(run, files)
+  @doc """
+  Gives a run exactly these spec files (`[{name, content}]`) and the tasks in them,
+  and posts what was found. Used when a spec starts a run (`Factory.Specs.start_run/1`).
+  """
+  def attach_spec(%Run{} = run, files) do
+    {_, tasks} = Spec.tasks_from_files(files)
+    {:ok, run} = Runs.attach_spec(run, files, tasks)
+    report(run, files)
+  end
 
+  # Files dropped into the chat go into the run's spec, which the run then follows.
   defp attach(run, files) do
+    {:ok, _spec} = run |> Specs.for_run() |> Specs.add_files(files)
+    report(Runs.get_run(run.id), files)
+  end
+
+  defp report(run, files) do
     case Spec.tasks_from_files(files) do
       {nil, []} ->
-        {:ok, run} = Runs.attach_spec(run, files, [])
-
         say(run, """
         I stored #{names(files)} but found no tasks in it. Tasks are top-level lines like \
         `- [ ] 1. Add login page` or `1. Add login page`. Attach a tasks.md to continue.\
@@ -69,8 +95,6 @@ defmodule Factory.Chat do
         run
 
       {from, tasks} ->
-        {:ok, run} = Runs.attach_spec(run, files, tasks)
-
         list =
           tasks
           |> Enum.take(12)
@@ -110,12 +134,16 @@ defmodule Factory.Chat do
   end
 
   defp run_command(%Run{status: "draft"} = run, "run", _) do
-    {:ok, run} = Runs.update_run(run, %{status: "queued"})
+    {:ok, run} = Runs.update_run(run, %{status: "queued", progress: %{}})
 
-    say(run, """
-    Queued #{length(run.tasks)} #{plural(run.tasks, "task")}. Nothing executes tasks yet: the engine \
-    that runs agents comes in the next build phases, so they stay pending for now.\
-    """)
+    order =
+      case Factory.Engine.steps(run) do
+        [] -> "The workflow has no steps yet. Add agents under Workflows, then /resume."
+        steps -> "Following the workflow: " <> Enum.map_join(steps, " → ", & &1.name) <> "."
+      end
+
+    say(run, "Queued #{length(run.tasks)} #{plural(run.tasks, "task")}. #{order}")
+    Factory.Engine.start(run)
   end
 
   defp run_command(run, "run", _),
@@ -134,7 +162,11 @@ defmodule Factory.Chat do
         do: "no spec attached",
         else: "spec: " <> Enum.join(run.spec_files, ", ")
 
-    say(run, "Run is #{run.status}. #{String.capitalize(tasks)}. #{String.capitalize(spec)}.")
+    say(
+      run,
+      "Run is #{run.status}. #{String.capitalize(tasks)}. #{String.capitalize(spec)}." <>
+        progress(run)
+    )
   end
 
   defp run_command(%Run{tasks: []} = run, "tasks", _),
@@ -158,6 +190,7 @@ defmodule Factory.Chat do
   defp run_command(%Run{status: "paused"} = run, "resume", _) do
     {:ok, run} = Runs.update_run(run, %{status: "queued"})
     say(run, "Resumed.")
+    Factory.Engine.start(run)
   end
 
   defp run_command(run, "resume", _),
@@ -176,7 +209,7 @@ defmodule Factory.Chat do
     do: say(run, "Give the new name after the command, e.g. /rename Login page")
 
   defp run_command(run, "rename", title) do
-    case Runs.update_run(run, %{title: title}) do
+    case Runs.update_run(run, %{title: title, settings: Map.put(run.settings, "title", "manual")}) do
       {:ok, run} -> say(run, "Renamed to “#{run.title}”.")
       {:error, _} -> say(run, "Names can be up to 80 characters.")
     end
@@ -202,6 +235,39 @@ defmodule Factory.Chat do
     end
   end
 
+  # The agent named, else the one this chat is focused on.
+  defp run_command(run, "compact", args) do
+    agent =
+      case match_agent(agents(run), args) do
+        {agent, _} -> agent
+        nil -> (id = Process.get(:chat_reply_agent)) && Agents.get_agent(id)
+      end
+
+    case agent && Kiro.compact(agent, run.id) do
+      nil ->
+        say(
+          run,
+          "Name the agent, e.g. /compact #{List.first(agents(run), %{name: "Coder"}).name}."
+        )
+
+      # The session notes what it kept in this chat.
+      :ok ->
+        :ok
+
+      {:error, :no_gain} ->
+        say(run, "#{agent.name}'s conversation is already small: compacting wouldn't save room.")
+
+      {:error, :busy} ->
+        say(run, "#{agent.name} is answering right now. Compact when it's idle.")
+
+      {:error, :starting} ->
+        say(run, "#{agent.name}'s Kiro session is still starting. Try again in a moment.")
+
+      {:error, _} ->
+        say(run, "Nothing to compact: #{agent.name} has no Kiro session running.")
+    end
+  end
+
   defp run_command(run, "workflow", _) do
     case agents(run) do
       [] ->
@@ -222,32 +288,20 @@ defmodule Factory.Chat do
   # Sends a question to an agent's Kiro session; its reply is posted by the session.
   defp ask_agent(run, agent, question) do
     tagged(agent, fn ->
-      cond do
-        agent.runtime == nil ->
-          say(
-            run,
-            "#{agent.name} isn't connected to Kiro. In Workflows, select #{agent.name} and set Runs on to Kiro ACP (v3)."
-          )
+      case Kiro.prompt(agent, run.id, question) do
+        :ok ->
+          :ok
 
-        true ->
-          case Kiro.prompt(agent, run.id, question) do
-            :ok ->
-              :ok
+        {:error, :busy} ->
+          say(run, "#{agent.name} is still answering. Try again when it's idle.")
 
-            {:error, :busy} ->
-              say(run, "#{agent.name} is still answering. Try again when it's idle.")
-
-            {:error, reason} ->
-              say(run, "Couldn't start Kiro for #{agent.name}: #{inspect(reason)}")
-          end
+        {:error, reason} ->
+          say(run, "Couldn't start Kiro for #{agent.name}: #{inspect(reason)}")
       end
     end)
   end
 
-  defp agent_line(%{runtime: "kiro_v3"} = a),
-    do: "• #{a.name}: Kiro v3, #{a.model}, #{a.kiro_mode} mode"
-
-  defp agent_line(a), do: "• #{a.name}: not connected"
+  defp agent_line(a), do: "• #{a.name}: #{a.model}, #{a.kiro_mode} mode"
 
   # The agents this run's chat talks to: its workflow's (see Factory.Workflows.for_run/1).
   # Action cards (commit, open a PR…) aren't agents to talk to.
@@ -307,6 +361,22 @@ defmodule Factory.Chat do
 
     Runs.post(run, "factory", body, opts)
   end
+
+  # Where the engine is in the workflow (see Factory.Engine).
+  defp progress(%Run{progress: %{"done" => done} = p} = run) do
+    names = Map.new(Factory.Engine.steps(run), &{&1.id, &1.name})
+    done = done |> Enum.map(&names[&1]) |> Enum.reject(&is_nil/1)
+    now = names[p["current"]]
+
+    [
+      done != [] && " Done: #{Enum.join(done, ", ")}.",
+      now && if(p["error"], do: " Stopped at #{now}: #{p["error"]}", else: " Now: #{now}.")
+    ]
+    |> Enum.filter(& &1)
+    |> Enum.join()
+  end
+
+  defp progress(_run), do: ""
 
   defp names(files), do: files |> Enum.map(&elem(&1, 0)) |> Enum.join(", ")
   defp plural([_], word), do: word

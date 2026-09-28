@@ -244,4 +244,33 @@ defmodule Factory.SpecsTest do
       spec
     end)
   end
+
+  describe "writing the missing parts" do
+    test "Kiro writes what the spec lacks, keeps what it has, then QA reviews it" do
+      {:ok, spec} =
+        Specs.create_spec("Login", %{overview: "# Login\nUsers land on their dashboard."})
+
+      {:ok, spec} = Specs.set_project_dir(spec, File.cwd!())
+      Specs.subscribe(spec.id)
+
+      assert {:ok, %{plan: %{"write" => %{"status" => "running"}}}} = Specs.write_missing(spec)
+      assert_receive {:spec_updated, %{plan: %{"write" => %{"status" => "done"} = write}}}, 5_000
+
+      spec = Specs.get_spec(spec.id)
+      assert write["wrote"] == ~w(requirements design tasks)
+      assert spec.overview =~ "Users land on their dashboard."
+      assert spec.requirements =~ "WHEN a user logs in"
+      assert spec.design =~ "session_controller.ex"
+
+      assert Enum.map(Specs.tasks(spec), & &1.title) == [
+               "Add a failing test for the redirect",
+               "Keep the return path"
+             ]
+
+      # Then QA reviews what Kiro wrote.
+      assert_receive {:spec_updated, %{review: %{"status" => "done"}}}, 5_000
+
+      assert {:error, :nothing_missing} = Specs.write_missing(spec)
+    end
+  end
 end

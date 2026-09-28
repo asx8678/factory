@@ -17,8 +17,7 @@ defmodule FactoryWeb.Router do
   scope "/", FactoryWeb do
     pipe_through :browser
 
-    live "/", HomeLive
-    live "/new", NewRunLive
+    live "/", ChatLive
     live "/chat", ChatLive
     live "/chat/:id", ChatLive
     live "/specs", SpecsLive

@@ -52,7 +52,8 @@ defmodule FactoryWeb.SpecLiveTest do
   test "a locked step can't be written", %{conn: conn} do
     {:ok, spec} = Specs.create_spec("Locked")
     {:ok, view, html} = live(conn, ~p"/specs/#{spec.id}?step=tasks")
-    assert html =~ "Approve the design to open this step"
+    assert html =~ "Finish the Overview first"
+    assert has_element?(view, "#step-locked a", "Go to Overview")
     refute has_element?(view, "#spec-editor")
   end
 
@@ -419,5 +420,32 @@ defmodule FactoryWeb.SpecLiveTest do
     view |> element("#confirm-delete-button") |> render_click()
     assert_redirect(view, ~p"/specs")
     refute Specs.get_spec(spec.id)
+  end
+
+  test "Kiro can write the missing parts from the spec's side panel", %{conn: conn} do
+    {:ok, spec} = Specs.create_spec("Login", %{overview: "Users land on their dashboard."})
+    {:ok, spec} = Specs.set_project_dir(spec, File.cwd!())
+    {:ok, view, _html} = live(conn, ~p"/specs/#{spec.id}")
+
+    assert has_element?(view, "#write-missing", "Write the requirements, design and tasks")
+    Specs.subscribe(spec.id)
+    view |> element("#write-missing") |> render_click()
+    assert has_element?(view, "#write-panel", "Kiro is reading the project")
+
+    # Kiro writes the parts, then QA reviews them.
+    assert_receive {:spec_updated, %{review: %{"status" => "done"}}}, 5_000
+    assert has_element?(view, "#write-panel", "Wrote the requirements, design and tasks.")
+    refute has_element?(view, "#write-missing")
+  end
+
+  test "a run's spec links back to its chat and picks the rules the run follows", %{conn: conn} do
+    {:ok, rules} = Specs.create_base_spec("Testing", "Every change has a test.")
+    {:ok, run} = Factory.Runs.create_run("Export")
+    spec = Specs.for_run(run)
+    {:ok, view, _html} = live(conn, ~p"/specs/#{spec.id}")
+
+    assert has_element?(view, "a[href='/chat/#{run.id}']", "Export")
+    view |> element("#run-base-specs-#{rules.id}") |> render_click()
+    assert Factory.Runs.get_run(run.id).settings["base_spec_ids"] == [rules.id]
   end
 end

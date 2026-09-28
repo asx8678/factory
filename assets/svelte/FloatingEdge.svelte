@@ -3,7 +3,17 @@
   // specific circles, it stays on those. Otherwise (older links, or agents created
   // by dropping an arrow) it uses the circles on the sides that face each other.
   // When selected, both ends can be dragged onto another agent.
-  import { BaseEdge, EdgeReconnectAnchor, Position, getBezierPath, useInternalNode } from "@xyflow/svelte"
+  // A hand-off between agents can carry a prompt for the receiving agent: hovering
+  // the arrow shows a + in its middle to add one, and an arrow with one shows it there.
+  import {
+    BaseEdge,
+    EdgeLabel,
+    EdgeReconnectAnchor,
+    Position,
+    getBezierPath,
+    useInternalNode,
+  } from "@xyflow/svelte"
+  import { getContext } from "svelte"
 
   let {
     id,
@@ -30,6 +40,22 @@
   // svelte-ignore state_referenced_locally
   const to = useInternalNode(target)
   let reconnecting = $state(false)
+  const { push, readonly } = getContext("factory")
+  // Arrows into actions and from data sources carry no prompt.
+  // svelte-ignore state_referenced_locally
+  const canPrompt = !readonly && !data?.attachment && !data?.toAction
+  let hovered = $state(false)
+  let leaveTimer
+  // A short grace period, so the pointer can travel from the line to the button.
+  const hover = (on) => {
+    clearTimeout(leaveTimer)
+    if (on) hovered = true
+    else leaveTimer = setTimeout(() => (hovered = false), 250)
+  }
+  const openPrompt = (e) => {
+    e.stopPropagation()
+    push("link_prompt_edit", { id })
+  }
 
   const box = (n) => ({
     x: n.internals.positionAbsolute.x,
@@ -74,7 +100,7 @@
     ]
   })
 
-  let path = $derived(
+  let bezier = $derived(
     getBezierPath({
       sourceX: ends[0].x,
       sourceY: ends[0].y,
@@ -83,12 +109,49 @@
       targetY: ends[1].y,
       targetPosition: ends[1].pos ?? Position.Top,
       curvature: 0.3,
-    })[0],
+    }),
   )
+  let path = $derived(bezier[0])
+  let prompt = $derived((data?.prompt ?? "").trim())
 </script>
 
 {#if !reconnecting}
   <BaseEdge {id} {path} {markerEnd} {style} {interactionWidth} />
+  {#if canPrompt}
+    <!-- A wide invisible band along the line, to notice the pointer near it. -->
+    <path
+      d={path}
+      class="edge-hover-band"
+      role="presentation"
+      onmouseenter={() => hover(true)}
+      onmouseleave={() => hover(false)}
+    />
+    <EdgeLabel
+      x={bezier[1]}
+      y={bezier[2]}
+      transparent
+      class="edge-prompt nodrag nopan"
+      onmouseenter={() => hover(true)}
+      onmouseleave={() => hover(false)}
+    >
+        {#if prompt}
+          <button type="button" class="edge-prompt-chip" title={prompt} onclick={openPrompt}>
+            <span class="hero-chat-bubble-bottom-center-text-micro size-3.5 shrink-0"></span>
+            <span class="truncate">{prompt}</span>
+          </button>
+        {:else if hovered || selected}
+          <button
+            type="button"
+            class="edge-prompt-add"
+            aria-label="Add a prompt to this hand-off"
+            title="Add a prompt to this hand-off"
+            onclick={openPrompt}
+          >
+            <span class="hero-plus-micro size-3.5"></span>
+          </button>
+        {/if}
+    </EdgeLabel>
+  {/if}
 {/if}
 
 {#if selected}

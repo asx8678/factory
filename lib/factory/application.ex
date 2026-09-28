@@ -20,6 +20,12 @@ defmodule Factory.Application do
        fn ->
          Factory.Agents.reset_sessions()
          Factory.Specs.reset_reviews()
+         Factory.Engine.reset_runs()
+         # The models Kiro offers: the last list at once, then a fresh check.
+         Factory.Kiro.Catalog.load()
+
+         if Application.get_env(:factory, :check_kiro_models, true),
+           do: Factory.Kiro.Catalog.check_later()
        end},
       # Start a worker by calling: Factory.Worker.start_link(arg)
       # {Factory.Worker, arg},

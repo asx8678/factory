@@ -10,8 +10,14 @@ defmodule Factory.Kiro do
   @models ~w(auto claude-sonnet-4.5 claude-sonnet-4 claude-haiku-4.5 deepseek-3.2 minimax-m2.5 minimax-m2.1 glm-5 qwen3-coder-next)
   @modes ~w(vibe spec quick-spec bug-fix plan autonomous semantic_reviewer kiro-fabric)
 
-  def models, do: @models
-  def modes, do: @modes
+  @doc "The models this Kiro offers (see `Factory.Kiro.Catalog`), else the ones it shipped with."
+  def models, do: values(Factory.Kiro.Catalog.models()) || @models
+
+  @doc "The modes this Kiro offers, like `models/0`."
+  def modes, do: values(Factory.Kiro.Catalog.modes()) || @modes
+
+  defp values([_ | _] = options), do: Enum.map(options, & &1["value"])
+  defp values(_), do: nil
 
   def config(key), do: Application.fetch_env!(:factory, :kiro) |> Keyword.fetch!(key)
 
@@ -19,31 +25,45 @@ defmodule Factory.Kiro do
   def session_key(%{session: "shared"}), do: :shared
   def session_key(agent), do: agent.id
 
-  @doc "Folder Kiro works in. The shared session always uses the default workspace."
-  def workdir(%{session: "shared"}), do: config(:workspace)
-  def workdir(agent), do: blank_to_nil(agent.workdir) || config(:workspace)
+  @doc "Folder Kiro works in for a run's chat: the run's project folder, else the default workspace."
+  def workdir(run), do: blank_to_nil(run && run.settings["project_dir"]) || config(:workspace)
 
   @doc "Queues a message for the agent's session, starting it if needed. The reply is posted to the run."
   def prompt(agent, run_id, text) do
-    with {:ok, pid} <- ensure_started(agent), do: Session.prompt(pid, agent, run_id, text)
+    dir = workdir(Factory.Runs.get_run(run_id))
+    with {:ok, pid} <- ensure_started(agent, dir), do: Session.prompt(pid, agent, run_id, text)
   end
 
-  def ensure_started(agent) do
+  @doc """
+  The agent's session, working in `dir`, started if needed. A session working in another
+  folder (a chat on another project) starts again in `dir` once it's idle; until then
+  `{:error, :busy}`.
+  """
+  def ensure_started(agent, dir) do
     key = session_key(agent)
 
-    case whereis(key) do
-      nil ->
-        case DynamicSupervisor.start_child(
-               Factory.Kiro.Supervisor,
-               {Session, {key, workdir(agent)}}
-             ) do
-          {:ok, pid} -> {:ok, pid}
-          {:error, {:already_started, pid}} -> {:ok, pid}
-          other -> other
-        end
+    case Registry.lookup(Factory.Kiro.Registry, key) do
+      [] ->
+        start(key, dir)
 
-      pid ->
+      [{pid, ^dir}] ->
         {:ok, pid}
+
+      [{pid, _elsewhere}] ->
+        if Session.idle?(pid) do
+          stop(key)
+          start(key, dir)
+        else
+          {:error, :busy}
+        end
+    end
+  end
+
+  defp start(key, dir) do
+    case DynamicSupervisor.start_child(Factory.Kiro.Supervisor, {Session, {key, dir}}) do
+      {:ok, pid} -> {:ok, pid}
+      {:error, {:already_started, pid}} -> {:ok, pid}
+      other -> other
     end
   end
 
@@ -65,11 +85,15 @@ defmodule Factory.Kiro do
     :ok
   end
 
-  @doc "Compacts the context of the session this agent talks in. `{:error, :no_session}` if none runs."
-  def compact(agent) do
+  @doc """
+  Compacts the conversation of the session this agent talks in (see
+  `Factory.Kiro.Session`), noting it in the chat `run_id` if given.
+  `{:error, :no_session}` if none runs.
+  """
+  def compact(agent, run_id \\ nil) do
     case whereis(session_key(agent)) do
       nil -> {:error, :no_session}
-      pid -> Session.compact(pid)
+      pid -> Session.compact(pid, run_id)
     end
   end
 

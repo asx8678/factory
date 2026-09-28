@@ -144,52 +144,61 @@ defmodule Factory.Specs.Planner do
     """
   end
 
+  # What each part of the spec is, when Kiro writes it for a run, and its JSON.
+  @run_parts [
+    {"requirements",
+     ~s|- "requirements": markdown. What must be true when the job is done, as numbered \
+requirements with WHEN/THEN acceptance criteria (for a bug: the expected behaviour).|,
+     ~s|"requirements": "<markdown>"|},
+    {"design",
+     ~s|- "design": markdown. How it will be done: the parts of the code that change, the \
+approach, risks and how it will be tested (for a bug: the likely cause and the fix).|,
+     ~s|"design": "<markdown>"|},
+    {"tasks",
+     ~s|- "tasks": small implementation tasks in build order, each buildable and testable on \
+its own, naming the files it touches and the requirement numbers it covers. Include tests.|,
+     ~s|"tasks": [{"title": "<imperative, under 80 characters>", "details": ["<step or note>"], "requirements": ["<number>"]}]|}
+  ]
+
   @doc """
-  Prompt for planning a whole factory run in one turn: from the overview (what the
-  person asked for) Kiro writes the requirements, the design and the tasks. When
-  asked to (`pick_workflow`, `pick_model`), it also chooses the agents and the model.
+  Prompt for planning a factory run in one turn: Kiro reads the project and writes the
+  parts of the spec that are missing (`write:`, some of "requirements", "design" and
+  "tasks"), keeping to the parts the person gave. `agents:` names the agents that will
+  do the work, in order.
   """
   def run_prompt(type, files, opts) do
-    roles =
-      Enum.map_join(opts[:roles], "\n", fn r -> "- #{r["kind"]}: #{r["name"]}, #{r["does"]}" end)
+    write = Keyword.fetch!(opts, :write)
+    given = for {part, _, _} <- @run_parts, part not in write, do: part
 
-    workflow =
-      Enum.map_join(opts[:workflow], " → ", & &1["name"])
+    keep =
+      if given != [],
+        do:
+          "The spec already has its #{Enum.join(given, " and ")}: keep to them and don't rewrite them.",
+        else: ""
 
-    choose =
-      [
-        opts[:pick_workflow] &&
-          ~s|Choose the workflow: the agents that should do this job, in order, from these roles \
-(rename them to fit the job):\n#{roles}\nPut it in "workflow" as [{"kind", "name", "does"}].|,
-        opts[:pick_model] &&
-          ~s(Choose the model for the agents from: #{Enum.join(opts[:models], ", ")}. \
-Pick "auto" unless the job clearly needs a stronger or cheaper one. Put it in "model".)
-      ]
-      |> Enum.filter(& &1)
-      |> Enum.join("\n\n")
+    size =
+      if "tasks" in write,
+        do: if(type.id == "feature", do: "About 8 to 20 tasks.", else: "Usually 3 to 10 tasks."),
+        else: ""
+
+    asked = for {part, what, _} <- @run_parts, part in write, do: what
+    json = for {part, _, shape} <- @run_parts, part in write, do: shape
 
     """
     <task-planning step="run">
-    You are planning a job for a software factory: "#{type.label}". The person described it \
-    in the overview below; the project is in the current folder. Look at the project first: \
-    read the files you need to understand its stack, structure, conventions and the code this \
-    job touches. Don't change anything and don't run commands.
+    You are planning a job for a software factory: "#{type.label}". The spec files below \
+    say what the person wants; the project is in the current folder. Look at the project \
+    first: read the files you need to understand its stack, structure, conventions and the \
+    code this job touches. Don't change anything and don't run commands.
 
-    Then write the plan as the rest of the spec:
-    - "requirements": markdown. What must be true when the job is done, as numbered \
-    requirements with WHEN/THEN acceptance criteria (for a bug: the expected behaviour).
-    - "design": markdown. How it will be done: the parts of the code that change, the \
-    approach, risks and how it will be tested (for a bug: the likely cause and the fix).
-    - "tasks": small implementation tasks in build order, each buildable and testable on \
-    its own, naming the files it touches and the requirement numbers it covers. Include \
-    tests. #{if type.id == "feature", do: "About 8 to 20 tasks.", else: "Usually 3 to 10 tasks."}
+    Then write the parts of the spec that are missing. #{keep}
+    #{Enum.join(asked, "\n")}
+    #{size}
 
-    The agents that will do the work: #{workflow}.
-
-    #{choose}
+    The agents that will do the work: #{Keyword.get(opts, :agents, "")}.
 
     Reply with only this JSON object and nothing else:
-    {"requirements": "<markdown>", "design": "<markdown>", "tasks": [{"title": "<imperative, under 80 characters>", "details": ["<step or note>"], "requirements": ["<number>"]}], #{if opts[:pick_workflow], do: ~s("workflow": [{"kind": "<role>", "name": "<name>", "does": "<one line>"}], ), else: ""}#{if opts[:pick_model], do: ~s("model": "<model>", ), else: ""}"why": "<one or two sentences: what you found in the project and how you approached the plan>"}
+    {#{Enum.join(json, ", ")}, "why": "<one or two sentences: what you found in the project and how you approached the plan>"}
     </task-planning>
 
     #{spec_text(files)}
@@ -197,11 +206,11 @@ Pick "auto" unless the job clearly needs a stronger or cheaper one. Put it in "m
   end
 
   @doc """
-  Reads a run plan: `{:ok, %{requirements:, design:, tasks: [task], workflow: [step] | nil,
-  model: string | nil, why:}}`. Tasks are in `to_markdown/2`'s shape. Workflow steps
-  and the model are kept only if they're ones Factory knows (`kinds`, `models`).
+  Reads a run plan written for the parts in `write` (see `run_prompt/3`):
+  `{:ok, %{requirements:, design:, tasks: [task], why:}}`, with tasks in `to_markdown/2`'s
+  shape. Every part asked for must be there; the others are left empty.
   """
-  def parse_run_plan(reply, kinds, models) do
+  def parse_run_plan(reply, write \\ ~w(requirements design tasks)) do
     with {:ok, data} <- decode(reply) do
       tasks =
         for %{"title" => title} = t <- List.wrap(data["tasks"]),
@@ -215,28 +224,107 @@ Pick "auto" unless the job clearly needs a stronger or cheaper one. Put it in "m
           }
         end
 
-      workflow =
-        for %{"kind" => kind, "name" => name} = step <- List.wrap(data["workflow"]),
-            kind in kinds,
-            is_binary(name) and String.trim(name) != "" do
-          %{"kind" => kind, "name" => String.trim(name), "does" => text(step["does"])}
-        end
+      plan = %{
+        requirements: text(data["requirements"]),
+        design: text(data["design"]),
+        tasks: Enum.take(tasks, 30),
+        why: text(data["why"])
+      }
 
       cond do
-        tasks == [] ->
+        "tasks" in write and tasks == [] ->
           {:error, "Kiro's plan had no tasks."}
 
+        "requirements" in write and plan.requirements == "" ->
+          {:error, "Kiro's plan had no requirements."}
+
+        "design" in write and plan.design == "" ->
+          {:error, "Kiro's plan had no design."}
+
         true ->
-          {:ok,
-           %{
-             requirements: text(data["requirements"]),
-             design: text(data["design"]),
-             tasks: Enum.take(tasks, 30),
-             workflow: if(workflow == [], do: nil, else: Enum.take(workflow, 8)),
-             model: if(data["model"] in models, do: data["model"]),
-             why: text(data["why"])
-           }}
+          {:ok, plan}
       end
+    end
+  end
+
+  @doc """
+  Prompt for planning in a chat: the planner reads the project, rethinks how the
+  person's requests (oldest first) are best done, and turns them into tasks, refining
+  `current` (the tasks so far, markdown) rather than starting over.
+  """
+  def chat_prompt(name, requests, files, current) do
+    asked = requests |> Enum.with_index(1) |> Enum.map_join("\n\n", fn {r, i} -> "#{i}. #{r}" end)
+
+    current =
+      if String.trim(current || "") == "",
+        do: "None yet.",
+        else: current
+
+    """
+    <task-planning step="chat">
+    You are #{name}, the planner in a software factory. The person is chatting with you \
+    about a change to the project in the current folder. Look at the project first: read \
+    the files you need to understand its stack, conventions and the code this touches. \
+    Don't change anything and don't run commands.
+
+    Then decide whether the request is clear enough to plan without guessing: you know \
+    what should be built, where it goes in the code, and how to tell it works.
+
+    - If it isn't clear, don't write any tasks. Set "clear" to false, say in "reply" what \
+    is missing, and ask 1 to 5 short, specific questions in "questions" (with 2 to 4 \
+    options where that helps). Keep the tasks so far as they are.
+    - If it is clear, set "clear" to true, rethink how it is best done, and write it as \
+    small implementation tasks in build order, each buildable and testable on its own, \
+    naming the files it touches. Include tests. Refine the tasks so far with what the \
+    person said last: keep what still fits, change what doesn't.
+
+    The tasks so far:
+    #{current}
+
+    Reply with only this JSON object and nothing else:
+    {"clear": true | false, "reply": "<2 to 4 sentences: how you'd do it and why, or what is missing>", "questions": [{"question": "<question>", "options": ["<option>"]}], "tasks": [{"title": "<imperative, under 80 characters>", "details": ["<step or note>"]}]}
+    </task-planning>
+
+    <requests>
+    #{asked}
+    </requests>
+
+    #{spec_text(files)}
+    """
+  end
+
+  @doc """
+  Reads a chat plan: `{:ok, %{reply:, tasks:, questions:}}`. When the planner found the
+  request unclear, there are questions and no tasks.
+  """
+  def parse_chat_plan(reply) do
+    with {:ok, data} <- decode(reply) do
+      questions =
+        for q <- List.wrap(data["questions"]),
+            text = if(is_map(q), do: text(q["question"]), else: text(q)),
+            text != "" do
+          options =
+            if is_map(q), do: q["options"] |> List.wrap() |> Enum.filter(&is_binary/1), else: []
+
+          %{"question" => text, "options" => Enum.take(options, 4)}
+        end
+
+      tasks =
+        for %{"title" => title} = t <- List.wrap(data["tasks"]),
+            is_binary(title) and String.trim(title) != "" do
+          %{
+            "title" => title |> String.trim() |> String.slice(0, 200),
+            "details" =>
+              t["details"] |> List.wrap() |> Enum.filter(&is_binary/1) |> Enum.map(&String.trim/1),
+            "requirements" => []
+          }
+        end
+
+      # Unclear means questions first, whatever tasks came with them.
+      unclear = data["clear"] == false and questions != []
+      tasks = if unclear, do: [], else: Enum.take(tasks, 30)
+
+      {:ok, %{reply: text(data["reply"]), tasks: tasks, questions: Enum.take(questions, 5)}}
     end
   end
 

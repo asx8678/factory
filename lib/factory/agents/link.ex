@@ -9,13 +9,19 @@ defmodule Factory.Agents.Link do
     belongs_to :target, Factory.Agents.Agent
     field :source_handle, :string
     field :target_handle, :string
+    # Said to the receiving agent when work is handed over along this arrow.
+    field :prompt, :string, default: ""
 
     timestamps(type: :utc_datetime)
   end
 
   def changeset(link, attrs) do
     link
-    |> cast(attrs, [:source_id, :target_id, :source_handle, :target_handle])
+    |> cast(attrs, [:source_id, :target_id, :source_handle, :target_handle, :prompt],
+      empty_values: []
+    )
+    |> update_change(:prompt, &String.trim/1)
+    |> validate_length(:prompt, max: 20_000)
     |> validate_inclusion(:source_handle, @sides)
     |> validate_inclusion(:target_handle, @sides)
     |> validate_required([:source_id, :target_id])

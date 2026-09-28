@@ -31,12 +31,21 @@ defmodule Factory.KiroTest do
     assert tokens > 0
   end
 
-  test "requests to write files are denied and noted", %{run: run} do
+  test "an agent that changes code may edit; one that only checks may not", %{
+    agent: agent,
+    run: run
+  } do
     Chat.handle(run, "/ask Coder please write a file")
+    assert_receive {:message, %{author: "Coder", body: body}}, 5_000
+    assert body =~ "[allow] echo: please write a file"
+    refute body =~ "Denied"
 
+    {:ok, _} = Agents.update_agent(Agents.get_agent(agent.id), %{kind: "reviewer"})
+    Kiro.stop(agent.id)
+    Chat.handle(run, "/ask Coder please write a file")
     assert_receive {:message, %{author: "Coder", body: body}}, 5_000
     assert body =~ "[deny] echo: please write a file"
-    assert body =~ "Denied: Write notes.md"
+    assert body =~ "Denied: Write notes.md. Coder only reads and checks"
   end
 
   test "a model Kiro refuses is reported in the chat and marks the agent failed", %{
@@ -147,7 +156,7 @@ defmodule Factory.KiroTest do
     refute Kiro.whereis(tester.id)
   end
 
-  test "compacting needs a running session and shows its result", %{
+  test "compacting needs a running session; the next message carries the conversation", %{
     agent: agent,
     run: run
   } do
@@ -155,27 +164,87 @@ defmodule Factory.KiroTest do
 
     Chat.handle(run, "/ask Coder hi")
     assert_receive {:message, %{author: "Coder"}}, 5_000
+    old_port = :sys.get_state(Kiro.whereis(agent.id)).port
 
-    Agents.subscribe()
     assert :ok = Kiro.compact(Agents.get_agent(agent.id))
 
-    # "Compacting context", then "Context compacted" once Kiro confirms.
-    assert_receive {:graph_changed}, 5_000
-    assert_receive {:graph_changed}, 5_000
-    assert_receive {:graph_changed}, 5_000
     compacted = Agents.get_agent(agent.id)
     assert %{status: "done", activity: "Context compacted"} = compacted
     assert compacted.usage["compacted_from"] == 2.0
     refute Map.has_key?(compacted.usage, "context_pct")
+    # A fresh kiro-cli, not the old one.
+    refute :sys.get_state(Kiro.whereis(agent.id)).port == old_port
 
-    # The next reply shows the new size and what it was before; then that note is dropped.
+    # The fake Kiro echoes what it's sent: the compacted conversation, then the message.
     Chat.handle(run, "/ask Coder again")
 
     assert_receive {:message,
-                    %{author: "Coder", meta: %{"compacted_from" => 2.0, "context_pct" => 2.0}}},
+                    %{
+                      author: "Coder",
+                      body: body,
+                      meta: %{"compacted_from" => 2.0, "context_pct" => 2.0}
+                    }},
                    5_000
 
+    assert body =~ "<conversation-so-far>"
+    assert body =~ "[entry e1] Message to Coder:\nhi"
+    assert body =~ "[entry e2] Reply from Coder:\necho: hi"
+    assert body =~ ~r/<\/conversation-so-far>\n\nagain\z/
     refute Map.has_key?(Agents.get_agent(agent.id).usage, "compacted_from")
+  end
+
+  test "/compact compacts the agent and notes what it kept in the chat", %{
+    agent: agent,
+    run: run
+  } do
+    Chat.handle(run, "/compact Coder")
+
+    assert_receive {:message, %{body: "Nothing to compact: Coder has no Kiro session running."}},
+                   5_000
+
+    Chat.handle(run, "/ask Coder hi")
+    assert_receive {:message, %{author: "Coder"}}, 5_000
+
+    Chat.handle(run, "/compact Coder")
+    agent_id = agent.id
+
+    assert_receive {:message,
+                    %{
+                      role: "factory",
+                      body:
+                        "Coder's conversation was compacted: 0 earlier entries summarized, the last 2 word for word" <>
+                          _,
+                      meta: %{
+                        "agent_id" => ^agent_id,
+                        "compaction" => %{"kept" => 2, "auto" => false, "sha256" => sha}
+                      }
+                    }},
+                   5_000
+
+    assert sha =~ ~r/\A[0-9a-f]{64}\z/
+  end
+
+  test "a session over the threshold compacts before its next message", %{run: run} do
+    # The fake Kiro reports 2% after every reply.
+    Application.put_env(:factory, :context, compact_at: 2)
+    on_exit(fn -> Application.delete_env(:factory, :context) end)
+
+    Chat.handle(run, "/ask Coder first")
+    assert_receive {:message, %{author: "Coder", body: "echo: first"}}, 5_000
+
+    Chat.handle(run, "/ask Coder second")
+
+    assert_receive {:message,
+                    %{
+                      body: "Coder's conversation was compacted:" <> note,
+                      meta: %{"compaction" => %{"auto" => true}}
+                    }},
+                   5_000
+
+    assert note =~ "Its context was 2% full (compacting starts at 2%)."
+    assert_receive {:message, %{author: "Coder", body: body}}, 5_000
+    assert body =~ "[entry e1] Message to Coder:\nfirst"
+    assert String.ends_with?(body, "second")
   end
 
   test "the graph says whether an agent's session is live; startup clears stale context", %{
@@ -206,11 +275,21 @@ defmodule Factory.KiroTest do
     refute Map.has_key?(usage, "context_pct")
   end
 
-  test "agents not on Kiro get directions instead", %{run: run} do
-    {:ok, _} = Agents.create_agent(%{name: "Planner"})
-    Chat.handle(run, "/ask Planner hi")
+  test "a chat's agent works in the chat's project folder, moving when the chat does", %{
+    agent: agent,
+    run: run
+  } do
+    Chat.handle(run, "/ask Coder hi")
+    assert_receive {:message, %{author: "Coder"}}, 5_000
+    assert :sys.get_state(Kiro.whereis(agent.id)).workdir == Kiro.config(:workspace)
 
-    assert_receive {:message, %{role: "factory", author: nil, body: body}}, 1_000
-    assert body =~ "isn't connected to Kiro"
+    dir = File.cwd!()
+    {:ok, other} = Runs.create_run()
+    {:ok, other} = Runs.update_run(other, %{settings: %{"project_dir" => dir}})
+    Runs.subscribe(other.id)
+    Chat.handle(other, "/ask Coder hi again")
+    assert_receive {:message, %{author: "Coder", run_id: run_id}}, 5_000
+    assert run_id == other.id
+    assert :sys.get_state(Kiro.whereis(agent.id)).workdir == dir
   end
 end

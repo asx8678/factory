@@ -232,12 +232,31 @@ body {
     ) border-box;
   box-shadow: 0 12px 32px -20px color-mix(in oklab, var(--color-primary) 55%, transparent);
 }
-/* A job on the start screen: a very light green wash when hovered or focused. */
-.job-card { transition: background-color 150ms, border-color 150ms, transform 150ms; }
-.job-card:hover, .job-card:focus-visible {
-  background-color: color-mix(in oklab, var(--color-success) 9%, var(--color-base-100));
-  border-color: color-mix(in oklab, var(--color-success) 35%, transparent);
+/* Hand-off prompts on arrows (FloatingEdge.svelte): a blue + on hover, a chip once set. */
+.svelte-flow .edge-hover-band { fill: none; stroke: transparent; stroke-width: 36; pointer-events: stroke; }
+.svelte-flow .edge-prompt { padding: 6px; }
+.edge-prompt-add, .edge-prompt-chip {
+  display: inline-flex; align-items: center; gap: 0.3rem; cursor: pointer;
+  color: var(--color-info-content); background: var(--color-info);
+  box-shadow: 0 0 0 3px var(--color-base-200);
 }
+:where([data-theme=dark]) .edge-prompt-add, :where([data-theme=dark]) .edge-prompt-chip { box-shadow: 0 0 0 3px var(--color-base-100); }
+.edge-prompt-add { justify-content: center; width: 1.375rem; height: 1.375rem; border-radius: 999px; animation: edge-pop 120ms ease-out; }
+.edge-prompt-chip { max-width: 11rem; height: 1.5rem; padding: 0 0.55rem; border-radius: 999px; font-size: 11px; font-weight: 500; }
+.edge-prompt-add:hover, .edge-prompt-chip:hover { filter: brightness(1.08); }
+.edge-prompt-add:focus-visible, .edge-prompt-chip:focus-visible { outline: 2px solid var(--color-info); outline-offset: 3px; }
+@keyframes edge-pop { from { transform: scale(0.6); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .edge-prompt-add { animation: none; } }
+
+/* A key to press, e.g. the number that picks a workflow. */
+.launcher-kbd {
+  display: inline-grid; place-items: center; min-width: 1.25rem; height: 1.25rem; padding: 0 0.25rem;
+  border-radius: 0.3rem; font-size: 11px; font-weight: 500; line-height: 1; font-variant-numeric: tabular-nums;
+  color: color-mix(in oklab, currentColor 70%, transparent);
+  background: color-mix(in oklab, var(--color-base-content) 7%, transparent);
+}
+.launcher-kbd + .launcher-kbd { margin-left: 0.2rem; }
+.workflow-card:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 .task-card-selected {
   --task-bg: color-mix(in oklab, var(--color-primary) 7%, var(--color-base-100));
 }
@@ -286,6 +305,68 @@ body {
   font-family: var(--font-mono); font-size: 12.5px; line-height: 1.65; color: #e6edf3;
 }
 
+/* A workflow drawn small (FactoryWeb.WorkflowMap): cards joined by hand-off lines. The
+   busy card pulses and the line into it moves; done cards and lines turn green. */
+.wf-node {
+  display: flex; align-items: center; gap: 0.4rem; padding: 0 0.55rem;
+  border: 1px solid color-mix(in oklab, var(--color-base-content) 16%, transparent);
+  border-radius: 0.6rem; background: var(--color-surface);
+  color: color-mix(in oklab, var(--color-base-content) 60%, transparent);
+  font-size: 12px; font-weight: 500; line-height: 1; white-space: nowrap;
+  transition: border-color 0.2s, background-color 0.2s, color 0.2s;
+}
+.wf-md .wf-node { gap: 0.5rem; padding: 0 0.75rem; border-radius: 0.75rem; font-size: 13px; }
+.wf-node .wf-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.wf-node .wf-icon { width: 14px; height: 14px; flex-shrink: 0; opacity: 0.75; }
+.wf-node.wf-action { justify-content: center; gap: 0; padding: 0; border-radius: 999px; }
+a.wf-node:hover { border-color: color-mix(in oklab, var(--color-base-content) 35%, transparent); color: var(--color-base-content); }
+.wf-node.is-done { color: var(--color-base-content); border-color: color-mix(in oklab, var(--color-success) 50%, transparent); }
+.wf-node.is-done .wf-icon { color: var(--color-success); opacity: 1; }
+.wf-node.is-busy {
+  color: var(--color-base-content); border-color: var(--color-primary);
+  background: color-mix(in oklab, var(--color-primary) 9%, var(--color-surface));
+  animation: wf-busy 1.8s ease-in-out infinite;
+}
+.wf-node.is-busy .wf-icon { color: var(--color-primary); opacity: 1; }
+.wf-node.is-error {
+  color: var(--color-base-content); border-color: var(--color-error);
+  background: color-mix(in oklab, var(--color-error) 8%, var(--color-surface));
+}
+.wf-node.is-error .wf-icon { color: var(--color-error); opacity: 1; }
+.wf-node.is-paused, .wf-node.is-waiting { color: var(--color-base-content); border-color: color-mix(in oklab, var(--color-warning) 70%, transparent); }
+.wf-node.is-focus { outline: 2px solid color-mix(in oklab, var(--color-primary) 70%, transparent); outline-offset: 2px; }
+@keyframes wf-busy {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--color-primary) 45%, transparent); }
+  50% { box-shadow: 0 0 0 5px color-mix(in oklab, var(--color-primary) 0%, transparent); }
+}
+.wf-edge .wf-line { fill: none; stroke: color-mix(in oklab, var(--color-base-content) 24%, transparent); stroke-width: 1.5; }
+.wf-edge .wf-head { fill: color-mix(in oklab, var(--color-base-content) 24%, transparent); }
+.wf-edge.is-then .wf-line { stroke-dasharray: 0.5 4; stroke-linecap: round; stroke-width: 1.75; }
+.wf-edge.is-done .wf-line { stroke: color-mix(in oklab, var(--color-success) 65%, transparent); }
+.wf-edge.is-done .wf-head { fill: color-mix(in oklab, var(--color-success) 65%, transparent); }
+.wf-edge.is-active .wf-line { stroke: var(--color-primary); stroke-dasharray: 4 4; animation: wf-flow 0.7s linear infinite; }
+.wf-edge.is-active .wf-head { fill: var(--color-primary); }
+.wf-edge.is-error .wf-line { stroke: color-mix(in oklab, var(--color-error) 70%, transparent); }
+.wf-edge.is-error .wf-head { fill: color-mix(in oklab, var(--color-error) 70%, transparent); }
+@keyframes wf-flow { to { stroke-dashoffset: -8; } }
+/* How full an agent's Kiro context is: a bar along its card's bottom edge, and the chip
+   beside the message box. Amber on the way to compacting, red when the next message compacts. */
+.wf-node { overflow: hidden; }
+.wf-ctx { position: absolute; left: 0; bottom: 0; height: 2px; border-radius: 0 2px 2px 0; background: var(--color-info); opacity: 0.7; transition: width 0.4s ease, background-color 0.2s; }
+.wf-ctx.is-mid { background: var(--color-warning); }
+.wf-ctx.is-high { background: var(--color-error); opacity: 0.9; }
+.ctx-chip { border-color: color-mix(in oklab, var(--color-base-content) 15%, transparent); color: color-mix(in oklab, var(--color-base-content) 70%, transparent); transition: border-color 0.2s, color 0.2s, background-color 0.2s; }
+.ctx-chip .ctx-track { fill: none; stroke: color-mix(in oklab, currentColor 20%, transparent); stroke-width: 2.5; }
+.ctx-chip .ctx-fill { fill: none; stroke: var(--color-info); stroke-width: 2.5; stroke-linecap: round; transition: stroke-dasharray 0.4s ease; }
+.ctx-chip.is-mid { border-color: color-mix(in oklab, var(--color-warning) 45%, transparent); }
+.ctx-chip.is-mid .ctx-fill { stroke: var(--color-warning); }
+.ctx-chip.is-high { border-color: color-mix(in oklab, var(--color-error) 55%, transparent); color: var(--color-error); background: color-mix(in oklab, var(--color-error) 6%, transparent); }
+.ctx-chip.is-high .ctx-fill { stroke: var(--color-error); }
+@media (prefers-reduced-motion: reduce) { .wf-ctx, .ctx-chip .ctx-fill { transition: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .wf-node.is-busy, .wf-edge.is-active .wf-line { animation: none; }
+}
+
 /* The chat's text box: a raised card like the others (see --color-surface). */
 .composer-box { background: var(--color-surface); }
 
@@ -295,3 +376,7 @@ textarea.drop-active {
   border-style: dashed;
   background-color: color-mix(in oklab, var(--color-primary) 5%, var(--color-base-100));
 }
+
+/* The message box while a new run waits for its first message: a soft accent edge. */
+.composer-box.is-glow { border-color: color-mix(in oklab, var(--color-primary) 45%, transparent); box-shadow: 0 0 0 4px color-mix(in oklab, var(--color-primary) 10%, transparent), 0 8px 28px -8px rgb(0 0 0 / 0.28); }
+.composer-box.is-glow:focus-within { border-color: color-mix(in oklab, var(--color-primary) 70%, transparent); }

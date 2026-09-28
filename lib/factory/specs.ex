@@ -8,21 +8,130 @@ defmodule Factory.Specs do
   alias Factory.Specs.{Planner, Review}
   alias Factory.Specs.Spec, as: SpecDoc
 
+  # A spec's steps (see SpecDoc.steps/0), for guards.
+  @parts ~w(overview requirements design tasks)
+
   @doc "Subscribes to `{:specs_changed}` for the list."
   def subscribe, do: Phoenix.PubSub.subscribe(Factory.PubSub, "specs")
 
   @doc "Subscribes to `{:spec_updated, spec}` for one spec."
   def subscribe(id), do: Phoenix.PubSub.subscribe(Factory.PubSub, "spec:#{id}")
 
+  @doc "Run specs: each one run's own spec, newest first."
   def list_specs do
     Repo.all(
       from s in SpecDoc,
+        where: s.kind == "run",
         order_by: [desc: s.updated_at, desc: s.id],
         preload: [runs: :tasks]
     )
   end
 
+  # Base specs: company rules and conventions, kept and included in any run.
+
+  @doc "Base specs, by name."
+  def list_base_specs do
+    Repo.all(
+      from s in SpecDoc, where: s.kind == "base", order_by: [asc: fragment("lower(?)", s.name)]
+    )
+  end
+
+  @doc "A base spec: a name and one markdown document."
+  def create_base_spec(name, content) do
+    create_spec(name, %{kind: "base", overview: content || ""})
+  end
+
+  @doc "The base specs with these ids as files for Kiro, in the order given: `[{name, text}]`."
+  def base_files(ids) when is_list(ids) and ids != [] do
+    by_id =
+      Repo.all(from s in SpecDoc, where: s.kind == "base" and s.id in ^ids)
+      |> Map.new(&{&1.id, &1})
+
+    for id <- ids,
+        spec = by_id[id],
+        String.trim(spec.overview) != "",
+        do: {"base-spec: #{spec.name}.md", spec.overview}
+  end
+
+  def base_files(_ids), do: []
+
+  @doc "The base specs a run includes (`settings[\"base_spec_ids\"]`), as files."
+  def base_files_for_run(%{settings: settings}),
+    do: base_files((settings || %{})["base_spec_ids"])
+
+  def base_files_for_run(_run), do: []
+
   def get_spec(id), do: SpecDoc |> Repo.get(id) |> preload()
+
+  @doc """
+  A run's own spec: its plan (overview, requirements, design, tasks). Everything that
+  plans a run writes here, whether in the chat or on the Spec page. Until the run
+  starts, its tasks and the text its agents read follow the spec (`update_spec/2`).
+  Made the first time it's needed, in the run's project folder.
+  """
+  def for_run(%Factory.Runs.Run{spec_id: id} = run) when is_integer(id),
+    do: get_spec(id) || new_for_run(run)
+
+  def for_run(%Factory.Runs.Run{} = run), do: new_for_run(run)
+
+  # A run planned before it had a spec keeps its files in its spec text; the new spec
+  # starts from them, so the run's tasks aren't lost.
+  defp new_for_run(run) do
+    {:ok, spec} = create_spec(run.title)
+    {:ok, spec} = set_project_dir(spec, run.settings["project_dir"])
+    {:ok, _run} = Factory.Runs.update_run(run, %{spec_id: spec.id})
+
+    case run_files(run.spec) do
+      [] -> spec
+      files -> spec |> add_files(files) |> elem(1)
+    end
+  end
+
+  # The files in a run's spec text (`Factory.Runs.attach_spec/3`), as `[{name, text}]`.
+  defp run_files(nil), do: []
+
+  defp run_files(text) do
+    ~r/<!-- file: (.+?) -->\n/
+    |> Regex.split(text, include_captures: true, trim: true)
+    |> Enum.chunk_every(2)
+    |> Enum.flat_map(fn
+      [marker, body] ->
+        [_, name] = Regex.run(~r/<!-- file: (.+?) -->/, marker)
+        [{name, String.trim(body)}]
+
+      _ ->
+        []
+    end)
+  end
+
+  @doc """
+  Adds files (`[{name, content}]`) to the spec, each in the step its name says
+  (`step_for/1`). A tasks file replaces the tasks; other text is added after what the
+  step has, unless it's there already.
+  """
+  def add_files(%SpecDoc{} = spec, files) do
+    changes =
+      Enum.reduce(files, %{}, fn {name, text}, changes ->
+        step = String.to_existing_atom(step_for(name))
+        text = String.trim(text)
+        now = Map.get(changes, step, Map.fetch!(spec, step) || "")
+
+        cond do
+          text == "" or String.contains?(now, text) -> changes
+          step == :tasks or String.trim(now) == "" -> Map.put(changes, step, text <> "\n")
+          true -> Map.put(changes, step, String.trim_trailing(now) <> "\n\n" <> text <> "\n")
+        end
+      end)
+
+    if changes == %{}, do: {:ok, spec}, else: update_spec(spec, changes)
+  end
+
+  @doc """
+  Brings a run in step with its spec: the run's tasks and the spec text its agents
+  read (`Factory.Runs.attach_spec/3`).
+  """
+  def sync_run(%SpecDoc{} = spec, %Factory.Runs.Run{} = run),
+    do: Factory.Runs.attach_spec(run, files(spec), tasks(spec))
 
   def create_spec(name, attrs \\ %{}) do
     %SpecDoc{}
@@ -34,13 +143,19 @@ defmodule Factory.Specs do
   @doc """
   Creates a spec from files (`[{name, content}]`). Each goes into the step its name
   says (requirements.md, design.md, tasks.md); any other file is the main spec and
-  goes into the overview.
+  goes into the overview. A file given as `{name, content, step}` goes into that step.
   Without a name, the spec is named after the first heading or file.
   """
   def create_from_files(name, files) do
+    files =
+      Enum.map(files, fn
+        {file, text} -> {file, text, step_for(file)}
+        {file, text, step} when step in @parts -> {file, text, step}
+      end)
+
     steps =
       files
-      |> Enum.group_by(fn {file, _} -> step_for(file) end, &elem(&1, 1))
+      |> Enum.group_by(&elem(&1, 2), &elem(&1, 1))
       |> Map.new(fn {step, texts} ->
         {String.to_existing_atom(step), Enum.join(texts, "\n\n")}
       end)
@@ -63,28 +178,59 @@ defmodule Factory.Specs do
     end
   end
 
-  # The first heading in any file; otherwise the first file's name, or the first
-  # line of a typed description.
+  # The main spec names it: the first line of a typed description, else the first
+  # heading in a main spec file. Failing that, the first heading in any file (a
+  # requirements.md's "# Requirements" says little), else the first file's name.
   defp name_from([first | _] = files) do
-    Enum.find_value(files, fallback_name(first), fn {_, text} ->
-      case Regex.run(~r/^#\s+(.+)$/m, text) do
-        [_, heading] -> heading |> String.trim() |> String.slice(0, 80)
-        _ -> nil
-      end
-    end)
+    {main, others} = Enum.split_with(files, &(elem(&1, 2) == "overview"))
+    Enum.find_value(main ++ others, fallback_name(first), &name_of/1)
   end
 
-  defp fallback_name({:description, text}) do
-    line = text |> String.split(~r/\R/u, trim: true) |> List.first("") |> String.trim()
-    if String.length(line) > 60, do: String.slice(line, 0, 57) <> "…", else: line
+  defp name_of({:description, text, _}) do
+    first = text |> String.split(~r/\R/u, trim: true) |> List.first("")
+
+    case first |> String.replace(~r/^\s*#+\s*/, "") |> String.trim() do
+      "" -> nil
+      line -> if String.length(line) > 60, do: String.slice(line, 0, 57) <> "…", else: line
+    end
   end
 
-  defp fallback_name({file, _}), do: Path.rootname(Path.basename(file))
+  defp name_of({_file, text, _}) do
+    case Regex.run(~r/^#\s+(.+)$/m, text) do
+      [_, heading] -> heading |> String.trim() |> String.slice(0, 80)
+      _ -> nil
+    end
+  end
 
-  def change_spec(spec, attrs \\ %{}), do: SpecDoc.changeset(spec, attrs)
+  defp fallback_name({file, _, _}) when is_binary(file), do: Path.rootname(Path.basename(file))
+  defp fallback_name(_description), do: "New spec"
 
+  @doc """
+  The parts Kiro writes when it plans a run that this spec doesn't have yet, in order:
+  some of "requirements", "design" and "tasks". Tasks count as missing until there's
+  at least one.
+  """
+  def missing_parts(%SpecDoc{} = spec) do
+    for part <- ~w(requirements design tasks),
+        missing?(spec, part),
+        do: part
+  end
+
+  defp missing?(spec, "tasks"), do: tasks(spec) == []
+
+  defp missing?(spec, part),
+    do: String.trim(Map.fetch!(spec, String.to_existing_atom(part))) == ""
+
+  @doc "Changes the spec's text. A run planned in it and not started yet follows the change."
   def update_spec(%SpecDoc{} = spec, attrs) do
-    spec |> SpecDoc.changeset(attrs) |> Repo.update() |> preloaded()
+    with {:ok, spec} <- spec |> SpecDoc.changeset(attrs) |> Repo.update() |> preloaded() do
+      case home_run(spec) do
+        %{status: "draft"} = run -> sync_run(spec, run)
+        _ -> :ok
+      end
+
+      {:ok, spec}
+    end
   end
 
   def delete_spec(%SpecDoc{} = spec) do
@@ -130,6 +276,85 @@ defmodule Factory.Specs do
     end
   end
 
+  @doc """
+  Kiro writes the parts the spec is missing (`missing_parts/1`) in the background, in
+  one turn, keeping to the parts it has; then QA reviews the spec. Kiro reads the
+  project first (read-only). Progress is in `spec.plan["write"]`: `"status"` is
+  "running", "done" (with `"wrote"` and `"why"`) or "error" (with `"error"`).
+  Returns `{:error, :nothing_missing}` when every part is there.
+  """
+  def write_missing(%SpecDoc{} = spec) do
+    case missing_parts(spec) do
+      [] ->
+        {:error, :nothing_missing}
+
+      write ->
+        run = home_run(spec)
+        workflow = Factory.Workflows.for_run(run || %{})
+        type = Factory.Runs.Types.get(Factory.Workflows.kind(workflow))
+
+        agents =
+          workflow.id
+          |> Factory.Engine.workflow_steps()
+          |> Enum.reject(&(&1.kind == "action"))
+          |> Enum.map_join(" → ", & &1.name)
+
+        prompt = Planner.run_prompt(type, kiro_files(spec), write: write, agents: agents)
+        {:ok, spec} = set_write(spec, %{"status" => "running", "writing" => write})
+        dir = project_dir(spec)
+
+        Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
+          result =
+            with {:ok, reply} <-
+                   Factory.Kiro.ask(prompt,
+                     workdir: dir,
+                     allow: ["read", "search"],
+                     on_tool:
+                       &broadcast(
+                         "spec:#{spec.id}",
+                         {:plan_activity, Planner.describe_tool(&1, dir)}
+                       ),
+                     usage: %{source: "plan_run", spec_id: spec.id, run_id: run && run.id}
+                   ) do
+              Planner.parse_run_plan(reply, write)
+            end
+
+          if spec = get_spec(spec.id), do: wrote(spec, write, result)
+        end)
+
+        {:ok, spec}
+    end
+  end
+
+  defp wrote(spec, _write, {:error, reason}),
+    do: set_write(spec, %{"status" => "error", "error" => reason})
+
+  defp wrote(spec, write, {:ok, plan}) do
+    changes =
+      for part <- write, into: %{} do
+        case part do
+          "requirements" -> {:requirements, plan.requirements}
+          "design" -> {:design, plan.design}
+          # After any text the person gave that has no tasks in it.
+          "tasks" -> {:tasks, join(spec.tasks, Planner.to_markdown(plan.tasks, 1) <> "\n")}
+        end
+      end
+
+    {:ok, spec} = update_spec(spec, changes)
+    {:ok, spec} = set_write(spec, %{"status" => "done", "wrote" => write, "why" => plan.why})
+    review(spec)
+    {:ok, spec}
+  end
+
+  defp join(text, more) do
+    case String.trim(text || "") do
+      "" -> more
+      text -> text <> "\n\n" <> more
+    end
+  end
+
+  defp set_write(spec, write), do: set_plan(spec, Map.put(spec.plan || %{}, "write", write))
+
   @doc "Whether the spec was changed after its review."
   def changed_since_review?(%SpecDoc{review: %{"hash" => hash}} = spec), do: hash != hash(spec)
   def changed_since_review?(_spec), do: false
@@ -154,6 +379,13 @@ defmodule Factory.Specs do
       from(s in SpecDoc, where: fragment("?->>'status' in ('reading', 'writing')", s.plan)),
       set: [plan: stopped]
     )
+
+    # Writing the missing parts keeps its progress under the plan's "write" key.
+    from(s in SpecDoc,
+      where: fragment("?->'write'->>'status' = 'running'", s.plan),
+      update: [set: [plan: fragment("jsonb_set(?, '{write}', ?)", s.plan, type(^stopped, :map))]]
+    )
+    |> Repo.update_all([])
   end
 
   # Suggesting tasks: Kiro reads the project, asks questions, then suggests tasks.
@@ -316,15 +548,20 @@ defmodule Factory.Specs do
   run uses (see `Factory.Sources`), as `data-sources.md`.
   """
   def kiro_files(%SpecDoc{} = spec) do
+    run = home_run(spec)
+
     workflow_id =
-      case home_run(spec) do
+      case run do
         %{settings: %{"workflow_id" => id}} -> id
         _ -> nil
       end
 
+    # The base specs the run follows come first: everything else must respect them.
+    base = base_files_for_run(run)
+
     case Factory.Sources.context(workflow_id) do
-      "" -> files(spec)
-      text -> files(spec) ++ [{"data-sources.md", text}]
+      "" -> base ++ files(spec)
+      text -> base ++ files(spec) ++ [{"data-sources.md", text}]
     end
   end
 
@@ -336,11 +573,11 @@ defmodule Factory.Specs do
         do: {step <> ".md", text}
   end
 
-  @doc "The factory run this spec was written for, if it was (see Factory.Launch)."
+  @doc "The run this spec was written for: the first one it's linked to (`for_run/1`)."
   def home_run(%SpecDoc{id: id}) do
     Repo.one(
       from r in Factory.Runs.Run,
-        where: r.spec_id == ^id and not is_nil(r.kind),
+        where: r.spec_id == ^id,
         order_by: r.id,
         limit: 1,
         preload: :tasks

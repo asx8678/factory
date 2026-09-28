@@ -1,13 +1,13 @@
 defmodule FactoryWeb.RunLive do
   @moduledoc """
-  One run and everything in it: what was asked for, Kiro's plan, the spec's
-  progress, the workflow and setup, what happened, and what it cost.
-  Plain chats show here too, with only the parts they have.
+  One run and everything in it: what was asked for, its spec's progress, the
+  workflow and folder, what happened, and what it cost.
   """
   use FactoryWeb, :live_view
   import FactoryWeb.RunParts
-  alias Factory.{Launch, Runs, Specs, Usage}
+  alias Factory.{Agents, Engine, Runs, Specs, Usage}
   alias FactoryWeb.UsageMeter, as: Fmt
+  alias FactoryWeb.WorkflowMap
 
   def mount(%{"id" => id}, _session, socket) do
     case Runs.get_run(id) do
@@ -19,12 +19,14 @@ defmodule FactoryWeb.RunLive do
         if connected?(socket) do
           Runs.subscribe(run.id)
           if run.spec_id, do: Specs.subscribe(run.spec_id)
+          # Agents say when they start and finish, for the workflow map.
+          Agents.subscribe()
         end
 
         {:ok,
          socket
          |> FactoryWeb.UsageMeter.scope({:run, run.id})
-         |> assign(page_title: run.title, activity: nil, saving: false)
+         |> assign(page_title: run.title)
          |> load(run)}
     end
   end
@@ -35,7 +37,8 @@ defmodule FactoryWeb.RunLive do
     assign(socket,
       run: run,
       spec: spec,
-      next: Launch.next_step(run),
+      steps: Engine.steps(run),
+      workflow: Factory.Workflows.for_run(run),
       totals: Usage.totals({:run, run.id}),
       by_source: by_source(run.id),
       messages: run.id |> Runs.list_messages() |> Enum.take(-12) |> Enum.reverse()
@@ -61,7 +64,9 @@ defmodule FactoryWeb.RunLive do
   def handle_info({:spec_updated, _}, socket),
     do: {:noreply, load(socket, Runs.get_run(socket.assigns.run.id))}
 
-  def handle_info({:run_activity, text}, socket), do: {:noreply, assign(socket, activity: text)}
+  def handle_info({:graph_changed}, socket),
+    do: {:noreply, assign(socket, steps: Engine.steps(socket.assigns.run))}
+
   def handle_info(_msg, socket), do: {:noreply, socket}
 
   @doc "Usage figures follow new calls to Kiro (called by FactoryWeb.UsageMeter)."
@@ -69,37 +74,6 @@ defmodule FactoryWeb.RunLive do
     do: load(socket, socket.assigns.run)
 
   def usage_recorded(_event, socket), do: socket
-
-  def handle_event("retry_plan", _, socket) do
-    {:ok, run} = Launch.plan(socket.assigns.run)
-    {:noreply, socket |> assign(activity: nil) |> load(run)}
-  end
-
-  def handle_event("start", _, socket) do
-    case Specs.start_run(socket.assigns.spec) do
-      {:ok, run} ->
-        {:noreply, push_navigate(socket, to: ~p"/chat/#{run.id}")}
-
-      {:error, _} ->
-        {:noreply, put_flash(socket, :error, "Approve every step of the spec first.")}
-    end
-  end
-
-  def handle_event("save_setup", %{"name" => name}, socket) do
-    run = socket.assigns.run
-
-    case Launch.save_setup(name, run.kind, run.settings) do
-      {:ok, setup} ->
-        {:noreply,
-         socket |> assign(saving: false) |> put_flash(:info, "Saved the setup “#{setup.name}”.")}
-
-      {:error, _} ->
-        {:noreply, put_flash(socket, :error, "Give the setup a name.")}
-    end
-  end
-
-  def handle_event("toggle_save", _, socket),
-    do: {:noreply, assign(socket, saving: !socket.assigns.saving)}
 
   def render(assigns) do
     ~H"""
@@ -118,14 +92,12 @@ defmodule FactoryWeb.RunLive do
           </h1>
         </div>
         <div class="flex items-center gap-2 pt-1">
-          <.link
-            :if={!match?({"Open chat", _}, @next)}
-            navigate={~p"/chat/#{@run.id}"}
-            class="btn btn-ghost btn-sm"
-          >
-            <.icon name="hero-chat-bubble-left-right-mini" class="size-4" /> Chat
+          <.link :if={@spec} navigate={~p"/specs/#{@spec.id}"} class="btn btn-ghost btn-sm">
+            <.icon name="hero-document-text-mini" class="size-4" /> Spec
           </.link>
-          <.next_button next={@next} />
+          <.link navigate={~p"/chat/#{@run.id}"} class="btn btn-primary btn-sm">
+            <.icon name="hero-chat-bubble-left-right-mini" class="size-4" /> Open chat
+          </.link>
         </div>
       </div>
 
@@ -137,48 +109,34 @@ defmodule FactoryWeb.RunLive do
 
       <div class="grid gap-10 lg:grid-cols-[minmax(0,1fr)_20rem]">
         <div class="min-w-0 space-y-8">
-          <section :if={@run.kind} id="run-plan">
-            <h2 class="mb-3 text-lg font-medium">Plan</h2>
-
-            <div
-              :if={@run.plan["status"] == "writing"}
-              class="task-card-active rounded-xl border px-4 py-4"
-            >
-              <div class="flex items-center gap-2.5 text-sm font-medium">
-                <span class="loading loading-spinner loading-sm text-primary"></span>
-                Kiro is planning the run
-              </div>
-              <p class="mt-1.5 pl-7 text-sm text-base-content/60">
-                Reading the project, then writing the requirements, design and tasks.
-              </p>
-              <p :if={@activity} class="mt-2 truncate pl-7 font-mono text-xs text-base-content/50">
-                {@activity}
-              </p>
+          <section :if={@steps != []} id="run-workflow">
+            <div class="mb-3 flex items-baseline justify-between gap-3">
+              <h2 class="text-lg font-medium">Workflow</h2>
+              <span class="text-sm text-base-content/55">{@workflow.name}</span>
             </div>
-
-            <div
-              :if={@run.plan["status"] == "error"}
-              class="rounded-xl border border-error/30 bg-error/5 px-4 py-3"
-            >
-              <p class="flex items-center gap-2 text-sm font-medium text-error">
-                <.icon name="hero-exclamation-triangle-mini" class="size-4" />
-                Kiro couldn't plan the run
-              </p>
-              <p class="mt-1 text-sm text-base-content/70">{@run.plan["error"]}</p>
-              <button phx-click="retry_plan" class="btn btn-sm mt-3">Try again</button>
+            <div class="overflow-x-auto rounded-xl border border-base-300/70 bg-base-200/30 px-5 py-5">
+              <WorkflowMap.map
+                id="run-map"
+                steps={@steps}
+                states={WorkflowMap.states(@steps, @run)}
+                size={:md}
+                link={&agent_chat(&1, @run)}
+              />
             </div>
+          </section>
 
-            <div
-              :if={@run.plan["status"] == "done"}
-              class="rounded-xl border border-base-300/70 bg-base-200/40 px-4 py-4"
-            >
-              <p
-                :if={@run.plan["why"] not in [nil, ""]}
-                class="text-sm leading-relaxed text-base-content/80"
+          <section :if={@spec} id="run-plan">
+            <div class="mb-3 flex items-baseline justify-between">
+              <h2 class="text-lg font-medium">Plan</h2>
+              <.link
+                navigate={~p"/specs/#{@spec.id}"}
+                class="text-sm text-base-content/55 hover:text-base-content"
               >
-                {@run.plan["why"]}
-              </p>
-              <.spec_progress :if={@spec} spec={@spec} />
+                Open spec →
+              </.link>
+            </div>
+            <div class="rounded-xl border border-base-300/70 bg-base-200/40 px-4 py-4">
+              <.spec_progress spec={@spec} />
             </div>
           </section>
 
@@ -225,41 +183,19 @@ defmodule FactoryWeb.RunLive do
         </div>
 
         <aside class="space-y-8 text-sm">
-          <section :if={@run.kind}>
-            <h2 class="mb-2 font-medium">Workflow</h2>
-            <p class="mb-3 text-xs text-base-content/50">
-              {mode_label(@run.settings["workflow_mode"], "agents")}
-            </p>
-            <ol class="space-y-2">
-              <li
-                :for={{step, i} <- Enum.with_index(@run.settings["workflow"] || [])}
-                class="flex gap-3"
-              >
-                <span class="grid size-7 shrink-0 place-items-center rounded-lg bg-base-content/[0.06]">
-                  <.icon name={kind_icon(step["kind"])} class="size-3.5 opacity-75" />
-                </span>
-                <span class="min-w-0">
-                  <span class="block font-medium">{i + 1}. {step["name"]}</span>
-                  <span class="block text-xs text-base-content/55">{step["does"]}</span>
-                </span>
-              </li>
-            </ol>
-          </section>
-
-          <section :if={@run.kind}>
+          <section>
             <h2 class="mb-2 font-medium">Setup</h2>
             <dl class="space-y-1.5">
               <div class="flex justify-between gap-3">
-                <dt class="text-base-content/55">Model</dt>
-                <dd class="font-mono text-xs">{@run.settings["model"]}</dd>
-              </div>
-              <div class="flex justify-between gap-3">
-                <dt class="text-base-content/55">Chosen</dt>
-                <dd>{mode_label(@run.settings["setup_mode"], "model")}</dd>
-              </div>
-              <div class="flex justify-between gap-3">
-                <dt class="text-base-content/55">Plan review</dt>
-                <dd>{if @run.settings["approve_plan"] == false, do: "Off", else: "On"}</dd>
+                <dt class="text-base-content/55">Workflow</dt>
+                <dd class="truncate">
+                  <.link
+                    navigate={~p"/workflows/#{@workflow.id}"}
+                    class="hover:underline"
+                  >
+                    {@workflow.name}
+                  </.link>
+                </dd>
               </div>
               <div class="flex flex-col gap-0.5">
                 <dt class="text-base-content/55">Project folder</dt>
@@ -268,23 +204,6 @@ defmodule FactoryWeb.RunLive do
                 </dd>
               </div>
             </dl>
-            <button
-              :if={!@saving}
-              phx-click="toggle_save"
-              class="mt-3 text-xs text-base-content/55 underline-offset-2 hover:text-base-content hover:underline"
-            >
-              Save as a setup
-            </button>
-            <form :if={@saving} id="save-setup" phx-submit="save_setup" class="mt-3 flex gap-2">
-              <input
-                name="name"
-                placeholder="Setup name"
-                maxlength="60"
-                phx-mounted={JS.focus()}
-                class="h-8 min-w-0 flex-1 rounded-md border border-base-300 bg-base-100 px-2.5 text-sm outline-none focus:border-base-content/30"
-              />
-              <button class="btn btn-sm">Save</button>
-            </form>
           </section>
 
           <section id="run-usage-by-kind">
@@ -321,30 +240,6 @@ defmodule FactoryWeb.RunLive do
         </aside>
       </div>
     </Layouts.app>
-    """
-  end
-
-  attr :next, :any, required: true
-
-  defp next_button(%{next: nil} = assigns), do: ~H""
-
-  defp next_button(%{next: {label, :start}} = assigns) do
-    assigns = assign(assigns, label: label)
-
-    ~H"""
-    <button id="run-next" phx-click="start" class="btn btn-primary btn-sm">
-      <.icon name="hero-play-mini" class="size-4" /> {@label}
-    </button>
-    """
-  end
-
-  defp next_button(%{next: {label, path}} = assigns) do
-    assigns = assign(assigns, label: label, path: path)
-
-    ~H"""
-    <.link id="run-next" navigate={@path} class="btn btn-primary btn-sm">
-      {@label} <.icon name="hero-arrow-right-mini" class="size-4" />
-    </.link>
     """
   end
 
@@ -397,7 +292,9 @@ defmodule FactoryWeb.RunLive do
   # The overview starts with "# Fix a bug: <title>"; the page already shows both.
   defp without_title(text), do: String.replace(text, ~r/\A#\s[^\n]*\n+/, "")
 
-  defp mode_label("kiro", what), do: "Kiro chose the #{what}"
-  defp mode_label("manual", what), do: "You chose the #{what}"
-  defp mode_label(_, what), do: "Recommended #{what}"
+  # An agent's card opens the run's chat with that agent.
+  defp agent_chat(%{kind: kind, agent: %{id: id}}, run) when kind != "action",
+    do: ~p"/chat/#{run.id}?#{[agent: id]}"
+
+  defp agent_chat(_step, _run), do: nil
 end

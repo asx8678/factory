@@ -33,6 +33,20 @@ defmodule FactoryWeb.Usage do
 
   def context(_), do: nil
 
+  @doc "Context use at which a Kiro session compacts before its next message (`Factory.Context`)."
+  def compact_at, do: Factory.Context.config(:compact_at)
+
+  @doc ~s{How full a context is: "low", "mid" (from 60% of the way to compacting) or "high" (compacts next).}
+  def level(pct) when is_number(pct) do
+    cond do
+      pct >= compact_at() -> "high"
+      pct >= compact_at() * 0.6 -> "mid"
+      true -> "low"
+    end
+  end
+
+  def level(_), do: nil
+
   defp trim(x) do
     s = :erlang.float_to_binary(x, decimals: 1)
     String.trim_trailing(s, ".0")

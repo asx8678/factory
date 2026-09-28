@@ -52,3 +52,12 @@ config :factory, :sources_dir, Path.expand("../tmp/test-sources", __DIR__)
 
 # Actions' HTTP requests (GitHub, Azure DevOps, webhooks, API calls) go to a stub.
 config :factory, :actions_req_options, plug: {Req.Test, Factory.Actions}
+
+# Runs don't execute on their own in tests; tests call Factory.Engine.run/1.
+config :factory, :run_engine, false
+
+# Kiro doesn't retitle chats in the background in tests; see Factory.Runs.TitlesTest.
+config :factory, :auto_titles, false
+
+# Tests don't ask the real Kiro which models it has.
+config :factory, :check_kiro_models, false

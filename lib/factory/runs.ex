@@ -25,11 +25,50 @@ defmodule Factory.Runs do
 
   def get_run(id), do: Run |> Repo.get(id) |> Repo.preload(:tasks)
 
-  def create_run(title \\ "New chat") do
+  def create_run(title \\ "New run") do
     with {:ok, run} <- %Run{} |> Run.changeset(%{title: title}) |> Repo.insert() do
       broadcast("runs", {:runs_changed})
       {:ok, Repo.preload(run, :tasks)}
     end
+  end
+
+  # Empty runs: plain chats not started, with no messages and no tasks yet.
+  defp empty_runs do
+    from r in Run,
+      as: :run,
+      where: is_nil(r.kind) and r.status == "draft",
+      where: not exists(from m in Message, where: m.run_id == parent_as(:run).id),
+      where: not exists(from t in Task, where: t.run_id == parent_as(:run).id)
+  end
+
+  @doc "The latest empty run (nothing said, no tasks), to use instead of making another."
+  def latest_empty do
+    Repo.one(from r in empty_runs(), order_by: [desc: r.updated_at, desc: r.id], limit: 1)
+    |> then(&(&1 && Repo.preload(&1, :tasks)))
+  end
+
+  @doc "Deletes empty runs not touched for `minutes`. Returns how many."
+  def prune_empty(minutes \\ 60) do
+    cutoff = DateTime.add(DateTime.utc_now(), -minutes * 60)
+    {n, _} = Repo.delete_all(from r in empty_runs(), where: r.updated_at < ^cutoff)
+    if n > 0, do: broadcast("runs", {:runs_changed})
+    n
+  end
+
+  @doc """
+  A name for a new run until it gets a better one: the project folder and the day,
+  e.g. "shop · 28 Sep", numbered when that's taken.
+  """
+  def default_title(project_dir) do
+    project = if project_dir in [nil, ""], do: "New run", else: Path.basename(project_dir)
+    base = "#{project} · #{Calendar.strftime(Date.utc_today(), "%-d %b")}"
+    taken = Repo.all(from r in Run, where: like(r.title, ^"#{base}%"), select: r.title)
+
+    Stream.iterate(1, &(&1 + 1))
+    |> Enum.find_value(fn
+      1 -> if base not in taken, do: base
+      n -> if "#{base} (#{n})" not in taken, do: "#{base} (#{n})"
+    end)
   end
 
   def update_run(%Run{} = run, attrs) do
@@ -39,10 +78,6 @@ defmodule Factory.Runs do
       broadcast("runs", {:runs_changed})
       {:ok, run}
     end
-  end
-
-  def delete_run(%Run{} = run) do
-    with {:ok, _} <- Repo.delete(run), do: broadcast("runs", {:runs_changed})
   end
 
   @doc "Stores the spec files and replaces the run's tasks with the ones found in them."
@@ -71,7 +106,7 @@ defmodule Factory.Runs do
         end)
 
       names = Enum.map(files, &elem(&1, 0))
-      title = if run.title == "New chat", do: spec_title(files), else: run.title
+      title = if run.title in ["New run", "New chat"], do: spec_title(files), else: run.title
       update_run(run, %{spec: spec, spec_files: names, title: title})
     end)
   end

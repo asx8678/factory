@@ -4,21 +4,23 @@ defmodule Factory.Agents.Agent do
 
   @statuses ~w(idle running waiting error done)
   @kinds ~w(general orchestrator planner coder tester reviewer researcher writer action)
-  @models ~w(claude-opus-5-5 claude-sonnet-5 claude-haiku-4-5)
+
+  # Agents that only look: they read and search the project, never change it.
+  @read_only ~w(planner researcher reviewer)
+  @read_tools ~w(read search think fetch)
+  @all_tools ~w(read search think fetch edit delete move execute other)
 
   schema "agents" do
     field :name, :string
     field :role, :string, default: ""
-    field :model, :string, default: "claude-sonnet-5"
+    field :model, :string, default: "auto"
     field :status, :string, default: "idle"
     field :activity, :string
     field :kind, :string, default: "general"
     field :prompt, :string, default: ""
     field :usage, :map, default: %{}
     field :session, :string, default: "own"
-    field :runtime, :string
     field :kiro_mode, :string, default: "vibe"
-    field :workdir, :string
     field :x, :float, default: 0.0
     field :y, :float, default: 0.0
     # For kind "action": %{"type" => …, "config" => %{…}} (see Factory.Actions).
@@ -28,13 +30,16 @@ defmodule Factory.Agents.Agent do
     timestamps(type: :utc_datetime)
   end
 
-  @runtimes [{"Not connected", ""}, {"Kiro ACP (v3)", "kiro_v3"}]
+  @doc """
+  The Kiro tool kinds an agent may use, the same in a chat and in a run: reading and
+  searching for the kinds that only look (planner, researcher, reviewer), everything
+  for the rest. Kiro asks before it edits or runs a command; other requests are denied.
+  """
+  def tools(%{kind: kind}) when kind in @read_only, do: @read_tools
+  def tools(_agent), do: @all_tools
 
-  def runtimes, do: @runtimes
-
-  @doc "Models to offer for an agent: Kiro's when it runs on Kiro, otherwise the plain list."
-  def models(%__MODULE__{runtime: "kiro_v3"}), do: Factory.Kiro.models()
-  def models(_agent), do: @models
+  @doc "Whether the agent only reads and checks, never changes the project."
+  def read_only?(%{kind: kind}), do: kind in @read_only
 
   def kinds, do: @kinds
 
@@ -51,10 +56,8 @@ defmodule Factory.Agents.Agent do
       :model,
       :status,
       :activity,
-      :runtime,
       :kiro_mode,
       :session,
-      :workdir,
       :x,
       :y,
       :workflow_id,
@@ -68,22 +71,17 @@ defmodule Factory.Agents.Agent do
     # Ecto casts a cleared text box to nil; the column keeps "" for "no context".
     |> update_change(:prompt, &(&1 || ""))
     |> validate_length(:prompt, max: 20_000)
-    |> validate_inclusion(:runtime, ["kiro_v3"])
     |> validate_inclusion(:session, ["own", "shared"])
     |> kiro_defaults()
   end
 
-  # A Kiro agent needs a model and mode Kiro knows; switching to Kiro picks "auto".
+  # Agents run on Kiro: they need a model and mode Kiro knows; an unknown model is "auto".
   defp kiro_defaults(changeset) do
-    if get_field(changeset, :runtime) == "kiro_v3" do
-      changeset =
-        if get_field(changeset, :model) in Factory.Kiro.models(),
-          do: changeset,
-          else: put_change(changeset, :model, "auto")
+    changeset =
+      if get_field(changeset, :model) in Factory.Kiro.models(),
+        do: changeset,
+        else: put_change(changeset, :model, "auto")
 
-      validate_inclusion(changeset, :kiro_mode, Factory.Kiro.modes())
-    else
-      changeset
-    end
+    validate_inclusion(changeset, :kiro_mode, Factory.Kiro.modes())
   end
 end

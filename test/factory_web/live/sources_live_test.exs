@@ -38,6 +38,9 @@ defmodule FactoryWeb.SourcesLiveTest do
     [new] = Sources.list(w.id)
     assert Sources.agent_ids(new) == []
 
+    # Adding closes the window; the card on the canvas shows the new source.
+    refute has_element?(view, "#sources-window")
+    render_hook(view, "sources_open", %{})
     [source] = Sources.list(w.id)
     assert has_element?(view, "#source-#{source.id}", "Docs")
     # The card on the canvas lists it.
@@ -79,6 +82,7 @@ defmodule FactoryWeb.SourcesLiveTest do
 
     assert %{x: -500.0, y: 40.0} = Sources.get(source.id)
 
+    render_hook(view, "sources_open", %{})
     view |> element("#source-#{source.id} button[phx-click=source_edit]") |> render_click()
     # The form's ticks attach it too.
     view
@@ -129,7 +133,7 @@ defmodule FactoryWeb.SourcesLiveTest do
     assert [%{name: "design-docs", config: %{"path" => _}}] = Sources.list(w.id)
 
     # A meta index picks a text file; other files aren't offered.
-    view |> element("#add-source") |> render_click()
+    render_hook(view, "sources_open", %{"add" => "true"})
     view |> element("#pick-source-meta_index") |> render_click()
     view |> element("#browse-path") |> render_click()
     render_click(view, "browse_go", %{"path" => Path.join(root, "design-docs")})
@@ -166,5 +170,58 @@ defmodule FactoryWeb.SourcesLiveTest do
     render_click(view, "browse_pick", %{"path" => Path.join(dir, "manual.json")})
     view |> form("#source-form") |> render_submit()
     assert [%{kind: "pageindex", name: "manual"}] = Sources.list(w.id)
+  end
+
+  test "a source opened from its card closes on Save, and from the list goes back to it",
+       %{conn: conn} do
+    {:ok, w} = Workflows.create("Card flow")
+
+    {:ok, source} =
+      Sources.create(w.id, %{kind: "instructions", name: "Rules", content: "Be brief."})
+
+    {:ok, view, _html} = live(conn, ~p"/workflows/#{w.id}")
+
+    # A click on the card on the canvas.
+    render_hook(view, "source_edit", %{"id" => "#{source.id}"})
+    view |> form("#source-form", source: %{name: "House rules"}) |> render_submit()
+    assert Sources.get(source.id).name == "House rules"
+    refute has_element?(view, "#sources-window")
+
+    # Back also just closes it.
+    render_hook(view, "source_edit", %{"id" => "#{source.id}"})
+    view |> element("#source-form button[phx-click=source_back]") |> render_click()
+    refute has_element?(view, "#sources-window")
+
+    # Opened from the list, Save goes back to the list.
+    render_hook(view, "sources_open", %{})
+    view |> element("#source-#{source.id} button[phx-click=source_edit]") |> render_click()
+    view |> form("#source-form", source: %{name: "Rules"}) |> render_submit()
+    assert has_element?(view, "#sources")
+  end
+
+  test "an arrow's hand-off prompt is added, edited and removed", %{conn: conn} do
+    {:ok, w} = Workflows.create("Prompt flow")
+    {:ok, a} = Factory.Agents.create_agent(%{name: "Coder", workflow_id: w.id})
+    {:ok, b} = Factory.Agents.create_agent(%{name: "Tester", workflow_id: w.id})
+    {:ok, link} = Factory.Agents.link(a.id, b.id)
+    {:ok, view, _html} = live(conn, ~p"/workflows/#{w.id}")
+
+    # The + on the arrow.
+    render_hook(view, "link_prompt_edit", %{"id" => "l#{link.id}"})
+    assert has_element?(view, "#link-prompt-title", "Coder")
+    refute has_element?(view, "#link-prompt-remove")
+
+    view
+    |> form("#link-prompt-form", prompt: "  List the files you changed.  ")
+    |> render_submit()
+
+    refute has_element?(view, "#link-prompt-window")
+    assert Factory.Agents.get_link(link.id).prompt == "List the files you changed."
+    assert_push_event(view, "flow:graph", %{edges: [%{prompt: "List the files you changed."}]})
+
+    render_hook(view, "link_prompt_edit", %{"id" => "l#{link.id}"})
+    assert has_element?(view, "#link-prompt-text", "List the files you changed.")
+    view |> element("#link-prompt-remove") |> render_click()
+    assert Factory.Agents.get_link(link.id).prompt == ""
   end
 end

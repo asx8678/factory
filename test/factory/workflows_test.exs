@@ -12,24 +12,23 @@ defmodule Factory.WorkflowsTest do
     assert Enum.map(Workflows.steps(bug), & &1["name"]) == ~w(Investigator Fixer Tester Reviewer)
     refute Workflows.modified?(bug)
 
-    # Each agent hands off to the next, runs on Kiro and has a starting prompt.
+    # Each agent hands off to the next and has a starting prompt.
     [first | _] = agents = Workflows.ordered_agents(bug.id)
-    assert first.runtime == "kiro_v3" and first.prompt =~ "Investigator"
+    assert first.prompt =~ "Investigator"
     assert length(Agents.graph(bug.id).edges) == length(agents) - 1
 
     # "Other" has no standard workflow; it keeps its built-in default.
     assert Workflows.standard("other") == nil
-    assert Workflows.recommended_steps("other") == Types.workflow("other")
+    assert [_ | _] = Types.workflow("other")
   end
 
-  test "changes to a standard workflow are what runs recommend, until it's restored" do
+  test "a standard workflow can be changed, and restored to its default" do
     bug = Workflows.standard("bug")
     [investigator | _] = Workflows.ordered_agents(bug.id)
     {:ok, _} = Agents.update_agent(investigator, %{name: "Detective"})
 
     assert Workflows.modified?(bug)
-    assert ["Detective" | _] = Enum.map(Types.default_settings("bug")["workflow"], & &1["name"])
-    assert Types.default_settings("bug")["workflow_id"] == bug.id
+    assert ["Detective" | _] = Enum.map(Workflows.steps(bug), & &1["name"])
 
     {:ok, bug} = Workflows.restore(bug)
     refute Workflows.modified?(bug)
@@ -78,7 +77,7 @@ defmodule Factory.WorkflowsTest do
     {:ok, run} = Runs.create_run()
     Runs.subscribe(run.id)
     Chat.handle(run, "/workflow")
-    assert_receive {:message, %{body: "Agents in Mine:\n• Solo: not connected"}}
+    assert_receive {:message, %{body: "Agents in Mine:\n• Solo: auto, vibe mode"}}
 
     # A run started with the bug workflow sees its agents instead.
     {:ok, run} =

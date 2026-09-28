@@ -12,6 +12,8 @@ defmodule Factory.Agents.Workflow do
     field :key, :string
     field :description, :string, default: ""
     field :current, :boolean, default: false
+    # The base specs its runs start with (see Factory.Specs).
+    field :base_spec_ids, {:array, :integer}, default: []
     has_many :agents, Factory.Agents.Agent
 
     timestamps(type: :utc_datetime)

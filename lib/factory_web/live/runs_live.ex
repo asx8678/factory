@@ -27,7 +27,7 @@ defmodule FactoryWeb.RunsLive do
         subtitle="Every factory run and chat, newest first, with what it cost."
       >
         <:actions>
-          <.link navigate={~p"/"} class="btn btn-primary btn-sm">
+          <.link navigate={~p"/chat"} class="btn btn-primary btn-sm">
             <.icon name="hero-plus-mini" class="size-4" /> New factory run
           </.link>
         </:actions>
