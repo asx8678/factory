@@ -53,7 +53,9 @@ chat bubble.
 2. **Spec page "Suggest tasks"** (`Specs.plan_questions/2`, `plan_tasks/2`): move onto
    the same tools, writing suggestions into `spec.plan` for picking instead of straight
    into the tasks.
-3. **One task shape.** `run_prompt`, the questions/tasks prompts and the chat prompt
+3. ~~**One task shape.**~~ Done: `Factory.Specs.Planner.task/1` and `task_json/0` are the one
+   shape every prompt asks for and every parser (and `add_tasks`) normalises to;
+   suggestions keep an optional `size`. Was: `run_prompt`, the questions/tasks prompts and the chat prompt
    describe tasks differently (details as string vs list, `size`). Make the
    `add_tasks` schema the single shape.
 4. **Smaller items:** the `unclear` badge text assumes no tasks; show questions asked

@@ -468,8 +468,11 @@ defmodule FactoryWeb.SuggestTasks do
             </span>
             <span class="min-w-0 flex-1">
               <span class="block text-sm font-medium">{task["title"]}</span>
-              <span :if={task["details"] != ""} class="mt-0.5 block text-[13px] text-base-content/60">
-                {task["details"]}
+              <span
+                :if={details_text(task) != ""}
+                class="mt-0.5 block text-[13px] text-base-content/60"
+              >
+                {details_text(task)}
               </span>
             </span>
             <span class="flex shrink-0 items-center gap-2 pt-px text-xs text-base-content/50">
@@ -532,4 +535,8 @@ defmodule FactoryWeb.SuggestTasks do
   defp size_title("S"), do: "Small change"
   defp size_title("M"), do: "Medium change"
   defp size_title(_), do: "Large change"
+
+  # A suggestion's details: a list of lines, or one string in suggestions saved before
+  # tasks had one shape.
+  defp details_text(task), do: task["details"] |> List.wrap() |> Enum.join(" ")
 end

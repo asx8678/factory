@@ -248,12 +248,7 @@ defmodule Factory.PlanTools do
     spec = Specs.for_run(run)
     {preamble, blocks} = checklist(spec.tasks)
 
-    new =
-      for %{"title" => title} = t <- List.wrap(args["tasks"]),
-          is_binary(title),
-          title = title |> String.replace(~r/\s*\R\s*/u, " ") |> String.trim(),
-          title != "",
-          do: task_block(title, t["details"], t["requirements"])
+    new = for t <- Planner.tasks(args["tasks"]), do: task_block(t)
 
     at = if is_integer(args["after"]), do: args["after"] |> max(0) |> min(length(blocks))
 
@@ -368,17 +363,21 @@ defmodule Factory.PlanTools do
     if blocks == [] or Regex.match?(~r/^[-*] \[[ xX]\]/m, markdown) do
       {preamble, blocks}
     else
-      {preamble, Enum.map(blocks, &task_block(&1.title, &1.details, &1.requirements))}
+      {preamble,
+       Enum.map(blocks, fn b ->
+         task_block(
+           Planner.task(%{
+             "title" => b.title,
+             "details" => b.details,
+             "requirements" => b.requirements
+           })
+         )
+       end)}
     end
   end
 
-  defp task_block(title, details, requirements) do
-    task = %{
-      "title" => String.slice(title, 0, 200),
-      "details" => details |> lines() |> Enum.take(12),
-      "requirements" => requirements |> lines() |> Enum.take(8)
-    }
-
+  # A task in the one shape (`Factory.Specs.Planner.task/1`) as a checklist block.
+  defp task_block(task) do
     {_, [block]} = Spec.blocks(Planner.to_markdown([task], 1))
     block
   end

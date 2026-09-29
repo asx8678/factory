@@ -11,6 +11,48 @@ defmodule Factory.Specs.Planner do
   start from nothing. Replies are JSON; the parsers keep only what they understand.
   """
 
+  # The one shape a task has wherever Kiro writes one: suggestions, a run's plan, a chat
+  # plan without tools, an improved or drafted task, and `Factory.PlanTools.add_tasks`.
+  @task_json ~s|{"title": "<imperative, under 80 characters>", "details": ["<one step or note per item, 1 to 6 items; wrap code and paths in backticks>"], "requirements": ["<requirement number, e.g. 1.2>"]}|
+
+  @doc "The task shape Kiro is asked for, as JSON with placeholders."
+  def task_json, do: @task_json
+
+  @doc """
+  A task Kiro wrote, in the one shape: `%{"title", "details" => [line], "requirements" =>
+  [ref]}`, or nil without a title. Details may come as a list or as text (one per line).
+  """
+  def task(%{"title" => title} = t) when is_binary(title) do
+    case title |> String.replace(~r/\s*\R\s*/u, " ") |> String.trim() do
+      "" ->
+        nil
+
+      title ->
+        %{
+          "title" => String.slice(title, 0, 200),
+          # Only text: a number among the details is noise, unlike a requirement's "1.2".
+          "details" =>
+            t["details"] |> List.wrap() |> Enum.filter(&is_binary/1) |> lines() |> Enum.take(12),
+          "requirements" =>
+            t["requirements"] |> List.wrap() |> Enum.map(&to_string/1) |> lines() |> Enum.take(8)
+        }
+    end
+  end
+
+  def task(_), do: nil
+
+  @doc "The tasks in `list` that have a title, in the one shape (`task/1`)."
+  def tasks(list), do: list |> List.wrap() |> Enum.map(&task/1) |> Enum.reject(&is_nil/1)
+
+  defp lines(list) do
+    for item <- List.wrap(list),
+        is_binary(item) or is_number(item),
+        line <- item |> to_string() |> String.split(~r/\R/u),
+        line = String.trim(line),
+        line != "",
+        do: line
+  end
+
   @doc "Prompt for turn 1: read the project, then ask questions."
   def questions_prompt(files) do
     """
@@ -59,8 +101,9 @@ defmodule Factory.Specs.Planner do
     traces back to the requirements it covers. Include tasks for tests. Don't repeat tasks \
     the spec's tasks file already has.
 
-    Reply with only this JSON object and nothing else:
-    {"tasks": [{"title": "<imperative, under 80 characters>", "details": "<1 or 2 sentences: what to change and where>", "requirements": ["<requirement number, e.g. 1.2>"], "size": "S" | "M" | "L"}]}
+    Reply with only this JSON object and nothing else, each task as shown plus its size \
+    ("S", "M" or "L"):
+    {"tasks": [#{String.trim_trailing(@task_json, "}")}, "size": "S"}]}
     </task-planning>
 
     #{spec_text(files)}
@@ -157,7 +200,7 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
     {"tasks",
      ~s|- "tasks": small implementation tasks in build order, each buildable and testable on \
 its own, naming the files it touches and the requirement numbers it covers. Include tests.|,
-     ~s|"tasks": [{"title": "<imperative, under 80 characters>", "details": ["<step or note>"], "requirements": ["<number>"]}]|}
+     ~s|"tasks": [#{@task_json}]|}
   ]
 
   @doc """
@@ -212,17 +255,7 @@ its own, naming the files it touches and the requirement numbers it covers. Incl
   """
   def parse_run_plan(reply, write \\ ~w(requirements design tasks)) do
     with {:ok, data} <- decode(reply) do
-      tasks =
-        for %{"title" => title} = t <- List.wrap(data["tasks"]),
-            is_binary(title) and String.trim(title) != "" do
-          %{
-            "title" => title |> String.trim() |> String.slice(0, 200),
-            "details" =>
-              t["details"] |> List.wrap() |> Enum.filter(&is_binary/1) |> Enum.map(&String.trim/1),
-            "requirements" =>
-              t["requirements"] |> List.wrap() |> Enum.map(&to_string/1) |> Enum.take(8)
-          }
-        end
+      tasks = tasks(data["tasks"])
 
       plan = %{
         requirements: text(data["requirements"]),
@@ -288,7 +321,7 @@ its own, naming the files it touches and the requirement numbers it covers. Incl
     Factory shows them.
 
     Only if the factory tools aren't available, reply instead with only this JSON object:
-    {"clear": true | false, "reply": "<2 to 4 sentences>", "questions": [{"question": "<question>", "options": ["<option>"]}], "tasks": [{"title": "<imperative, under 80 characters>", "details": ["<step or note>"]}]}
+    {"clear": true | false, "reply": "<2 to 4 sentences>", "questions": [{"question": "<question>", "options": ["<option>"]}], "tasks": [#{@task_json}]}
     </task-planning>
 
     <requests>
@@ -315,16 +348,7 @@ its own, naming the files it touches and the requirement numbers it covers. Incl
           %{"question" => text, "options" => Enum.take(options, 4)}
         end
 
-      tasks =
-        for %{"title" => title} = t <- List.wrap(data["tasks"]),
-            is_binary(title) and String.trim(title) != "" do
-          %{
-            "title" => title |> String.trim() |> String.slice(0, 200),
-            "details" =>
-              t["details"] |> List.wrap() |> Enum.filter(&is_binary/1) |> Enum.map(&String.trim/1),
-            "requirements" => []
-          }
-        end
+      tasks = tasks(data["tasks"])
 
       # Unclear means questions first, whatever tasks came with them.
       unclear = data["clear"] == false and questions != []
@@ -337,34 +361,25 @@ its own, naming the files it touches and the requirement numbers it covers. Incl
   defp json_shape do
     """
     Reply with only this JSON object and nothing else:
-    {"title": "<imperative, under 80 characters>", "details": ["<one step or note per item, 1 to 6 items>"], "requirements": ["<requirement number>"], "why": "<one sentence: how you scoped it>"}\
+    #{String.trim_trailing(@task_json, "}")}, "why": "<one sentence: how you scoped it>"}\
     """
   end
 
   @doc "Reads an improved or new task: `{:ok, %{title:, details:, requirements:, why:}}`."
   def parse_improvement(reply) do
     with {:ok, data} <- decode(reply) do
-      title = text(data["title"])
+      case task(data) do
+        nil ->
+          {:error, "Kiro didn't suggest a task."}
 
-      details =
-        data["details"]
-        |> List.wrap()
-        |> Enum.filter(&is_binary/1)
-        |> Enum.flat_map(&String.split(&1, ~r/\R/u))
-        |> Enum.map(&String.trim/1)
-        |> Enum.reject(&(&1 == ""))
-
-      if title == "" do
-        {:error, "Kiro didn't suggest a task."}
-      else
-        {:ok,
-         %{
-           title: String.slice(title, 0, 200),
-           details: Enum.take(details, 12),
-           requirements:
-             data["requirements"] |> List.wrap() |> Enum.map(&to_string/1) |> Enum.take(8),
-           why: text(data["why"])
-         }}
+        t ->
+          {:ok,
+           %{
+             title: t["title"],
+             details: t["details"],
+             requirements: t["requirements"],
+             why: text(data["why"])
+           }}
       end
     end
   end
@@ -393,16 +408,10 @@ its own, naming the files it touches and the requirement numbers it covers. Incl
   @doc "Reads turn 2's reply: `{:ok, [%{\"title\" => …, …}]}`, never empty."
   def parse_tasks(reply) do
     with {:ok, data} <- decode(reply) do
+      # Suggestions keep their size, for the list to pick from.
       tasks =
-        for %{"title" => title} = t <- List.wrap(data["tasks"]),
-            is_binary(title) and String.trim(title) != "" do
-          %{
-            "title" => title |> String.trim() |> String.slice(0, 200),
-            "details" => text(t["details"]),
-            "requirements" =>
-              t["requirements"] |> List.wrap() |> Enum.map(&to_string/1) |> Enum.take(8),
-            "size" => if(t["size"] in ~w(S M L), do: t["size"])
-          }
+        for raw <- List.wrap(data["tasks"]), t = task(raw), t != nil do
+          Map.put(t, "size", if(raw["size"] in ~w(S M L), do: raw["size"]))
         end
 
       case tasks do
