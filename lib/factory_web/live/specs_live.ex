@@ -258,7 +258,7 @@ defmodule FactoryWeb.SpecsLive do
             <span class="truncate">{entry.client_name}</span>
             <span class="text-base-content/45">
               goes into {String.downcase(
-                FactoryWeb.SpecLive.step_label(Specs.step_for(entry.client_name))
+                FactoryWeb.SpecPageParts.step_label(Specs.step_for(entry.client_name))
               )}
             </span>
             <span
@@ -432,9 +432,9 @@ defmodule FactoryWeb.SpecsLive do
                 :if={s.review["status"] == "done"}
                 class={[
                   "shrink-0 rounded-md bg-base-content/[0.06] px-1.5 py-0.5 text-xs font-medium tabular-nums",
-                  FactoryWeb.SpecLive.verdict_class(s.review["verdict"])
+                  FactoryWeb.SpecPageParts.verdict_class(s.review["verdict"])
                 ]}
-                title={"QA: " <> FactoryWeb.SpecLive.verdict_label(s.review["verdict"])}
+                title={"QA: " <> FactoryWeb.SpecPageParts.verdict_label(s.review["verdict"])}
               >
                 {s.review["score"]}
               </span>
@@ -523,8 +523,8 @@ defmodule FactoryWeb.SpecsLive do
     ~H"""
     <span class="flex items-baseline gap-1.5">
       <span class="font-medium tabular-nums">{@review["score"]}</span>
-      <span class={FactoryWeb.SpecLive.verdict_class(@review["verdict"])}>
-        {FactoryWeb.SpecLive.verdict_label(@review["verdict"])}
+      <span class={FactoryWeb.SpecPageParts.verdict_class(@review["verdict"])}>
+        {FactoryWeb.SpecPageParts.verdict_label(@review["verdict"])}
       </span>
     </span>
     """
@@ -590,7 +590,7 @@ defmodule FactoryWeb.SpecsLive do
         ></span>
       </span>
       <span class={if @current == "ready", do: "text-success", else: "text-base-content/70"}>
-        {FactoryWeb.SpecLive.step_label(@current)}
+        {FactoryWeb.SpecPageParts.step_label(@current)}
       </span>
     </span>
     """

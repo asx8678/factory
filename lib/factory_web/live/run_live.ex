@@ -270,7 +270,7 @@ defmodule FactoryWeb.RunLive do
               :if={!Specs.Spec.approved?(@spec, step)}
               class="size-4 rounded-full border border-base-content/30"
             ></span>
-            {FactoryWeb.SpecLive.step_label(step)}
+            {FactoryWeb.SpecPageParts.step_label(step)}
           </.link>
         </li>
       <% end %>
