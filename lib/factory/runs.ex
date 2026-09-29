@@ -17,9 +17,10 @@ defmodule Factory.Runs do
 
   defp broadcast(topic, msg), do: Phoenix.PubSub.broadcast(Factory.PubSub, topic, msg)
 
-  def list_runs do
+  @doc "The latest runs, newest first, with their tasks: `limit` of them (default 30)."
+  def list_runs(limit \\ 30) do
     Repo.all(
-      from r in Run, order_by: [desc: r.updated_at, desc: r.id], preload: [:tasks, :spec_doc]
+      from r in Run, order_by: [desc: r.updated_at, desc: r.id], limit: ^limit, preload: :tasks
     )
   end
 
@@ -179,6 +180,17 @@ defmodule Factory.Runs do
       )
 
     %{turns: turns, credits: credits}
+  end
+
+  @doc "How many messages a run has from `role`."
+  def count_messages(run_id, role),
+    do: Repo.aggregate(from(m in Message, where: m.run_id == ^run_id and m.role == ^role), :count)
+
+  @doc "A run's latest `limit` messages, oldest first."
+  def recent_messages(run_id, limit) do
+    from(m in Message, where: m.run_id == ^run_id, order_by: [desc: m.id], limit: ^limit)
+    |> Repo.all()
+    |> Enum.reverse()
   end
 
   def list_messages(run_id) do

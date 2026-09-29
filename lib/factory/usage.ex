@@ -145,6 +145,20 @@ defmodule Factory.Usage do
     |> normalize()
   end
 
+  @doc """
+  Credits and calls by kind of work for a scope (as `totals/1` takes it), most
+  credits first: `[{source, credits, calls}]`.
+  """
+  def by_source(scope) do
+    Event
+    |> scoped(scope)
+    |> group_by([e], e.source)
+    |> select([e], {e.source, coalesce(sum(e.credits), 0.0), count(e.id)})
+    |> order_by([e], desc: coalesce(sum(e.credits), 0.0), asc: e.source)
+    |> Repo.all()
+    |> Enum.map(fn {source, credits, calls} -> {source, credits / 1, calls} end)
+  end
+
   defp scoped(query, :today), do: scoped(query, today())
   defp scoped(query, {:run, id}), do: where(query, [e], e.run_id == ^id)
   defp scoped(query, {:spec, id}), do: where(query, [e], e.spec_id == ^id)

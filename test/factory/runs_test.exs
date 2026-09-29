@@ -30,4 +30,14 @@ defmodule Factory.RunsTest do
     Runs.post(run, "factory", "note")
     assert Runs.usage(run.id) == %{turns: 2, credits: 0.5}
   end
+
+  test "the chat's run list is bounded, newest first; recent messages are the latest" do
+    for i <- 1..4, do: {:ok, _} = Runs.create_run("Run #{i}")
+    assert [%{title: "Run 4"}, %{title: "Run 3"}] = Runs.list_runs(2)
+
+    {:ok, run} = Runs.create_run()
+    for i <- 1..5, do: Runs.post(run, "user", "m#{i}")
+    assert Enum.map(Runs.recent_messages(run.id, 2), & &1.body) == ["m4", "m5"]
+    assert Runs.count_messages(run.id, "user") == 5
+  end
 end

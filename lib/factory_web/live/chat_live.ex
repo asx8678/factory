@@ -946,6 +946,14 @@ defmodule FactoryWeb.ChatLive do
             </span>
           </.link>
         </nav>
+        <.link
+          :if={@runs != []}
+          id="all-runs"
+          navigate={~p"/runs"}
+          class="mt-1 flex items-center gap-2 rounded-xl px-3 py-2 text-xs text-base-content/55 hover:bg-base-content/[0.06] hover:text-base-content"
+        >
+          <.icon name="hero-queue-list-mini" class="size-4" /> All runs
+        </.link>
       </div>
     </details>
     """

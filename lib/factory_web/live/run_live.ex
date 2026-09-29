@@ -40,20 +40,10 @@ defmodule FactoryWeb.RunLive do
       steps: Engine.steps(run),
       workflow: Factory.Workflows.for_run(run),
       totals: Usage.totals({:run, run.id}),
-      by_source: by_source(run.id),
-      messages: run.id |> Runs.list_messages() |> Enum.take(-12) |> Enum.reverse()
+      # Credits by kind of work over the run's whole life, most first.
+      by_source: Usage.by_source({:run, run.id}),
+      messages: run.id |> Runs.recent_messages(12) |> Enum.reverse()
     )
-  end
-
-  # Credits by kind of work over the run's whole life, most first.
-  defp by_source(run_id) do
-    run_id
-    |> then(&Usage.calls({:run, &1}, :all))
-    |> Enum.group_by(& &1.source)
-    |> Enum.map(fn {source, calls} ->
-      {source, calls |> Enum.map(& &1.credits) |> Enum.sum(), length(calls)}
-    end)
-    |> Enum.sort_by(&elem(&1, 1), :desc)
   end
 
   def handle_info({:run_updated, run}, socket), do: {:noreply, load(socket, run)}

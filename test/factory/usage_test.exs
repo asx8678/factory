@@ -215,4 +215,19 @@ defmodule Factory.UsageTest do
   def query(_event, _measurements, metadata, pid) do
     send(pid, {:query, metadata[:source], metadata.query})
   end
+
+  test "by_source groups a run's credits and calls by kind of work, most first" do
+    {:ok, run} = Runs.create_run("Fix login")
+    {:ok, other} = Runs.create_run("Other")
+
+    for {source, credits, run_id} <- [
+          {"agent_turn", 0.25, run.id},
+          {"agent_turn", 0.25, run.id},
+          {"review", 1.0, run.id},
+          {"review", 9.0, other.id}
+        ],
+        do: {:ok, _} = Usage.record(%{source: source, credits: credits, run_id: run_id})
+
+    assert Usage.by_source({:run, run.id}) == [{"review", 1.0, 1}, {"agent_turn", 0.5, 2}]
+  end
 end

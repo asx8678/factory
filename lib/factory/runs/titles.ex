@@ -23,10 +23,8 @@ defmodule Factory.Runs.Titles do
   end
 
   @doc "Whether a chat's latest message should retitle it."
-  def chat_message?(%Run{kind: nil} = run) do
-    count = run.id |> Runs.list_messages() |> Enum.count(&(&1.role == "user"))
-    auto?(run) and count <= @chat_messages
-  end
+  def chat_message?(%Run{kind: nil} = run),
+    do: auto?(run) and Runs.count_messages(run.id, "user") <= @chat_messages
 
   def chat_message?(_run), do: false
 
