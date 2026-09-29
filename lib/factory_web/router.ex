@@ -31,6 +31,9 @@ defmodule FactoryWeb.Router do
     live "/settings", SettingsLive
   end
 
+  # Kiro sessions call Factory's tools here (FactoryWeb.MCP); calls carry their own token.
+  forward "/mcp", FactoryWeb.MCP
+
   # Other scopes may use custom stacks.
   # scope "/api", FactoryWeb do
   #   pipe_through :api

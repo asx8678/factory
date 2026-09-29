@@ -1,0 +1,404 @@
+defmodule Factory.PlanTools do
+  @moduledoc """
+  Tools a planner on Kiro uses to write a chat's plan as it works: it creates the plan
+  (a summary and its approach), then adds tasks to it a few at a time, and refines them
+  on later messages. Kiro reaches them over MCP (`FactoryWeb.MCP`).
+
+  Each planning request gets a token (`grant/3`) naming its run, the run's
+  `planner_generation` and the process waiting for Kiro. A call only writes while the run
+  is a draft and that generation is still the latest, so a replaced request can't change
+  the plan. The plan lives in the run's spec (`Factory.Specs.for_run/1`): the approach in
+  its design, the tasks in its tasks step, which the draft run follows.
+
+  The waiting process gets `{:plan_tools, generation, event}` for each call that worked:
+  `:changed` after a write, `{:questions, [question]}` from `ask_user`.
+  """
+  alias Factory.{Runs, Spec, Specs}
+  alias Factory.Specs.Planner
+
+  @server "factory"
+  @salt "factory plan tools"
+  @max_tasks 40
+  # The approach the planner writes opens the spec's design with this heading, so a
+  # design the person wrote is never replaced.
+  @approach "# Approach"
+
+  @tools [
+    %{
+      name: "get_plan",
+      description: "The current plan: its approach and its numbered tasks.",
+      inputSchema: %{type: "object", properties: %{}}
+    },
+    %{
+      name: "create_plan",
+      description:
+        "Starts a new plan with a summary and your approach, replacing the current tasks. " <>
+          "Call it once, before add_tasks, when there is no plan yet or the person wants a " <>
+          "different one; to change the current plan use update_task, remove_tasks and add_tasks.",
+      inputSchema: %{
+        type: "object",
+        properties: %{
+          summary: %{type: "string", description: "One or two sentences: what will be built."},
+          approach: %{
+            type: "string",
+            description:
+              "Markdown: the parts of the code that change, the approach, risks and how it will be tested."
+          }
+        },
+        required: ["summary", "approach"]
+      }
+    },
+    %{
+      name: "add_tasks",
+      description:
+        "Adds implementation tasks to the plan, in build order, at the end or after task " <>
+          "number `after` (0 for the start). Add a few at a time (2 to 5). Each task is one " <>
+          "small change that can be built and tested on its own and names the files it touches.",
+      inputSchema: %{
+        type: "object",
+        properties: %{
+          tasks: %{
+            type: "array",
+            minItems: 1,
+            items: %{
+              type: "object",
+              properties: %{
+                title: %{type: "string", description: "Imperative, under 80 characters."},
+                details: %{
+                  type: "array",
+                  items: %{type: "string"},
+                  description: "Steps or notes, 1 to 6. Wrap code and paths in `backticks`."
+                },
+                requirements: %{
+                  type: "array",
+                  items: %{type: "string"},
+                  description: "Requirement numbers it covers, e.g. 1.2."
+                }
+              },
+              required: ["title"]
+            }
+          },
+          after: %{type: "integer", description: "Insert after this task number."}
+        },
+        required: ["tasks"]
+      }
+    },
+    %{
+      name: "update_task",
+      description:
+        "Changes task `number`. Fields left out stay as they are, so edits the person made are kept.",
+      inputSchema: %{
+        type: "object",
+        properties: %{
+          number: %{type: "integer"},
+          title: %{type: "string"},
+          details: %{type: "array", items: %{type: "string"}},
+          requirements: %{type: "array", items: %{type: "string"}}
+        },
+        required: ["number"]
+      }
+    },
+    %{
+      name: "remove_tasks",
+      description: "Removes tasks by number. The rest are numbered again from 1.",
+      inputSchema: %{
+        type: "object",
+        properties: %{numbers: %{type: "array", items: %{type: "integer"}, minItems: 1}},
+        required: ["numbers"]
+      }
+    },
+    %{
+      name: "ask_user",
+      description:
+        "Asks the person 1 to 5 short questions when the request isn't clear enough to plan " <>
+          "without guessing. They're shown when your turn ends; the answers come as the next message.",
+      inputSchema: %{
+        type: "object",
+        properties: %{
+          questions: %{
+            type: "array",
+            minItems: 1,
+            items: %{
+              type: "object",
+              properties: %{
+                question: %{type: "string"},
+                options: %{
+                  type: "array",
+                  items: %{type: "string"},
+                  description:
+                    "2 to 4 short options, where that helps; the one you recommend first."
+                }
+              },
+              required: ["question"]
+            }
+          }
+        },
+        required: ["questions"]
+      }
+    }
+  ]
+
+  @doc "The tools, as MCP `tools/list` gives them."
+  def tools, do: @tools
+
+  @doc "The name Kiro knows the tools' MCP server by."
+  def server_name, do: @server
+
+  @doc """
+  A token for one planning request: calls with it write to run `run_id` while its
+  `planner_generation` is `generation`, and are reported to the calling process.
+  """
+  def grant(run_id, generation, planner) do
+    Phoenix.Token.sign(FactoryWeb.Endpoint, @salt, %{
+      run_id: run_id,
+      generation: generation,
+      planner: %{id: planner.id, name: planner.name},
+      pid: self()
+    })
+  end
+
+  @doc "The MCP server to give a Kiro session (ACP `session/new`), with the token."
+  def mcp_server(token) do
+    %{
+      type: "http",
+      name: @server,
+      url: url(),
+      headers: [%{name: "Authorization", value: "Bearer " <> token}]
+    }
+  end
+
+  # Kiro runs on this machine. "localhost" may resolve to IPv6 while Phoenix listens on IPv4.
+  defp url do
+    Application.get_env(:factory, :mcp_url) ||
+      FactoryWeb.Endpoint.url()
+      |> URI.parse()
+      |> then(&if(&1.host == "localhost", do: %{&1 | host: "127.0.0.1"}, else: &1))
+      |> URI.append_path("/mcp")
+      |> URI.to_string()
+  end
+
+  @doc """
+  Runs tool `name` with `args` for the request `token` was granted to:
+  `{:ok, text}` for Kiro, or `{:error, text}` saying what to do instead.
+  """
+  def call(token, name, args) when is_map(args) do
+    with {:ok, grant} <- verify(token),
+         true <- Enum.any?(@tools, &(&1.name == name)) || {:error, "There's no tool #{name}."} do
+      result =
+        Runs.with_locked_run(grant.run_id, fn run ->
+          if run.status == "draft" and run.planner_generation == grant.generation do
+            apply_tool(name, args, run)
+          else
+            {:error,
+             "This plan was replaced by a newer request or the run has started. Stop and end your turn."}
+          end
+        end)
+
+      case result do
+        {:ok, {event, text}} ->
+          send(grant.pid, {:plan_tools, grant.generation, event})
+
+          if event == :changed,
+            do: Factory.ChatPlanner.show_progress(grant.run_id, grant.planner, "Planning…")
+
+          {:ok, text}
+
+        {:error, text} when is_binary(text) ->
+          {:error, text}
+
+        {:error, _} ->
+          {:error, "This chat no longer exists. End your turn."}
+      end
+    end
+  end
+
+  def call(_token, _name, _args), do: {:error, "The arguments must be an object."}
+
+  defp verify(token) do
+    case Phoenix.Token.verify(FactoryWeb.Endpoint, @salt, token || "", max_age: 86_400) do
+      {:ok, grant} -> {:ok, grant}
+      {:error, _} -> {:error, "Factory didn't recognise this session. End your turn."}
+    end
+  end
+
+  defp apply_tool("get_plan", _args, run) do
+    {:ok, {:read, describe(Specs.for_run(run))}}
+  end
+
+  defp apply_tool("create_plan", args, run) do
+    summary = text(args["summary"])
+    approach = text(args["approach"])
+    spec = Specs.for_run(run)
+
+    if summary == "" do
+      {:error, "Give the plan a summary."}
+    else
+      attrs = %{tasks: ""}
+
+      attrs =
+        if planner_design?(spec.design),
+          do: Map.put(attrs, :design, "#{@approach}\n\n#{summary}\n\n#{approach}" |> finish()),
+          else: attrs
+
+      write(spec, attrs, "Plan created. Now add its tasks with add_tasks.")
+    end
+  end
+
+  defp apply_tool("add_tasks", args, run) do
+    spec = Specs.for_run(run)
+    {preamble, blocks} = checklist(spec.tasks)
+
+    new =
+      for %{"title" => title} = t <- List.wrap(args["tasks"]),
+          is_binary(title),
+          title = title |> String.replace(~r/\s*\R\s*/u, " ") |> String.trim(),
+          title != "",
+          do: task_block(title, t["details"], t["requirements"])
+
+    at = if is_integer(args["after"]), do: args["after"] |> max(0) |> min(length(blocks))
+
+    cond do
+      new == [] ->
+        {:error, "Give each task a title."}
+
+      length(blocks) + length(new) > @max_tasks ->
+        {:error, "A plan holds at most #{@max_tasks} tasks. Merge small ones instead."}
+
+      true ->
+        blocks =
+          if at, do: Enum.take(blocks, at) ++ new ++ Enum.drop(blocks, at), else: blocks ++ new
+
+        write(spec, %{tasks: Spec.render_blocks(preamble, blocks)}, "Added.")
+    end
+  end
+
+  defp apply_tool("update_task", args, run) do
+    spec = Specs.for_run(run)
+    {preamble, blocks} = checklist(spec.tasks)
+    number = args["number"]
+
+    case is_integer(number) && number >= 1 && Enum.at(blocks, number - 1) do
+      block when is_map(block) ->
+        title = if text(args["title"]) == "", do: block.title, else: text(args["title"])
+        details = if is_list(args["details"]), do: lines(args["details"]), else: block.details
+
+        requirements =
+          if is_list(args["requirements"]),
+            do: lines(args["requirements"]) |> Enum.take(8),
+            else: block.requirements
+
+        block = Spec.edit_block(block, title, details, requirements)
+        blocks = List.replace_at(blocks, number - 1, block)
+        write(spec, %{tasks: Spec.render_blocks(preamble, blocks)}, "Changed task #{number}.")
+
+      _ ->
+        {:error, "There's no task #{inspect(number)}. #{describe(spec)}"}
+    end
+  end
+
+  defp apply_tool("remove_tasks", args, run) do
+    spec = Specs.for_run(run)
+    {preamble, blocks} = checklist(spec.tasks)
+    numbers = for n <- List.wrap(args["numbers"]), is_integer(n), do: n
+
+    kept = for {block, i} <- Enum.with_index(blocks, 1), i not in numbers, do: block
+
+    if length(kept) == length(blocks) do
+      {:error, "None of those tasks exist. #{describe(spec)}"}
+    else
+      tasks = if kept == [], do: "", else: Spec.render_blocks(preamble, kept)
+      write(spec, %{tasks: tasks}, "Removed.")
+    end
+  end
+
+  defp apply_tool("ask_user", args, _run) do
+    questions =
+      for q <- List.wrap(args["questions"]),
+          is_map(q),
+          question = text(q["question"]),
+          question != "" do
+        %{"question" => question, "options" => q["options"] |> lines() |> Enum.take(4)}
+      end
+
+    if questions == [],
+      do: {:error, "Ask at least one question."},
+      else:
+        {:ok,
+         {{:questions, Enum.take(questions, 5)},
+          "They'll be shown when your turn ends. End it now with a short message."}}
+  end
+
+  defp write(spec, attrs, done) do
+    case Specs.update_spec(spec, attrs) do
+      {:ok, spec} -> {:ok, {:changed, done <> " " <> describe(spec)}}
+      {:error, _} -> {:error, "Factory couldn't save that change."}
+    end
+  end
+
+  @doc """
+  The plan in `spec` as the planner sees it: its approach, then its numbered tasks, by
+  title, or `:full` with their details as the spec has them.
+  """
+  def describe(spec, detail \\ :titles) do
+    tasks =
+      case {checklist(spec.tasks), detail} do
+        {{_, []}, _} ->
+          "The plan has no tasks yet."
+
+        {{_, blocks}, :titles} ->
+          "The plan's tasks:\n" <>
+            (blocks
+             |> Enum.with_index(1)
+             |> Enum.map_join("\n", fn {b, i} -> "#{i}. #{b.title}" end))
+
+        {{preamble, blocks}, :full} ->
+          "The plan's tasks:\n" <> String.trim(Spec.render_blocks(preamble, blocks))
+      end
+
+    if planner_design?(spec.design) and String.trim(spec.design || "") != "",
+      do: String.trim(spec.design) <> "\n\n" <> tasks,
+      else: tasks
+  end
+
+  # The tasks as checklist blocks. A plain numbered list (from an attached tasks.md) is
+  # turned into a checklist first, so tasks added to it are read back as tasks.
+  defp checklist(markdown) do
+    {preamble, blocks} = Spec.blocks(markdown || "")
+
+    if blocks == [] or Regex.match?(~r/^[-*] \[[ xX]\]/m, markdown) do
+      {preamble, blocks}
+    else
+      {preamble, Enum.map(blocks, &task_block(&1.title, &1.details, &1.requirements))}
+    end
+  end
+
+  defp task_block(title, details, requirements) do
+    task = %{
+      "title" => String.slice(title, 0, 200),
+      "details" => details |> lines() |> Enum.take(12),
+      "requirements" => requirements |> lines() |> Enum.take(8)
+    }
+
+    {_, [block]} = Spec.blocks(Planner.to_markdown([task], 1))
+    block
+  end
+
+  defp planner_design?(design) do
+    design = String.trim(design || "")
+    design == "" or String.starts_with?(design, @approach)
+  end
+
+  defp lines(list) do
+    for item <- List.wrap(list),
+        is_binary(item) or is_number(item),
+        line <- item |> to_string() |> String.split(~r/\R/u),
+        line = String.trim(line),
+        line != "",
+        do: line
+  end
+
+  defp text(s) when is_binary(s), do: String.trim(s)
+  defp text(_), do: ""
+
+  defp finish(text), do: String.trim(text) <> "\n"
+end

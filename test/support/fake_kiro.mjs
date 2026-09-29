@@ -9,14 +9,33 @@ const update = (sessionId, update) => out({ method: "session/update", params: { 
 const cost = (sessionId, usage) => update(sessionId, { sessionUpdate: "session_info_update", _meta: { kiro: { promptTurnSummaries: [{ usage }] } } })
 let waiting = null
 let sessions = 0
+// The MCP servers each session was given (Factory's plan tools), by session id.
+const mcp = {}
+// Calls a Factory tool like Kiro does: announce it, ask permission (MCP requests carry the
+// server's name, not a kind), then POST it to the server with the session's headers.
+const callTool = (sessionId, name, args) => new Promise((resolve) => {
+  const server = mcp[sessionId][0]
+  update(sessionId, { sessionUpdate: "tool_call", kind: "other", title: `@${server.name}/${name}`, rawInput: args })
+  waiting = async (reply) => {
+    waiting = null
+    if (reply.result.outcome.optionId !== "accept") return resolve({ denied: true })
+    const headers = { "content-type": "application/json" }
+    for (const h of server.headers) headers[h.name] = h.value
+    const res = await fetch(server.url, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }) })
+    resolve((await res.json()).result)
+  }
+  out({ id: 902, method: "session/request_permission", params: { sessionId, toolCall: { title: `@${server.name}/${name}` }, options: [{ optionId: "accept", kind: "allow_once" }, { optionId: "reject", kind: "reject_once" }], _meta: { kiro: { mcpTool: { identity: { serverName: server.name, toolName: name } } } } } })
+})
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const m = JSON.parse(line)
   // Tests can leave a particular RPC unanswered without affecting other processes.
   if (existsSync(".fake-kiro-stall") && readFileSync(".fake-kiro-stall", "utf8") === m.method) return
   if (m.id === 900 && waiting) return waiting(m)
   if (m.id === 901 && waiting) return waiting(m)
+  if (m.id === 902 && waiting) return waiting(m)
   if (m.method === "initialize") out({ id: m.id, result: { protocolVersion: 1 } })
   // Each session gets its own id; the pid tells tests which process answered.
+  if (m.method === "session/new") mcp[`sess_${process.pid}_${sessions + 1}`] = m.params.mcpServers || []
   if (m.method === "session/new")
     out({ id: m.id, result: { sessionId: `sess_${process.pid}_${++sessions}`, configOptions: [{ id: "model", currentValue: "auto" }, { id: "mode", currentValue: "vibe" }] } })
   if (m.method === "_kiro/session/compact") out({ id: m.id, result: { success: true } })
@@ -52,15 +71,42 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       cost(sessionId, 0.25)
       return out({ id: m.id, result: { stopReason: "end_turn" } })
     }
-    // Planning in a chat: a short reply and tasks; asked again, one more task.
+    // Planning in a chat, with Factory's tools: a plan and two tasks; asked again, one more
+    // task. "[test:unclear]" asks questions, "[test:edit]" renames task 1 and removes task 2,
+    // "[test:json]" answers with the JSON plan as if the tools were missing.
     if (text.includes('<task-planning step="chat">')) {
       update(sessionId, { sessionUpdate: "tool_call", kind: "read", title: "Read File", locations: [{ path: process.cwd() + "/mix.exs" }] })
       const again = !text.includes("None yet.")
-      const tasks = [{ title: "Add the export button to the invoices page", details: ["In `lib/app_web/live/invoices_live.ex`."] }, { title: "Write the CSV for the invoices shown", details: ["New `lib/app/invoices/csv.ex`.", "Test it in `test/app/invoices/csv_test.exs`."] }]
-      if (again) tasks.push({ title: "Test an empty month", details: ["Returns just the header row."] })
-      update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: JSON.stringify({ reply: again ? "Added a test for an empty month." : "The invoices page lists invoices in invoices_live.ex; I'd add a button there and a small CSV module.", tasks }) } })
-      cost(sessionId, 0.3)
-      return out({ id: m.id, result: { stopReason: "end_turn" } })
+      const say = (t) => update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: t } })
+      const end = () => { cost(sessionId, 0.3); out({ id: m.id, result: { stopReason: "end_turn" } }) }
+      if (text.includes("[test:json]")) {
+        const tasks = [{ title: "Add the export button to the invoices page", details: ["In `lib/app_web/live/invoices_live.ex`."] }]
+        say(JSON.stringify({ reply: "Planned without tools.", tasks }))
+        return end()
+      }
+      ;(async () => {
+        say("Let me look at the invoices page first.")
+        const results = []
+        if (text.includes("[test:unclear]")) {
+          results.push(await callTool(sessionId, "ask_user", { questions: [{ question: "Which page gets the button?", options: ["Invoices", "Reports"] }] }))
+          say("I need to know where the export goes.")
+        } else if (text.includes("[test:edit]")) {
+          results.push(await callTool(sessionId, "update_task", { number: 1, title: "Add an Export CSV button" }))
+          results.push(await callTool(sessionId, "remove_tasks", { numbers: [2] }))
+          say("Renamed the button task and dropped the CSV task.")
+        } else if (again) {
+          results.push(await callTool(sessionId, "add_tasks", { tasks: [{ title: "Test an empty month", details: ["Returns just the header row."] }] }))
+          say("Added a test for an empty month.")
+        } else {
+          results.push(await callTool(sessionId, "create_plan", { summary: "Export the invoices shown as CSV.", approach: "A button on the invoices page and a small CSV module." }))
+          results.push(await callTool(sessionId, "add_tasks", { tasks: [{ title: "Add the export button to the invoices page", details: ["In `lib/app_web/live/invoices_live.ex`."] }, { title: "Write the CSV for the invoices shown", details: ["New `lib/app/invoices/csv.ex`.", "Test it in `test/app/invoices/csv_test.exs`."] }] }))
+          say("The invoices page lists invoices in invoices_live.ex; I'd add a button there and a small CSV module.")
+        }
+        // Tests can see what the tools answered in the log.
+        if (results.some((r) => r.denied || r.isError)) say(` [tool trouble: ${JSON.stringify(results)}]`)
+        end()
+      })()
+      return
     }
     // Planning a factory run: requirements, design, tasks; the workflow and model when asked.
     // An overview containing "no plan" gets a reply without tasks.

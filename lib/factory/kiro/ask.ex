@@ -17,6 +17,11 @@ defmodule Factory.Kiro.Ask do
     * `:workdir` - the folder Kiro works in, default the Kiro workspace
     * `:allow` - tool kinds Kiro may use when it asks (ACP kinds: read, search, edit, execute, …)
     * `:on_tool` - called with each ACP `tool_call` update as Kiro starts using a tool
+    * `:mcp_servers` - MCP servers the session gets, as ACP `session/new` takes them; Kiro
+      may call the tools of these without asking (its MCP permission requests carry no kind)
+    * `:reply` - `:all` (default) for everything Kiro wrote, `:last` for only what it wrote
+      after its last tool call (its closing message, without the narration in between),
+      which may be empty
     * `:usage` - what the call is for, recorded with its cost by `Factory.Usage.record/1`:
       `%{source: "review", spec_id: 1}` and so on. Without it the source is "other".
   """
@@ -45,6 +50,7 @@ defmodule Factory.Kiro.Ask do
       port: port,
       deadline: deadline,
       allow: opts[:allow] || [],
+      mcp: Enum.map(opts[:mcp_servers] || [], & &1.name),
       on_tool: opts[:on_tool] || fn _ -> :ok end
     }
 
@@ -56,7 +62,7 @@ defmodule Factory.Kiro.Ask do
         with {:ok, _, _} <-
                call(conn, 1, "initialize", %{protocolVersion: 1, clientCapabilities: %{}}),
              {:ok, session, _} <-
-               call(conn, 2, "session/new", %{cwd: workdir, mcpServers: []}),
+               call(conn, 2, "session/new", %{cwd: workdir, mcpServers: opts[:mcp_servers] || []}),
              sid = session["sessionId"],
              :ok <- set_model(conn, sid, session, model) do
           call(conn, 4, "session/prompt", %{sessionId: sid, prompt: [%{type: "text", text: text}]})
@@ -68,9 +74,12 @@ defmodule Factory.Kiro.Ask do
     {reply, acc} =
       case result do
         {:ok, _, acc} ->
-          if String.trim(acc.text) == "",
-            do: {{:error, "Kiro ended the turn without a reply."}, acc},
-            else: {{:ok, acc.text}, acc}
+          cond do
+            # A turn that ends on a tool call has nothing after it; the caller decides.
+            opts[:reply] == :last -> {{:ok, acc.last}, acc}
+            String.trim(acc.text) == "" -> {{:error, "Kiro ended the turn without a reply."}, acc}
+            true -> {{:ok, acc.text}, acc}
+          end
 
         {:error, reason, acc} ->
           {{:error, reason}, acc}
@@ -117,7 +126,7 @@ defmodule Factory.Kiro.Ask do
   # reply streams in before its response) and the credits it reported.
   defp call(conn, id, method, params) do
     send_json(conn.port, %{jsonrpc: "2.0", id: id, method: method, params: params})
-    acc = %{text: "", credits: 0.0, prompted: method == "session/prompt"}
+    acc = %{text: "", last: "", credits: 0.0, prompted: method == "session/prompt"}
     await(conn, id, "", acc)
   end
 
@@ -163,7 +172,13 @@ defmodule Factory.Kiro.Ask do
          acc
        ) do
     options = p["options"] || []
-    wanted = if get_in(p, ["toolCall", "kind"]) in conn.allow, do: "allow", else: "reject"
+    # Kiro names the MCP server a tool comes from; its request has no kind then.
+    server = get_in(p, ["_meta", "kiro", "mcpTool", "identity", "serverName"])
+
+    wanted =
+      if get_in(p, ["toolCall", "kind"]) in conn.allow or (server && server in conn.mcp),
+        do: "allow",
+        else: "reject"
 
     send_json(conn.port, %{
       jsonrpc: "2.0",
@@ -198,7 +213,7 @@ defmodule Factory.Kiro.Ask do
          _id,
          acc
        ),
-       do: {:cont, %{acc | text: acc.text <> chunk}}
+       do: {:cont, %{acc | text: acc.text <> chunk, last: acc.last <> chunk}}
 
   # Kiro reports what each turn cost, in credits.
   defp handle(
@@ -225,7 +240,7 @@ defmodule Factory.Kiro.Ask do
          acc
        ) do
     conn.on_tool.(update)
-    {:cont, acc}
+    {:cont, %{acc | last: ""}}
   end
 
   defp handle(_conn, _msg, _id, acc), do: {:cont, acc}

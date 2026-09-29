@@ -2,15 +2,19 @@ defmodule Factory.ChatPlanner do
   @moduledoc """
   Planning in a chat: what the person writes to the workflow's planner is turned into
   tasks. The planner (on Kiro, read-only, in the chat's project folder) rethinks how
-  it's best done from everything asked so far, the spec files attached and the tasks
-  it wrote before, then replies with its approach and the tasks. The tasks become the
-  run's tasks, and the reply asks whether to implement them (the "start" action).
+  it's best done from everything asked so far, the spec files attached and the plan so
+  far. It writes the plan with Factory's tools as it goes (`Factory.PlanTools`): a
+  summary and approach, then the tasks a few at a time, or changes to the tasks already
+  there, so edits the person made to them are kept. It can ask questions instead. Its
+  closing message asks whether to implement the tasks (the "start" action).
 
-  Spec files attached in the chat and the tasks it writes go into the run's spec
+  Spec files attached in the chat and the plan go into the run's spec
   (`Factory.Specs.for_run/1`), which opens on the Spec page to edit. While it works,
-  the planner's live bubble shows what it's reading (`{:agent_stream, …}` on `"run:ID"`).
+  the planner's live bubble shows what it's doing and the tasks so far
+  (`{:agent_stream, …}` on `"run:ID"`). If Kiro can't reach the tools, the planner
+  replies with the whole plan as JSON, which replaces the tasks as before.
   """
-  alias Factory.{Agents, Kiro, Repo, Runs, Specs}
+  alias Factory.{Agents, Kiro, PlanTools, Repo, Runs, Specs}
   alias Factory.Runs.Run
   alias Factory.Specs.Planner
 
@@ -41,7 +45,7 @@ defmodule Factory.ChatPlanner do
         # Base specs are rules, not part of the run's own files.
         files = Enum.reject(Specs.files(spec), &(elem(&1, 0) == "tasks.md"))
         base = Specs.base_files_for_run(run)
-        current = if Specs.tasks(spec) == [], do: nil, else: spec.tasks
+        current = if Specs.tasks(spec) == [], do: nil, else: PlanTools.describe(spec, :full)
         prompt = Planner.chat_prompt(planner.name, requests, base ++ files, current)
 
         run =
@@ -58,28 +62,65 @@ defmodule Factory.ChatPlanner do
   end
 
   defp start_request(run, planner, files, prompt) do
-    topic = "run:#{run.id}"
     dir = run.settings["project_dir"] || Kiro.config(:workspace)
+    generation = run.planner_generation
 
     Agents.set_activity(planner.id, "running", "Planning “#{run.title}”")
-    say_live(topic, planner, "_Reading the project…_")
+    show_progress(run.id, planner, "Reading the project…")
 
     Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
+      token = PlanTools.grant(run.id, generation, planner)
+
       result =
         with {:ok, reply} <-
                Kiro.ask(prompt,
                  workdir: dir,
                  allow: ["read", "search"],
-                 on_tool: &say_live(topic, planner, "_#{Planner.describe_tool(&1, dir)}_"),
+                 mcp_servers: [PlanTools.mcp_server(token)],
+                 reply: :last,
+                 on_tool: &show_progress(run.id, planner, Planner.describe_tool(&1, dir)),
                  usage: %{source: "plan_chat", run_id: run.id, agent_id: planner.id}
                ) do
-          Planner.parse_chat_plan(reply)
+          read_result(reply, generation)
         end
 
-      finish(run.id, run.planner_generation, planner, files, result)
+      finish(run.id, generation, planner, files, result)
     end)
 
     :ok
+  end
+
+  # What the tools reported while Kiro worked (`Factory.PlanTools`). Without any tool
+  # call, the reply is the JSON plan the prompt asks for when the tools are missing, or
+  # just an answer that leaves the plan as it is.
+  defp read_result(reply, generation) do
+    reply = String.trim(reply)
+
+    case tool_events(generation, []) do
+      [] ->
+        case Planner.parse_chat_plan(reply) do
+          {:ok, plan} ->
+            {:ok, plan}
+
+          {:error, _} when reply != "" ->
+            {:ok, %{reply: reply, questions: [], written: true}}
+
+          {:error, _} ->
+            {:error, "The planner ended without a plan or a reply."}
+        end
+
+      events ->
+        questions = for {:questions, qs} <- events, q <- qs, do: q
+        {:ok, %{reply: reply, questions: Enum.take(questions, 5), written: true}}
+    end
+  end
+
+  defp tool_events(generation, acc) do
+    receive do
+      {:plan_tools, ^generation, event} -> tool_events(generation, [event | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
   end
 
   @doc false
@@ -96,24 +137,29 @@ defmodule Factory.ChatPlanner do
     end)
   end
 
+  # Written with the tools: the spec already has the plan. With no tasks yet, it's the
+  # questions to answer first; with tasks, questions are asked alongside them.
+  defp finish(run, planner, files, {:ok, %{written: true, reply: reply, questions: questions}}) do
+    Agents.set_activity(planner.id, "idle", nil)
+    titles = Enum.map(Runs.get_run(run.id).tasks, & &1.title)
+
+    if titles == [] do
+      ask(run, planner, reply, questions)
+    else
+      post(
+        run,
+        planner,
+        with_questions(blank(reply, "Here's how I'd do it."), questions),
+        %{"tasks" => titles, "spec_hint" => files == [], "questions" => questions},
+        ["start"]
+      )
+    end
+  end
+
   # Not clear enough to plan: no tasks, but what's missing and the questions to answer.
   defp finish(run, planner, _files, {:ok, %{reply: reply, tasks: [], questions: questions}}) do
     Agents.set_activity(planner.id, "idle", nil)
-
-    listed =
-      questions
-      |> Enum.with_index(1)
-      |> Enum.map_join("\n", fn {q, i} ->
-        options = if q["options"] == [], do: "", else: " (#{Enum.join(q["options"], " / ")})"
-        "#{i}. #{q["question"]}#{options}"
-      end)
-
-    body =
-      [blank(reply, "I need a bit more information before I can plan this."), listed]
-      |> Enum.reject(&(&1 == ""))
-      |> Enum.join("\n\n")
-
-    post(run, planner, body, %{"unclear" => questions != [], "questions" => questions})
+    ask(run, planner, reply, questions)
   end
 
   # The plan replaces the spec's tasks: the planner rethinks it from everything asked.
@@ -141,6 +187,30 @@ defmodule Factory.ChatPlanner do
     post(run, planner, "I couldn't plan it: #{reason} Try again, or say it differently.", %{})
   end
 
+  defp ask(run, planner, reply, questions) do
+    body =
+      with_questions(
+        blank(reply, "I need a bit more information before I can plan this."),
+        questions
+      )
+
+    post(run, planner, body, %{"unclear" => questions != [], "questions" => questions})
+  end
+
+  defp with_questions(body, []), do: body
+
+  defp with_questions(body, questions) do
+    listed =
+      questions
+      |> Enum.with_index(1)
+      |> Enum.map_join("\n", fn {q, i} ->
+        options = if q["options"] == [], do: "", else: " (#{Enum.join(q["options"], " / ")})"
+        "#{i}. #{q["question"]}#{options}"
+      end)
+
+    body <> "\n\n" <> listed
+  end
+
   defp post(run, planner, body, meta, actions \\ []) do
     Runs.post(run, "factory", body,
       author: planner.name,
@@ -149,10 +219,28 @@ defmodule Factory.ChatPlanner do
     )
   end
 
-  defp say_live(topic, planner, text) do
+  @doc """
+  Shows in the planner's live bubble what it's doing (`activity`) and the tasks so far,
+  read from the run's spec. `planner` needs its `id` and `name`.
+  """
+  def show_progress(run_id, planner, activity) do
+    tasks =
+      with %{spec_id: id} when is_integer(id) <- Runs.get_run(run_id),
+           %{} = spec <- Specs.get_spec(id),
+           [_ | _] = tasks <- Specs.tasks(spec) do
+        "\n\n**Tasks so far**\n\n" <>
+          (tasks
+           |> Enum.with_index(1)
+           |> Enum.map_join("\n", fn {t, i} -> "#{i}. #{t.title}" end))
+      else
+        _ -> ""
+      end
+
+    text = "_#{activity}_" <> tasks
+
     Phoenix.PubSub.broadcast(
       Factory.PubSub,
-      topic,
+      "run:#{run_id}",
       {:agent_stream, %{agent_id: planner.id, name: planner.name, text: text}}
     )
   end

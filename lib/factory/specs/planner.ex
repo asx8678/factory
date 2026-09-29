@@ -249,8 +249,10 @@ its own, naming the files it touches and the requirement numbers it covers. Incl
 
   @doc """
   Prompt for planning in a chat: the planner reads the project, rethinks how the
-  person's requests (oldest first) are best done, and turns them into tasks, refining
-  `current` (the tasks so far, markdown) rather than starting over.
+  person's requests (oldest first) are best done, and writes the plan with Factory's
+  tools (`Factory.PlanTools`): a summary and approach first, then its tasks a few at a
+  time. `current` is the plan so far (`Factory.PlanTools.describe/1`), which it refines
+  rather than starting over. Without the tools it replies with JSON (`parse_chat_plan/1`).
   """
   def chat_prompt(name, requests, files, current) do
     asked = requests |> Enum.with_index(1) |> Enum.map_join("\n\n", fn {r, i} -> "#{i}. #{r}" end)
@@ -265,24 +267,28 @@ its own, naming the files it touches and the requirement numbers it covers. Incl
     You are #{name}, the planner in a software factory. The person is chatting with you \
     about a change to the project in the current folder. Look at the project first: read \
     the files you need to understand its stack, conventions and the code this touches. \
-    Don't change anything and don't run commands.
+    Don't change any files and don't run commands.
 
-    Then decide whether the request is clear enough to plan without guessing: you know \
-    what should be built, where it goes in the code, and how to tell it works.
+    Then write the plan with the factory tools:
+    - If the request isn't clear enough to plan without guessing (what should be built, \
+    where it goes in the code, how to tell it works), call ask_user with 1 to 5 short, \
+    specific questions and leave the plan as it is.
+    - With no plan yet, or when the person wants a different one, call create_plan with a \
+    summary and your approach, then add_tasks: small implementation tasks in build order, \
+    2 to 5 per call, each buildable and testable on its own, naming the files it touches. \
+    Include tests.
+    - With a plan already, refine it with what the person said last: update_task, \
+    remove_tasks and add_tasks. Keep what still fits; the person may have edited tasks.
 
-    - If it isn't clear, don't write any tasks. Set "clear" to false, say in "reply" what \
-    is missing, and ask 1 to 5 short, specific questions in "questions" (with 2 to 4 \
-    options where that helps). Keep the tasks so far as they are.
-    - If it is clear, set "clear" to true, rethink how it is best done, and write it as \
-    small implementation tasks in build order, each buildable and testable on its own, \
-    naming the files it touches. Include tests. Refine the tasks so far with what the \
-    person said last: keep what still fits, change what doesn't.
-
-    The tasks so far:
+    The plan so far:
     #{current}
 
-    Reply with only this JSON object and nothing else:
-    {"clear": true | false, "reply": "<2 to 4 sentences: how you'd do it and why, or what is missing>", "questions": [{"question": "<question>", "options": ["<option>"]}], "tasks": [{"title": "<imperative, under 80 characters>", "details": ["<step or note>"]}]}
+    When you're done, end with a short reply to the person, 2 to 4 sentences: how you'd \
+    do it and why, what you changed, or what you need to know. Don't list the tasks: \
+    Factory shows them.
+
+    Only if the factory tools aren't available, reply instead with only this JSON object:
+    {"clear": true | false, "reply": "<2 to 4 sentences>", "questions": [{"question": "<question>", "options": ["<option>"]}], "tasks": [{"title": "<imperative, under 80 characters>", "details": ["<step or note>"]}]}
     </task-planning>
 
     <requests>
@@ -437,7 +443,30 @@ its own, naming the files it touches and the requirement numbers it covers. Incl
         _ -> nil
       end
 
-    case {update["kind"], path} do
+    describe_plan_tool(update["title"], update["rawInput"]) ||
+      describe_file_tool(update["kind"], path, update)
+  end
+
+  # Factory's own tools (`Factory.PlanTools`), as Kiro titles them: "@factory/add_tasks".
+  defp describe_plan_tool("@factory/" <> tool, input) do
+    input = if is_map(input), do: input, else: %{}
+
+    case {tool, List.wrap(input["tasks"])} do
+      {"create_plan", _} -> "Writing the plan"
+      {"add_tasks", [%{"title" => title}]} when is_binary(title) -> "Adding “#{title}”"
+      {"add_tasks", tasks} -> "Adding #{length(tasks)} tasks"
+      {"update_task", _} -> "Changing task #{input["number"]}"
+      {"remove_tasks", _} -> "Removing tasks"
+      {"get_plan", _} -> "Checking the plan"
+      {"ask_user", _} -> "Writing questions"
+      _ -> nil
+    end
+  end
+
+  defp describe_plan_tool(_title, _input), do: nil
+
+  defp describe_file_tool(kind, path, update) do
+    case {kind, path} do
       {"read", path} when is_binary(path) -> "Reading #{path}"
       {"search", path} when is_binary(path) -> "Searching #{path}"
       _ -> update["title"] || "Looking around"

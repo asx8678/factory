@@ -22,6 +22,18 @@ defmodule Factory.PlanningTest do
     %{run: run, planner: planner}
   end
 
+  # The planner reaches Factory's plan tools over HTTP, as Kiro does (FactoryWeb.MCP).
+  setup do
+    server =
+      start_supervised!(
+        {Bandit, plug: FactoryWeb.Endpoint, ip: :loopback, port: 0, startup_log: false}
+      )
+
+    {:ok, {_ip, port}} = ThousandIsland.listener_info(server)
+    Application.put_env(:factory, :mcp_url, "http://127.0.0.1:#{port}/mcp")
+    on_exit(fn -> Application.delete_env(:factory, :mcp_url) end)
+  end
+
   defp plan(run, planner, text, files \\ []) do
     Chat.handle(Runs.get_run(run.id), text, files, to: planner)
     assert_receive {:message, %{author: "Planner"} = reply}, 5_000
@@ -34,8 +46,12 @@ defmodule Factory.PlanningTest do
   } do
     {reply, run} = plan(run, planner, "Add a CSV export to the invoices page")
 
+    # The reply is the planner's closing message, without what it said while working.
     assert reply.body =~ "I'd add a button there"
+    refute reply.body =~ "Let me look"
+    refute reply.body =~ "tool trouble"
     assert reply.actions == ["start"]
+    assert reply.meta["tasks"] == Enum.map(run.tasks, & &1.title)
 
     assert Enum.map(run.tasks, & &1.title) == [
              "Add the export button to the invoices page",
@@ -47,11 +63,83 @@ defmodule Factory.PlanningTest do
     assert Enum.map(Specs.tasks(spec), & &1.title) == Enum.map(run.tasks, & &1.title)
     assert run.spec =~ "Write the CSV for the invoices shown"
     assert run.description =~ "Add a CSV export"
+    # The plan's approach opens the spec's design.
+    assert spec.design =~ "# Approach"
+    assert spec.design =~ "small CSV module"
 
     # Asked again, the planner sees the tasks it wrote and adds to them.
     {_reply, run} = plan(run, planner, "Also cover an empty month")
     assert length(run.tasks) == 3
     assert List.last(run.tasks).title == "Test an empty month"
+  end
+
+  test "the planner's live bubble shows what it's doing and the tasks so far", %{
+    run: run,
+    planner: planner
+  } do
+    {_reply, _run} = plan(run, planner, "Add a CSV export")
+
+    assert_received {:agent_stream, %{text: "_Adding 2 tasks_" <> _}}
+
+    # After each change the bubble lists the tasks; the last one lists both.
+    progress = for {:agent_stream, %{text: "_Planning…_" <> tasks}} <- messages(), do: tasks
+    assert List.last(progress) =~ "1. Add the export button to the invoices page"
+    assert List.last(progress) =~ "2. Write the CSV for the invoices shown"
+  end
+
+  test "refining the plan changes only the tasks asked about and keeps the person's edits", %{
+    run: run,
+    planner: planner
+  } do
+    {_reply, run} = plan(run, planner, "Add a CSV export")
+
+    # The person adds a note to task 1 on the Spec page.
+    spec = Specs.get_spec(run.spec_id)
+
+    edited =
+      String.replace(
+        spec.tasks,
+        "invoices_live.ex`.",
+        "invoices_live.ex`.\n  - Use the primary style"
+      )
+
+    {:ok, _} = Specs.update_spec(spec, %{tasks: edited})
+
+    {reply, run} = plan(run, planner, "Rename it [test:edit]")
+
+    refute reply.body =~ "tool trouble"
+    assert Enum.map(run.tasks, & &1.title) == ["Add an Export CSV button"]
+    assert Specs.get_spec(run.spec_id).tasks =~ "Use the primary style"
+  end
+
+  test "an unclear request gets questions and no tasks", %{run: run, planner: planner} do
+    {reply, run} = plan(run, planner, "Export something [test:unclear]")
+
+    assert reply.meta["unclear"]
+    assert [%{"question" => "Which page gets the button?"}] = reply.meta["questions"]
+    assert reply.body =~ "1. Which page gets the button? (Invoices / Reports)"
+    assert reply.actions == []
+    assert run.tasks == []
+  end
+
+  test "without the tools, the planner's JSON plan is used", %{run: run, planner: planner} do
+    {reply, run} = plan(run, planner, "Plan it [test:json]")
+
+    assert reply.body == "Planned without tools."
+    assert Enum.map(run.tasks, & &1.title) == ["Add the export button to the invoices page"]
+  end
+
+  test "a replaced planner request can't change the plan", %{run: run, planner: planner} do
+    old = Ecto.UUID.generate()
+    run |> Ecto.Changeset.change(planner_generation: old) |> Repo.update!()
+    token = Factory.PlanTools.grant(run.id, old, planner)
+    run |> Ecto.Changeset.change(planner_generation: Ecto.UUID.generate()) |> Repo.update!()
+
+    assert {:error, "This plan was replaced" <> _} =
+             Factory.PlanTools.call(token, "add_tasks", %{"tasks" => [%{"title" => "Late"}]})
+
+    assert Runs.get_run(run.id).tasks == []
+    refute_received {:plan_tools, _, _}
   end
 
   test "spec files attached for the planner become part of the run's spec", %{
@@ -141,6 +229,14 @@ defmodule Factory.PlanningTest do
       assert [%{title: "Approved task"}] = Runs.get_run(run.id).tasks
       assert Specs.get_spec(spec.id).tasks == "- [ ] 1. Approved task\n"
       assert Runs.list_messages(run.id) == []
+    end
+  end
+
+  defp messages do
+    receive do
+      message -> [message | messages()]
+    after
+      0 -> []
     end
   end
 
