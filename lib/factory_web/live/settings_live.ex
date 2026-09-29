@@ -1,7 +1,13 @@
 defmodule FactoryWeb.SettingsLive do
+  @moduledoc """
+  What Factory runs with. General shows where Factory keeps things and how it drives
+  Kiro, as configured (read-only: these come from `config/*.exs`). Models lists what
+  this Kiro offers, checked at startup or on demand. Tokens aren't stored anywhere:
+  actions and sources read environment variables (see the README).
+  """
   use FactoryWeb, :live_view
 
-  @tabs [{"general", "General"}, {"models", "Models"}, {"keys", "API keys"}]
+  @tabs [{"general", "General"}, {"models", "Models"}]
 
   alias Factory.Kiro.Catalog
 
@@ -25,15 +31,35 @@ defmodule FactoryWeb.SettingsLive do
     {:noreply, assign(socket, checking: true)}
   end
 
-  def handle_event("save", _params, socket) do
-    {:noreply, put_flash(socket, :info, "Settings aren't stored yet. Nothing was saved.")}
-  end
-
   def handle_info({:kiro_catalog, _}, socket),
     do: {:noreply, socket |> assign(checking: false) |> catalog()}
 
   def handle_params(params, _uri, socket) do
-    {:noreply, assign(socket, tab: Map.get(params, "tab", "general"))}
+    tab = if params["tab"] in Enum.map(@tabs, &elem(&1, 0)), do: params["tab"], else: "general"
+    {:noreply, assign(socket, tab: tab)}
+  end
+
+  # How Factory is set up, as the General tab shows it: {label, value, hint}.
+  defp facts do
+    kiro = Application.fetch_env!(:factory, :kiro)
+    cli = kiro[:cli]
+
+    [
+      {"Kiro CLI", cli,
+       if(File.exists?(cli),
+         do: "Found. Each agent's session runs it as `kiro-cli acp`.",
+         else: "Not found: install kiro-cli or set its path in config :factory, :kiro."
+       )},
+      {"Default workspace", kiro[:workspace],
+       "Where Kiro works when a chat has no project folder."},
+      {"Kiro logs", kiro[:log_dir], "Each session's stderr, for when something goes wrong."},
+      {"Reply timeout", "#{div(kiro[:prompt_timeout], 60_000)} minutes",
+       "How long a turn may take before Factory stops it."},
+      {"Loop passes", "#{Factory.Engine.max_rounds()}",
+       "How many times a reviewer may send work back per step."},
+      {"Compact at", "#{Factory.Context.config(:compact_at)}% of the context",
+       "When a session's conversation is compacted before its next message."}
+    ]
   end
 
   def render(assigns) do
@@ -58,7 +84,7 @@ defmodule FactoryWeb.SettingsLive do
           </.link>
         </nav>
 
-        <form class="max-w-xl" phx-submit="save">
+        <div class="max-w-xl">
           <%= case @tab do %>
             <% "models" -> %>
               <section id="kiro-models" class="mb-8">
@@ -125,55 +151,22 @@ defmodule FactoryWeb.SettingsLive do
                   </ul>
                 </details>
               </section>
-              <.field
-                label="Daily spending limit"
-                hint="Agents pause when today's cost reaches this amount."
-              >
-                <label class="input w-full"><span class="text-base-content/50">$</span><input
-                  type="number"
-                  value="25"
-                /></label>
-              </.field>
-            <% "keys" -> %>
-              <.field label="Anthropic API key" hint="Used by every agent to call Claude.">
-                <input
-                  type="password"
-                  placeholder="sk-ant-…"
-                  class="input w-full font-mono text-sm"
-                />
-              </.field>
-              <.field label="GitHub token" hint="Lets agents read issues and open pull requests.">
-                <input type="password" placeholder="ghp_…" class="input w-full font-mono text-sm" />
-              </.field>
             <% _ -> %>
-              <.field label="Workspace name">
-                <input type="text" value="Factory" class="input w-full" />
-              </.field>
-              <.field label="Merging" hint="Agents open pull requests but a person merges them.">
-                <label class="flex items-center gap-3 text-sm">
-                  <input type="checkbox" class="toggle toggle-primary toggle-sm" checked />
-                  Ask me before merging
-                </label>
-              </.field>
+              <dl id="settings-facts" class="divide-y divide-base-300/70">
+                <div :for={{label, value, hint} <- facts()} class="py-3">
+                  <dt class="text-sm font-medium">{label}</dt>
+                  <dd class="mt-0.5 break-all font-mono text-[12.5px]">{value}</dd>
+                  <dd class="mt-1 text-[13px] text-base-content/55">{hint}</dd>
+                </div>
+              </dl>
+              <p class="mt-6 text-[13px] text-base-content/55">
+                These come from Factory's configuration. Tokens for actions and data sources
+                are never stored: they're read from environment variables when needed.
+              </p>
           <% end %>
-          <button class="btn btn-primary btn-sm mt-2">Save changes</button>
-        </form>
+        </div>
       </div>
     </Layouts.app>
-    """
-  end
-
-  attr :label, :string, required: true
-  attr :hint, :string, default: nil
-  slot :inner_block, required: true
-
-  defp field(assigns) do
-    ~H"""
-    <div class="mb-6">
-      <p class="mb-1.5 text-sm font-medium">{@label}</p>
-      {render_slot(@inner_block)}
-      <p :if={@hint} class="mt-1.5 text-[13px] text-base-content/55">{@hint}</p>
-    </div>
     """
   end
 end
