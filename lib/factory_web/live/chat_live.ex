@@ -543,7 +543,7 @@ defmodule FactoryWeb.ChatLive do
       )
 
     ~H"""
-    <Layouts.app flash={@flash} usage={@usage_meter} active={:chat} full>
+    <Layouts.app flash={@flash} usage={@usage_meter} active_runs={@active_runs} active={:chat} full>
       <div id="chat-page" phx-hook="ChatKeys" class="flex h-full flex-col bg-base-100">
         <header class="flex min-h-11 shrink-0 flex-wrap items-center gap-x-2 gap-y-1.5 px-4 pt-1.5 sm:px-6">
           <.chat_switcher runs={@runs} run={@run} />

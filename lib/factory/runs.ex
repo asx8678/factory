@@ -12,6 +12,9 @@ defmodule Factory.Runs do
 
   def unsubscribe(run_id), do: Phoenix.PubSub.unsubscribe(Factory.PubSub, "run:#{run_id}")
 
+  @doc "Subscribes to `{:active_runs_changed}`: a run was made, removed or changed status."
+  def subscribe_active, do: Phoenix.PubSub.subscribe(Factory.PubSub, "runs:active")
+
   defp broadcast(topic, msg), do: Phoenix.PubSub.broadcast(Factory.PubSub, topic, msg)
 
   def list_runs do
@@ -111,10 +114,13 @@ defmodule Factory.Runs do
   end
 
   def update_run(%Run{} = run, attrs) do
+    old_status = run.status
+
     with {:ok, run} <- run |> Run.changeset(attrs) |> Repo.update(force: true) do
       run = Repo.preload(run, :tasks, force: true)
       broadcast("run:#{run.id}", {:run_updated, run})
       broadcast("runs", {:runs_changed})
+      if run.status != old_status, do: broadcast("runs:active", {:active_runs_changed})
       {:ok, run}
     end
   end

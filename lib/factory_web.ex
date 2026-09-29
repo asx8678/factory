@@ -53,6 +53,7 @@ defmodule FactoryWeb do
       use Phoenix.LiveView
 
       on_mount FactoryWeb.UsageMeter
+      on_mount FactoryWeb.ActiveRuns
 
       unquote(html_helpers())
     end

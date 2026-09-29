@@ -144,7 +144,7 @@ defmodule FactoryWeb.UsageLive do
       )
 
     ~H"""
-    <Layouts.app flash={@flash} usage={@usage_meter} active={:usage}>
+    <Layouts.app flash={@flash} usage={@usage_meter} active_runs={@active_runs} active={:usage}>
       <Layouts.page_title
         title="Usage"
         subtitle="Every call to Kiro, from agent chats to one-line task suggestions. Credits come from Kiro; tokens are estimated (≈)."

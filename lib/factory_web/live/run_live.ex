@@ -77,7 +77,7 @@ defmodule FactoryWeb.RunLive do
 
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} usage={@usage_meter} active={:runs}>
+    <Layouts.app flash={@flash} usage={@usage_meter} active_runs={@active_runs} active={:runs}>
       <Layouts.back_link to={~p"/runs"}>Runs</Layouts.back_link>
 
       <div class="mb-8 flex flex-wrap items-start justify-between gap-4">

@@ -165,7 +165,7 @@ defmodule FactoryWeb.SpecsLive do
 
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} usage={@usage_meter} active={:specs}>
+    <Layouts.app flash={@flash} usage={@usage_meter} active_runs={@active_runs} active={:specs}>
       <Layouts.page_title
         title="Specs"
         subtitle="Base specs are the rules every run can follow. Run specs are one run's own requirements, design and tasks."

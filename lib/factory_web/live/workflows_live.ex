@@ -975,7 +975,13 @@ defmodule FactoryWeb.WorkflowsLive do
 
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} usage={@usage_meter} active={:workflows} full>
+    <Layouts.app
+      flash={@flash}
+      usage={@usage_meter}
+      active_runs={@active_runs}
+      active={:workflows}
+      full
+    >
       <div class="flex h-full flex-col">
         <.workflow_bar
           workflow={@workflow}

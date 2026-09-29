@@ -34,6 +34,10 @@ defmodule FactoryWeb.Layouts do
 
   attr :usage, :map, default: nil, doc: "Kiro usage for the header, from FactoryWeb.UsageMeter"
 
+  attr :active_runs, :integer,
+    default: 0,
+    doc: "queued and running runs for the header, from FactoryWeb.ActiveRuns"
+
   attr :current_scope, :map,
     default: nil,
     doc: "the current [scope](https://phoenix.hexdocs.pm/scopes.html)"
@@ -50,7 +54,7 @@ defmodule FactoryWeb.Layouts do
   ]
 
   def app(assigns) do
-    assigns = assign(assigns, menu: @menu, active_runs: Factory.Runs.count_active())
+    assigns = assign(assigns, menu: @menu)
 
     ~H"""
     <header class="sticky top-0 z-30 border-b border-base-300 bg-base-100/85 backdrop-blur">
@@ -93,13 +97,12 @@ defmodule FactoryWeb.Layouts do
         <div class="flex items-center gap-4 text-sm">
           <.link
             :if={@active_runs > 0}
+            id="active-runs"
             navigate={~p"/runs"}
             class="hidden items-center gap-2 text-base-content/70 hover:text-base-content md:flex"
           >
-            <span class="size-2 rounded-full bg-info"></span> {@active_runs} active {if @active_runs ==
-                                                                                          1,
-                                                                                        do: "run",
-                                                                                        else: "runs"}
+            <span class="size-2 rounded-full bg-info"></span>
+            {@active_runs} active {if @active_runs == 1, do: "run", else: "runs"}
           </.link>
           <.usage_meter :if={@usage} usage={@usage} />
           <.theme_toggle />
