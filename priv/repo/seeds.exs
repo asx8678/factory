@@ -1,14 +1,6 @@
-# Start the graph with a single agent. Run with: mix run priv/repo/seeds.exs
-alias Factory.{Agents, Repo}
-
-if Repo.aggregate(Agents.Agent, :count) == 0 do
-  {:ok, _} =
-    Agents.create_agent(%{
-      name: "Orchestrator",
-      role: "Plans work and hands it to other agents",
-      model: "claude-opus-5-5"
-    })
-end
+# The standard workflows (Build a feature, Fix a bug…) are made on first use, with
+# their agents (Factory.Workflows.ensure_standard/0). Run with: mix run priv/repo/seeds.exs
+Factory.Workflows.ensure_standard()
 
 # Example base specs (coding standards, testing, security…) to include in runs.
 Factory.Specs.Examples.install()

@@ -139,6 +139,26 @@ defmodule Factory.EngineTest do
     assert run.progress["outputs"]["agent-#{tester.id}"] =~ "Approved"
   end
 
+  test "how many passes a step may ask for is a setting" do
+    %{w: w, coder: coder, tester: tester} = workflow("true")
+    {:ok, _} = Agents.link(tester.id, coder.id)
+    {:ok, _} = Agents.update_agent(tester, %{prompt: "[test:send-back]"})
+    Application.put_env(:factory, :max_loop_rounds, 0)
+    on_exit(fn -> Application.delete_env(:factory, :max_loop_rounds) end)
+    run = queued_run(w)
+    Runs.subscribe(run.id)
+
+    assert {:ok, %{status: "done"} = run} = Engine.run(run.id)
+
+    assert_received {:message,
+                     %{
+                       body:
+                         "Tester sent it back again, but Coder has had 0 more passes. Carrying on."
+                     }}
+
+    refute run.progress["rounds"]
+  end
+
   test "steps run on each agent's own Kiro session, which keeps the conversation" do
     %{w: w, coder: coder, tester: tester} = workflow("true")
     {:ok, _} = Agents.link(tester.id, coder.id)

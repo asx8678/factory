@@ -291,10 +291,13 @@ defmodule Factory.Engine do
     end
   end
 
-  # A step with an arrow back ends its reply with "Approved" or "Send back: <what to
-  # fix>". Sent back, the work goes again from that earlier step, with the feedback,
-  # at most @max_rounds times per step; after that the run carries on.
-  @max_rounds 2
+  # A step with an arrow back gives a verdict (the verdict tool, else its reply's last
+  # line: "Approved" or "Send back: <what to fix>"). Sent back, the work goes again
+  # from that earlier step, with the feedback, at most `max_rounds/0` times per step;
+  # after that the run carries on.
+
+  @doc "How many more passes a step may ask for: `config :factory, :max_loop_rounds` (default 2)."
+  def max_rounds, do: Application.get_env(:factory, :max_loop_rounds, 2)
 
   defp send_back(run, steps, %{loops: [target | _]} = step, output) do
     rounds = get_in(run.progress, ["rounds", step.id]) || 0
@@ -308,7 +311,9 @@ defmodule Factory.Engine do
         nil -> verdict(output)
       end
 
-    case {fix, rounds < @max_rounds} do
+    max_rounds = max_rounds()
+
+    case {fix, rounds < max_rounds} do
       {nil, _} ->
         nil
 
@@ -316,7 +321,7 @@ defmodule Factory.Engine do
         Runs.post(
           run,
           "factory",
-          "#{step.name} sent it back again, but #{to.name} has had #{@max_rounds} more passes. Carrying on.",
+          "#{step.name} sent it back again, but #{to.name} has had #{max_rounds} more passes. Carrying on.",
           meta: meta(step)
         )
 
@@ -336,7 +341,7 @@ defmodule Factory.Engine do
         Runs.post(
           run,
           "factory",
-          "#{step.name} sent it back to #{to.name} (pass #{rounds + 1} of #{@max_rounds}): #{fix}",
+          "#{step.name} sent it back to #{to.name} (pass #{rounds + 1} of #{max_rounds}): #{fix}",
           meta: meta(step)
         )
 

@@ -100,6 +100,7 @@ defmodule Factory.MixProject do
         "deps.unlock --unused",
         "format",
         "assets.build",
+        "cmd --cd assets npm test --silent",
         "test"
       ]
     ]
