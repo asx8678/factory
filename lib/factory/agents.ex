@@ -218,28 +218,7 @@ defmodule Factory.Agents do
 
     %{
       selected: selected_id && to_string(selected_id),
-      nodes:
-        for a <- agents do
-          %{
-            id: to_string(a.id),
-            name: a.name,
-            model: a.model,
-            status: a.status,
-            x: a.x,
-            y: a.y,
-            kiro: true,
-            activity: a.activity,
-            kind: a.kind,
-            has_context: String.trim(a.prompt || "") != "",
-            usage: a.usage,
-            shared: a.session == "shared",
-            # whether the Kiro session this agent talks in is running right now
-            live: Factory.Kiro.running?(a),
-            role: a.role,
-            action: if(a.kind == "action", do: a.action),
-            missing: if(a.kind == "action", do: Factory.Actions.missing(a), else: [])
-          }
-        end,
+      nodes: Enum.map(agents, &canvas_node/1),
       edges:
         for l <- list_links(workflow_id) do
           %{
@@ -252,6 +231,41 @@ defmodule Factory.Agents do
           }
         end
     }
+  end
+
+  @doc "One agent as a canvas node, as `graph/2` gives it."
+  def canvas_node(%Agent{} = a) do
+    %{
+      id: to_string(a.id),
+      name: a.name,
+      model: a.model,
+      status: a.status,
+      x: a.x,
+      y: a.y,
+      kiro: true,
+      activity: a.activity,
+      kind: a.kind,
+      has_context: String.trim(a.prompt || "") != "",
+      usage: a.usage,
+      shared: a.session == "shared",
+      # whether the Kiro session this agent talks in is running right now
+      live: Factory.Kiro.running?(a),
+      role: a.role,
+      action: if(a.kind == "action", do: a.action),
+      missing: if(a.kind == "action", do: Factory.Actions.missing(a), else: [])
+    }
+  end
+
+  @doc """
+  The graph with one agent's node replaced (after `{:agent_activity, agent}`), or
+  `:unchanged` when the agent isn't in it. Nothing is read from the database.
+  """
+  def put_node(%{nodes: nodes} = graph, %Agent{} = agent) do
+    id = to_string(agent.id)
+
+    if Enum.any?(nodes, &(&1.id == id)),
+      do: %{graph | nodes: Enum.map(nodes, &if(&1.id == id, do: canvas_node(agent), else: &1))},
+      else: :unchanged
   end
 
   def get_link(id), do: Repo.get(Link, id)

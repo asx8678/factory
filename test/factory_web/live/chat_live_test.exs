@@ -97,6 +97,25 @@ defmodule FactoryWeb.ChatLiveTest do
     assert render(view) =~ "Nothing to compact: Coder has no Kiro session running."
   end
 
+  test "an agent's activity updates its card in place", %{conn: conn, coder: coder} do
+    {:ok, run} = Runs.create_run()
+    {:ok, view, _} = live(conn, ~p"/chat/#{run.id}?agent=#{coder.id}")
+    refute has_element?(view, "#context-chip")
+
+    # Kiro reports context: the card and the chip follow without a reload.
+    Agents.record_usage(coder.id, %{"context_pct" => 72.4, "window" => 200_000})
+    assert has_element?(view, "#chat-map-agent-#{coder.id} .wf-ctx.is-high")
+    assert has_element?(view, "#context-chip.is-high", "72%")
+
+    # An agent of another workflow doesn't touch this chat.
+    {:ok, other} = Factory.Workflows.create("Elsewhere")
+    {:ok, stranger} = Agents.create_agent(%{name: "Stranger", workflow_id: other.id})
+    graph = Agents.graph(Factory.Workflows.current().id)
+    assert Agents.put_node(graph, stranger) == :unchanged
+    assert %{nodes: nodes} = Agents.put_node(graph, %{coder | status: "running"})
+    assert Enum.find(nodes, &(&1.id == to_string(coder.id))).status == "running"
+  end
+
   test "no chip without context in use", %{conn: conn, coder: coder} do
     {:ok, view, _} = live(conn, ~p"/chat?agent=#{coder.id}")
     refute has_element?(view, "#context-chip")

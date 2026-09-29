@@ -518,7 +518,32 @@ defmodule FactoryWeb.ChatLive do
     {:noreply, if(changed, do: refresh_messages(socket), else: socket)}
   end
 
-  def handle_info({:agent_activity, _agent}, socket), do: handle_info({:graph_changed}, socket)
+  # One agent's status or activity moved: patch it in place, without reloading the
+  # workflow. The canvas follows the graph attribute; agents of other workflows are skipped.
+  def handle_info({:agent_activity, agent}, socket) do
+    case Agents.put_node(socket.assigns.graph, agent) do
+      :unchanged ->
+        {:noreply, socket}
+
+      graph ->
+        swap = fn list -> Enum.map(list, &if(&1.id == agent.id, do: agent, else: &1)) end
+        focus = socket.assigns.focus
+
+        steps =
+          Enum.map(socket.assigns.steps, fn
+            %{agent: %{id: id}} = step when id == agent.id -> %{step | agent: agent}
+            step -> step
+          end)
+
+        {:noreply,
+         assign(socket,
+           graph: graph,
+           agents: swap.(socket.assigns.agents),
+           steps: steps,
+           focus: if(focus && focus.id == agent.id, do: agent, else: focus)
+         )}
+    end
+  end
 
   def handle_info({:graph_changed}, socket) do
     %{assigns: %{graph: graph, agents: agents}} = socket = load_agents(socket)

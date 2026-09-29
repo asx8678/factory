@@ -68,11 +68,22 @@ defmodule FactoryWeb.WorkflowsLive do
       else: {:noreply, refresh(socket)}
   end
 
-  # An agent's status or usage moved: only the open workflow's map needs redrawing.
-  def handle_info({:agent_activity, %{workflow_id: id}}, socket) do
-    if socket.assigns.workflow && socket.assigns.workflow.id == id,
-      do: {:noreply, refresh(socket)},
-      else: {:noreply, socket}
+  # An agent's status or usage moved: patch its card in place, without reloading the
+  # workflow (the canvas follows the graph attribute). Other workflows' agents are skipped.
+  def handle_info({:agent_activity, agent}, socket) do
+    case socket.assigns.graph && Agents.put_node(socket.assigns.graph, agent) do
+      graph when is_map(graph) ->
+        selected = socket.assigns.selected
+
+        {:noreply,
+         assign(socket,
+           graph: graph,
+           selected: if(selected && selected.id == agent.id, do: agent, else: selected)
+         )}
+
+      _ ->
+        {:noreply, socket}
+    end
   end
 
   def handle_info({:graph_changed}, socket) do
