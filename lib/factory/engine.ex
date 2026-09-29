@@ -25,6 +25,7 @@ defmodule Factory.Engine do
   Progress is kept on the run (`progress`), so a paused or failed run resumes at the
   step it stopped at. A failed step pauses the run; `/resume` tries it again.
   """
+  require Logger
   alias Factory.{Actions, Agents, Kiro, Runs, Sources, Workflows}
   alias Factory.Agents.Agent
   alias Factory.Runs.Run
@@ -190,6 +191,16 @@ defmodule Factory.Engine do
       {:ok, _} ->
         try do
           execute(run_id)
+        rescue
+          # A step that raises (not one that returns an error) must not leave the run
+          # "running" with no worker: pause it and say why, like a failed step.
+          e ->
+            reason = "Factory hit an unexpected error: #{Exception.message(e)}"
+            Logger.error("Run #{run_id} crashed: " <> Exception.format(:error, e, __STACKTRACE__))
+            crashed(run_id, reason)
+        catch
+          :exit, why ->
+            crashed(run_id, "Factory stopped unexpectedly: #{Exception.format_exit(why)}")
         after
           Registry.unregister(Factory.Kiro.Registry, key)
         end
@@ -554,24 +565,44 @@ defmodule Factory.Engine do
     end)
   end
 
-  defp fail(run, step, reason) do
-    Runs.with_locked_run(run.id, fn run ->
+  # The worker crashed: pause the run at its current step with the reason.
+  defp crashed(run_id, reason) do
+    Runs.with_locked_run(run_id, fn run ->
       if run.status == "running" do
-        progress = run.progress |> Map.put("error", reason) |> Map.put("current", step.id)
-        {:ok, run} = Runs.update_run(run, %{status: "paused", progress: progress})
-
-        Runs.post(
-          run,
-          "factory",
-          "#{step.name} failed: #{reason}\nThe run is paused at this step. Fix the cause, then /resume to try it again.",
-          meta: meta(step)
-        )
+        step = %{name: "The run", agent: nil}
+        current = Enum.find(steps(run), &(&1.id == run.progress["current"]))
+        fail_locked(run, current || step, reason)
       end
 
       {:ok, run}
     end)
 
     {:error, reason}
+  end
+
+  defp fail(run, step, reason) do
+    Runs.with_locked_run(run.id, fn run ->
+      if run.status == "running", do: fail_locked(run, step, reason)
+      {:ok, run}
+    end)
+
+    {:error, reason}
+  end
+
+  defp fail_locked(run, step, reason) do
+    progress =
+      run.progress
+      |> Map.put("error", reason)
+      |> then(&if step[:id], do: Map.put(&1, "current", step.id), else: &1)
+
+    {:ok, run} = Runs.update_run(run, %{status: "paused", progress: progress})
+
+    Runs.post(
+      run,
+      "factory",
+      "#{step.name} failed: #{reason}\nThe run is paused at this step. Fix the cause, then /resume to try it again.",
+      meta: meta(step)
+    )
   end
 
   defp say(run, step, text),

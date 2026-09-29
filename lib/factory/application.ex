@@ -16,11 +16,15 @@ defmodule Factory.Application do
       {DynamicSupervisor, name: Factory.Kiro.Supervisor, strategy: :one_for_one},
       {Task.Supervisor, name: Factory.TaskSupervisor},
       # No Kiro session or review survives a restart: clear leftover context and statuses.
+      # Off in tests, where the sandbox owns the database.
       {Task,
        fn ->
-         Factory.Agents.reset_sessions()
-         Factory.Specs.reset_reviews()
-         Factory.Engine.reset_runs()
+         if Application.get_env(:factory, :reset_on_boot, true) do
+           Factory.Agents.reset_sessions()
+           Factory.Specs.reset_reviews()
+           Factory.Engine.reset_runs()
+         end
+
          # The models Kiro offers: the last list at once, then a fresh check.
          Factory.Kiro.Catalog.load()
 

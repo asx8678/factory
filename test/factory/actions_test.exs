@@ -74,6 +74,26 @@ defmodule Factory.ActionsTest do
     assert text =~ ~s("ok":true)
   end
 
+  test "a summary with quotes and braces stays text inside a JSON body", %{workflow: w} do
+    card =
+      action(w, "api_request", %{
+        "method" => "POST",
+        "url" => "https://api.example.com/notes",
+        "body" => ~s({"summary": "{{summary}}", "tags": ["{{run}}"]})
+      })
+
+    summary = ~s(He said "done", then {"admin": true})
+
+    Req.Test.stub(Factory.Actions, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      assert Plug.Conn.get_req_header(conn, "content-type") == ["application/json"]
+      assert JSON.decode!(body) == %{"summary" => summary, "tags" => ["Factory test run"]}
+      Req.Test.json(conn, %{})
+    end)
+
+    assert {:ok, _} = Actions.run(card, Map.put(Actions.context(), "summary", summary))
+  end
+
   test "tokens come from the environment; a missing one stops the action", %{workflow: w} do
     card =
       action(w, "azure_item_update", %{

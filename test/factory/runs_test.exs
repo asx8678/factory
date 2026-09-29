@@ -1,0 +1,33 @@
+defmodule Factory.RunsTest do
+  use Factory.DataCase, async: true
+  alias Factory.{Runs, Specs}
+
+  defp age(run, minutes) do
+    at = DateTime.add(DateTime.utc_now(:second), -minutes * 60)
+    Repo.update_all(from(r in Runs.Run, where: r.id == ^run.id), set: [updated_at: at])
+  end
+
+  test "pruning removes stale empty chats but keeps one that has a spec" do
+    {:ok, empty} = Runs.create_run()
+    {:ok, planned} = Runs.create_run()
+    # Opening the Spec page from a fresh chat gives the run its spec.
+    _spec = Specs.for_run(planned)
+    age(empty, 90)
+    age(planned, 90)
+
+    assert Runs.prune_empty() == 1
+    assert Runs.get_run(empty.id) == nil
+    assert %{spec_id: id} = Runs.get_run(planned.id)
+    assert is_integer(id)
+    assert Runs.latest_empty() == nil
+  end
+
+  test "usage sums the credits of the agents' replies" do
+    {:ok, run} = Runs.create_run()
+    Runs.post(run, "user", "hi")
+    Runs.post(run, "factory", "one", author: "Coder", meta: %{"credits" => 0.5})
+    Runs.post(run, "factory", "two", author: "Coder", meta: %{})
+    Runs.post(run, "factory", "note")
+    assert Runs.usage(run.id) == %{turns: 2, credits: 0.5}
+  end
+end

@@ -46,5 +46,5 @@ chat bubble.
 4. **Smaller items:** the `unclear` badge text assumes no tasks; show questions asked
    alongside a plan in the chat UI (`meta["questions"]` is already stored); consider
    MCP elicitation for mid-turn questions (Kiro supports it, but it holds the turn open).
-5. **Pre-existing, unrelated:** `Specs.reset_reviews/0` at boot logs a sandbox
-   ownership error in tests.
+5. ~~`Specs.reset_reviews/0` at boot logs a sandbox ownership error in tests.~~ Fixed:
+   the boot reset is off in tests (`config :factory, :reset_on_boot, false`).

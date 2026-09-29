@@ -1,18 +1,56 @@
 # Factory
 
-To start your Phoenix server:
+Factory runs a team of coding agents on [Kiro](https://kiro.dev) against a project
+folder on your machine. You describe a change in the chat, a planner turns it into a
+spec (requirements, design, tasks), and a workflow of agents (planner, coder, tester,
+reviewer…) works through the tasks, handing over to each other along the arrows you
+draw on the Workflows canvas. Actions between agents can run a command, commit and
+push, open a pull request, update a ticket, or send a message.
 
-* Run `mix setup` to install and setup dependencies
-* Start Phoenix endpoint with `mix phx.server` or inside IEx with `iex -S mix phx.server`
+## What you need
 
-Now you can visit [`localhost:4000`](http://localhost:4000) from your browser.
+* Elixir 1.17+ and PostgreSQL (the dev config expects `postgres`/`postgres` on localhost)
+* Node.js, for the Svelte Flow canvas (`mix assets.setup` runs `npm install`)
+* `kiro-cli` 2.24 or later, signed in (`kiro-cli login`). Factory looks for it on your
+  `PATH`, else at `~/.local/bin/kiro-cli`; see `config :factory, :kiro` in `config/config.exs`.
 
-Ready to run in production? Please [check our deployment guides](https://phoenix.hexdocs.pm/deployment.html).
+## Run it
 
-## Learn more
+```sh
+mix setup
+mix phx.server
+```
 
-* Official website: https://www.phoenixframework.org/
-* Guides: https://phoenix.hexdocs.pm/overview.html
-* Docs: https://phoenix.hexdocs.pm
-* Forum: https://elixirforum.com/c/phoenix-forum
-* Source: https://github.com/phoenixframework/phoenix
+Then open [localhost:4000](http://localhost:4000), choose a project folder and describe
+what you want built. Kiro's logs go to `tmp/kiro-logs`; cloned data sources to `tmp/sources`.
+
+## Environment variables
+
+Factory never stores tokens. Actions and data sources name an environment variable and
+read it when they run, so set these in the shell that starts Factory:
+
+| Variable | Used by |
+| --- | --- |
+| `GITHUB_TOKEN` | Create GitHub PR, Update GitHub issue (default name; each action can name its own) |
+| `AZURE_DEVOPS_PAT` | Azure DevOps PRs and tickets, and cloning Azure DevOps repositories |
+| `SLACK_WEBHOOK_URL` | Slack or Teams message (default name) |
+| `TZ` | The time zone the Usage page counts days in (else the system zone) |
+
+## Running it for others
+
+Factory has no sign-in. It can browse this machine's files, read its environment
+variables and run commands in the project folder, so it is meant to run on your own
+machine. In production it listens on `127.0.0.1` only; set `PHX_BIND_ALL=true` to
+listen on every interface, and put something that authenticates in front of it first.
+The planner's tools are reached over HTTP at the endpoint's URL, so with a public
+`PHX_HOST` set `config :factory, :mcp_url` to where Kiro on the same machine can reach Factory.
+
+## Development
+
+```sh
+mix precommit   # compile with warnings as errors, format, build assets, run the tests
+mix test test/factory/engine_test.exs
+```
+
+The tests talk to a fake `kiro-cli` (`test/support/fake_kiro.mjs`), so they don't need
+Kiro or credits. `docs/plan-tools.md` describes the planner's MCP tools and what's next.

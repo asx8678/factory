@@ -45,6 +45,20 @@ defmodule Factory.ChatTest do
     assert Runs.get_run(run.id).status == "queued"
   end
 
+  test "/resume restarts a run left running by a worker that died" do
+    {:ok, run} = Runs.create_run()
+
+    {:ok, run} =
+      Runs.update_run(run, %{
+        status: "running",
+        settings: %{"workflow_id" => Factory.Workflows.standard("feature").id}
+      })
+
+    Chat.handle(Runs.get_run(run.id), "/resume")
+    assert Runs.get_run(run.id).status == "queued"
+    assert List.last(replies(run)) == "Resumed."
+  end
+
   test "empty workflows cannot start or resume tasks" do
     {:ok, workflow} = Factory.Workflows.create("No steps")
     {:ok, run} = Runs.create_run()

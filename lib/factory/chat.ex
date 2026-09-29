@@ -191,6 +191,13 @@ defmodule Factory.Chat do
     queue(run, "paused")
   end
 
+  # "running" with no worker: the worker died without pausing the run.
+  defp run_command(%Run{status: "running"} = run, "resume", _) do
+    if Engine.running?(run.id),
+      do: say(run, "This run is already running. Use /status to see progress."),
+      else: queue(run, "running")
+  end
+
   defp run_command(run, "resume", _),
     do: say(run, "Only a paused run can be resumed. This one is #{run.status}.")
 
@@ -289,6 +296,9 @@ defmodule Factory.Chat do
         cond do
           run.status != expected_status ->
             {:error, "This run is already #{run.status}. Use /status to see progress."}
+
+          expected_status == "running" and Engine.running?(run.id) ->
+            {:error, "This run is already running. Use /status to see progress."}
 
           Engine.running?(run.id) ->
             {:error,

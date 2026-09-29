@@ -219,6 +219,24 @@ defmodule Factory.EngineTest do
     assert sent["sha256"] =~ ~r/\A[0-9a-f]{64}\z/
   end
 
+  @tag :capture_log
+  test "a step that raises pauses the run instead of leaving it running with no worker" do
+    %{w: w, planner: planner} = workflow("true")
+    run = queued_run(w)
+    # Bad data makes the first step raise rather than return an error.
+    {:ok, run} = Runs.update_run(run, %{settings: Map.put(run.settings, "project_dir", 5)})
+    Runs.subscribe(run.id)
+
+    assert {:error, reason} = Engine.run(run.id)
+    assert reason =~ "unexpected error"
+    run = Runs.get_run(run.id)
+    assert run.status == "paused"
+    assert run.progress["current"] == "agent-#{planner.id}"
+    assert run.progress["error"] == reason
+    assert_received {:message, %{role: "factory", body: "Planner failed: " <> _}}
+    refute Engine.running?(run.id)
+  end
+
   test "an empty workflow pauses without completing any tasks" do
     {:ok, workflow} = Workflows.create("Empty workflow")
     run = workflow |> queued_run() |> with_task()

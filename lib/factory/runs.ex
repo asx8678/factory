@@ -70,16 +70,17 @@ defmodule Factory.Runs do
     end
   end
 
-  # Empty runs: plain chats not started, with no messages and no tasks yet.
+  # Empty runs: plain chats not started, with no messages, no tasks and no spec of
+  # their own yet (a spec written on the Spec page keeps its run).
   defp empty_runs do
     from r in Run,
       as: :run,
-      where: is_nil(r.kind) and r.status == "draft",
+      where: is_nil(r.kind) and r.status == "draft" and is_nil(r.spec_id),
       where: not exists(from m in Message, where: m.run_id == parent_as(:run).id),
       where: not exists(from t in Task, where: t.run_id == parent_as(:run).id)
   end
 
-  @doc "The latest empty run (nothing said, no tasks), to use instead of making another."
+  @doc "The latest empty run (nothing said, no tasks, no spec), to use instead of making another."
   def latest_empty do
     Repo.one(from r in empty_runs(), order_by: [desc: r.updated_at, desc: r.id], limit: 1)
     |> then(&(&1 && Repo.preload(&1, :tasks)))
@@ -161,15 +162,17 @@ defmodule Factory.Runs do
 
   @doc "Totals of the agent replies in a run: how many turns and how many credits."
   def usage(run_id) do
-    replies =
-      Repo.all(
-        from m in Message, where: m.run_id == ^run_id and not is_nil(m.author), select: m.meta
+    %{turns: turns, credits: credits} =
+      Repo.one(
+        from m in Message,
+          where: m.run_id == ^run_id and not is_nil(m.author),
+          select: %{
+            turns: count(m.id),
+            credits: coalesce(sum(fragment("(?->>'credits')::float", m.meta)), 0.0)
+          }
       )
 
-    %{
-      turns: length(replies),
-      credits: replies |> Enum.map(&(&1["credits"] || 0)) |> Enum.sum()
-    }
+    %{turns: turns, credits: credits}
   end
 
   def list_messages(run_id) do

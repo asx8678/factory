@@ -55,6 +55,7 @@ config :factory, :actions_req_options, plug: {Req.Test, Factory.Actions}
 
 # Runs don't execute on their own in tests; tests call Factory.Engine.run/1.
 config :factory, :run_engine, false
+config :factory, :reset_on_boot, false
 
 # Kiro doesn't retitle chats in the background in tests; see Factory.Runs.TitlesTest.
 config :factory, :auto_titles, false

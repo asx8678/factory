@@ -20,7 +20,7 @@ defmodule FactoryWeb.ChatLive do
     # A new run starts clean: no folder and no specs until you choose them.
     {:ok,
      socket
-     |> assign(runs: Runs.list_runs(), run: nil, focus: nil, count: 0)
+     |> assign(runs: Runs.list_runs(), runs_reload: nil, run: nil, focus: nil, count: 0)
      |> assign(run_usage: %{turns: 0, credits: 0})
      |> assign(draft: "", view: "chat", streaming: %{})
      |> assign(message_ids: [], earlier?: false, history?: false)
@@ -461,7 +461,18 @@ defmodule FactoryWeb.ChatLive do
     end
   end
 
-  def handle_info({:runs_changed}, socket), do: {:noreply, assign(socket, runs: Runs.list_runs())}
+  # The run list changes with every progress write of every run; reload it once per
+  # short while rather than once per write.
+  def handle_info({:runs_changed}, socket) do
+    if socket.assigns[:runs_reload] do
+      {:noreply, socket}
+    else
+      {:noreply, assign(socket, runs_reload: Process.send_after(self(), :reload_runs, 250))}
+    end
+  end
+
+  def handle_info(:reload_runs, socket),
+    do: {:noreply, assign(socket, runs: Runs.list_runs(), runs_reload: nil)}
 
   def handle_info({:message, message}, socket) do
     # An agent's final reply replaces its live bubble.

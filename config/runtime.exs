@@ -77,11 +77,15 @@ if config_env() == :prod do
   config :factory, FactoryWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
     http: [
-      # Enable IPv6 and bind on all interfaces.
-      # Set it to  {0, 0, 0, 0, 0, 0, 0, 1} for local network only access.
-      # See the documentation on https://bandit.hexdocs.pm/Bandit.html#t:options/0
-      # for details about using IPv6 vs IPv4 and loopback vs public addresses.
-      ip: {0, 0, 0, 0, 0, 0, 0, 0}
+      # Factory has no sign-in and can browse files, read environment variables and
+      # run commands on this machine, so it only listens on this machine unless
+      # PHX_BIND_ALL=true is set (put it behind something that authenticates first).
+      # See https://bandit.hexdocs.pm/Bandit.html#t:options/0 for IPv6 vs IPv4.
+      ip:
+        if(System.get_env("PHX_BIND_ALL") in ~w(true 1),
+          do: {0, 0, 0, 0, 0, 0, 0, 0},
+          else: {127, 0, 0, 1}
+        )
     ],
     secret_key_base: secret_key_base
 

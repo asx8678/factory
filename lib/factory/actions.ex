@@ -215,9 +215,12 @@ defmodule Factory.Actions do
 
   defp steps(%Agent{action: %{"type" => type} = action} = card, ctx, mode) do
     # A command's script is kept as written: build/4 hands its values to the shell safely.
+    # An API request's JSON body is filled in value by value, so a summary with quotes
+    # or braces in it stays text and can't change the body's shape.
     c =
       Map.new(action["config"] || %{}, fn
         {"command", v} when type == "command" -> {"command", to_string(v || "")}
+        {"body", v} when type == "api_request" -> {"body", render_body(v, ctx)}
         {k, v} -> {k, render(v, ctx)}
       end)
 
@@ -356,10 +359,10 @@ defmodule Factory.Actions do
       headers = api_headers(c["headers"]) ++ auth
 
       body =
-        case {method, blank(c["body"])} do
+        case {method, c["body"]} do
           {m, _} when m in [:get, :delete] -> nil
-          {_, nil} -> nil
-          {_, text} -> api_body(text)
+          {_, {:json, data}} -> api_body({:json, data})
+          {_, text} -> if blank(text), do: api_body(text), else: nil
         end
 
       {:ok,
@@ -425,13 +428,28 @@ defmodule Factory.Actions do
         do: {String.downcase(String.trim(name)), String.trim(value)}
   end
 
-  # JSON when it parses as JSON; otherwise sent as text.
-  defp api_body(text) do
+  # The body template as JSON with its placeholders filled in inside the strings, or as
+  # text with them filled in when it isn't JSON.
+  defp render_body(template, ctx) do
+    text = to_string(template || "")
+
     case JSON.decode(text) do
-      {:ok, data} -> data
-      {:error, _} -> {:raw, text}
+      {:ok, data} -> {:json, render_in(data, ctx)}
+      {:error, _} -> render(text, ctx)
     end
   end
+
+  defp render_in(s, ctx) when is_binary(s), do: render(s, ctx)
+  defp render_in(list, ctx) when is_list(list), do: Enum.map(list, &render_in(&1, ctx))
+
+  defp render_in(map, ctx) when is_map(map),
+    do: Map.new(map, fn {k, v} -> {k, render_in(v, ctx)} end)
+
+  defp render_in(other, _ctx), do: other
+
+  # JSON when the template was JSON; otherwise sent as text.
+  defp api_body({:json, data}), do: data
+  defp api_body(text), do: {:raw, text}
 
   defp github(token),
     do: [
