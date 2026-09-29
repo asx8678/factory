@@ -56,7 +56,14 @@ defmodule FactoryWeb.MCP do
 
   defp handle(_conn, "ping", _params), do: {:ok, %{}}
 
-  defp handle(conn, "tools/list", _params), do: {:ok, %{tools: tools(token(conn)).tools()}}
+  defp handle(conn, "tools/list", _params) do
+    token = token(conn)
+
+    tools =
+      if RunTools.token?(token), do: RunTools.tools(token), else: PlanTools.tools()
+
+    {:ok, %{tools: tools}}
+  end
 
   defp handle(conn, "tools/call", %{"name" => name} = params) when is_binary(name) do
     token = token(conn)

@@ -1,13 +1,20 @@
 defmodule Factory.RunTools do
   @moduledoc """
-  Tools an agent on Kiro uses while it works on a run step: it reads the run's tasks
-  and marks them done as it finishes them, so the run's progress is real rather than
-  set all at once at the end. Kiro reaches them over MCP (`FactoryWeb.MCP`), like the
-  planner's tools (`Factory.PlanTools`), on the same server under another token.
+  Tools an agent on Kiro uses while it works on a run step. Kiro reaches them over MCP
+  (`FactoryWeb.MCP`), like the planner's tools (`Factory.PlanTools`), on the same
+  server under another token.
 
-  Each step gets a token (`grant/2`) naming its run and step. A call only writes while
-  the run is on that step (`progress["current"]`) and hasn't been cancelled or
-  finished, so a step that was replaced or a run that moved on can't change the tasks.
+    * `get_tasks` and `complete_tasks`, for steps that change the project: the agent
+      marks tasks done as it finishes them, so the run's progress is real rather than
+      set all at once at the end.
+    * `verdict`, for a step with an arrow back (`Factory.Engine`): approve the work, or
+      send it back with what to fix. It's kept in `progress["verdicts"]`; a reply
+      ending in "Approved" or "Send back: …" still works without it.
+
+  Each step gets a token (`grant/3`) naming its run, its step and which tools it has.
+  A call only writes while the run is on that step (`progress["current"]`) and hasn't
+  been cancelled or finished, so a step that was replaced or a run that moved on
+  can't change anything.
   """
   alias Factory.Runs
 
@@ -36,15 +43,51 @@ defmodule Factory.RunTools do
         },
         required: ["numbers"]
       }
+    },
+    %{
+      name: "verdict",
+      description:
+        "Says whether the work is good. \"approved\" lets the run go on; \"send_back\" " <>
+          "has it done again, with `fix` saying what to change. Call it once, at the end.",
+      inputSchema: %{
+        type: "object",
+        properties: %{
+          decision: %{type: "string", enum: ["approved", "send_back"]},
+          fix: %{type: "string", description: "What to fix, for send_back."}
+        },
+        required: ["decision"]
+      }
     }
   ]
 
-  @doc "The tools, as MCP `tools/list` gives them."
+  @task_tools ~w(get_tasks complete_tasks)
+
+  @doc "Every run tool, as MCP `tools/list` gives them."
   def tools, do: @tools
 
-  @doc "A token for one step of a run: calls with it act on run `run_id` while it's on `step_id`."
-  def grant(run_id, step_id),
-    do: Phoenix.Token.sign(FactoryWeb.Endpoint, @salt, %{run_id: run_id, step_id: step_id})
+  @doc "The tools the step `token` was granted to has."
+  def tools(token) do
+    case verify(token) do
+      {:ok, grant} -> Enum.filter(@tools, &allowed?(grant, &1.name))
+      _ -> []
+    end
+  end
+
+  defp allowed?(grant, name) when name in @task_tools, do: Map.get(grant, :tasks, true)
+  defp allowed?(grant, "verdict"), do: Map.get(grant, :verdict, false)
+
+  @doc """
+  A token for one step of a run: calls with it act on run `run_id` while it's on
+  `step_id`. Options say which tools it has: `tasks:` (default true) and `verdict:`.
+  """
+  def grant(run_id, step_id, opts \\ []) do
+    Phoenix.Token.sign(FactoryWeb.Endpoint, @salt, %{
+      run_id: run_id,
+      step_id: step_id,
+      tasks: Keyword.get(opts, :tasks, true),
+      verdict: Keyword.get(opts, :verdict, false)
+    })
+  end
 
   @doc "The MCP server to give Kiro for a step: Factory's, with the step's token."
   def mcp_server(token), do: Factory.PlanTools.mcp_server(token)
@@ -61,7 +104,9 @@ defmodule Factory.RunTools do
   """
   def call(token, name, args) when is_map(args) do
     with {:ok, grant} <- verify(token) |> or_error("Factory didn't recognise this step."),
-         true <- Enum.any?(@tools, &(&1.name == name)) || {:error, "There's no tool #{name}."} do
+         true <-
+           (Enum.any?(@tools, &(&1.name == name)) and allowed?(grant, name)) ||
+             {:error, "There's no tool #{name}."} do
       result =
         Runs.with_locked_run(grant.run_id, fn run ->
           if run.status in ["running", "paused"] and run.progress["current"] == grant.step_id,
@@ -92,6 +137,25 @@ defmodule Factory.RunTools do
   defp or_error(_error, text), do: {:error, text <> " End your turn."}
 
   defp apply_tool("get_tasks", _args, run), do: {:ok, {:read, describe(run.tasks)}}
+
+  defp apply_tool("verdict", args, run) do
+    fix = if is_binary(args["fix"]), do: String.trim(args["fix"]), else: ""
+
+    verdict =
+      case args["decision"] do
+        "approved" -> {:ok, %{"decision" => "approved"}}
+        "send_back" when fix != "" -> {:ok, %{"decision" => "send_back", "fix" => fix}}
+        "send_back" -> {:error, "Say what to fix in `fix`."}
+        _ -> {:error, ~s(The decision is "approved" or "send_back".)}
+      end
+
+    with {:ok, verdict} <- verdict do
+      step = run.progress["current"]
+      progress = put_in(run.progress, [Access.key("verdicts", %{}), step], verdict)
+      {:ok, run} = Runs.update_run(run, %{progress: progress})
+      {:ok, {:changed, run, "Noted. End your turn with a short summary."}}
+    end
+  end
 
   defp apply_tool("complete_tasks", args, run) do
     wanted = for n <- List.wrap(args["numbers"]), n = number(n), n != nil, do: n

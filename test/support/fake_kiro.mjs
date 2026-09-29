@@ -164,6 +164,18 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       })()
       return
     }
+    // "[test:verdict]": the same with the verdict tool, and a reply that says neither.
+    if (text.includes("[test:verdict]") && (mcp[sessionId] || []).length > 0) {
+      ;(async () => {
+        const again = text.includes("This is another pass")
+        const args = again ? { decision: "approved" } : { decision: "send_back", fix: "cover the empty state" }
+        const result = await callTool(sessionId, "verdict", args)
+        const said = result.denied ? "denied" : result.content[0].text
+        update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `Checked. [tools: ${said}]` } })
+        out({ id: m.id, result: { stopReason: "end_turn" } })
+      })()
+      return
+    }
     // A step told to send the work back does, until it's another pass.
     if (text.includes("[test:send-back]") && text.includes("Send back: <what to fix>")) {
       const again = text.includes("This is another pass")

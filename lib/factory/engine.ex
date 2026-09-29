@@ -256,10 +256,19 @@ defmodule Factory.Engine do
     run = Runs.get_run(run.id)
 
     if run.status == "running" do
-      {:ok, run} = Runs.update_run(run, %{progress: Map.put(run.progress, "current", step.id)})
+      # A verdict from an earlier pass of this step mustn't decide this one.
+      progress =
+        run.progress
+        |> Map.put("current", step.id)
+        |> Map.update("verdicts", %{}, &Map.delete(&1, step.id))
+
+      {:ok, run} = Runs.update_run(run, %{progress: progress})
 
       case do_step(run, steps, step) do
         {:ok, output, sent} ->
+          # Read again: the step's tools may have written to the run while it worked.
+          run = Runs.get_run(run.id)
+
           progress =
             run.progress
             |> Map.update!("done", &(&1 ++ [step.id]))
@@ -291,7 +300,15 @@ defmodule Factory.Engine do
     rounds = get_in(run.progress, ["rounds", step.id]) || 0
     to = Enum.find(steps, &(&1.id == target))
 
-    case {verdict(output), rounds < @max_rounds} do
+    # The verdict tool's answer (`Factory.RunTools`), else the reply's last line.
+    fix =
+      case get_in(run.progress, ["verdicts", step.id]) do
+        %{"decision" => "send_back", "fix" => fix} -> fix
+        %{"decision" => "approved"} -> nil
+        nil -> verdict(output)
+      end
+
+    case {fix, rounds < @max_rounds} do
       {nil, _} ->
         nil
 
@@ -400,10 +417,17 @@ defmodule Factory.Engine do
 
   # Agents that change the project mark the run's tasks done as they finish them
   # (`Factory.RunTools`); ones that only read and check don't.
+  # A step with an arrow back also gets the verdict tool.
   defp run_tools(run, step) do
-    if marks_tasks?(run, step),
-      do: [Factory.RunTools.mcp_server(Factory.RunTools.grant(run.id, step.id))],
-      else: []
+    tasks = marks_tasks?(run, step)
+    verdict = Map.get(step, :loops, []) != []
+
+    if tasks or verdict do
+      token = Factory.RunTools.grant(run.id, step.id, tasks: tasks, verdict: verdict)
+      [Factory.RunTools.mcp_server(token)]
+    else
+      []
+    end
   end
 
   defp marks_tasks?(run, step), do: run.tasks != [] and not Agent.read_only?(step)
@@ -479,8 +503,10 @@ defmodule Factory.Engine do
     note = step.back_notes[target]
 
     [
-      "Then end your reply with one line: `Approved` if the work is good, or " <>
-        "`Send back: <what to fix>` to have #{to.name} do another pass.",
+      "Then give your verdict with the factory tool verdict: approved if the work is " <>
+        "good, or send_back with what to fix to have #{to.name} do another pass. If you " <>
+        "don't have that tool, end your reply with one line instead: `Approved`, or " <>
+        "`Send back: <what to fix>`.",
       note &&
         tag(
           ~s(<send-back-instructions to="#{to.name}">),

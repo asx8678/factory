@@ -277,6 +277,32 @@ defmodule Factory.EngineTest do
              )
     end
 
+    test "a step with an arrow back gives its verdict with the tool" do
+      %{w: w, coder: coder, tester: tester} = workflow("true")
+      {:ok, _} = Agents.link(tester.id, coder.id)
+      {:ok, _} = Agents.update_agent(tester, %{prompt: "[test:verdict]"})
+      run = queued_run(w)
+      Runs.subscribe(run.id)
+
+      assert {:ok, %{status: "done"} = run} = Engine.run(run.id)
+
+      # The reply said neither "Approved" nor "Send back": the tool decided.
+      assert_received {:message,
+                       %{
+                         body: "Tester sent it back to Coder (pass 1 of 2): cover the empty state"
+                       }}
+
+      assert run.progress["rounds"] == %{"agent-#{tester.id}" => 1}
+      assert run.progress["verdicts"]["agent-#{tester.id}"] == %{"decision" => "approved"}
+
+      assert run.progress["outputs"]["agent-#{coder.id}"] =~
+               ~s(<feedback from="Tester">\ncover the empty state\n</feedback>)
+
+      # The Coder, with no arrow back, has no verdict tool.
+      token = Factory.RunTools.grant(run.id, "agent-#{coder.id}")
+      assert Enum.map(Factory.RunTools.tools(token), & &1.name) == ["get_tasks", "complete_tasks"]
+    end
+
     test "a task that doesn't exist is reported; a step that's over can't mark tasks" do
       %{w: w, coder: coder} = workflow("true")
       {:ok, _} = Agents.update_agent(coder, %{prompt: "[test:complete-missing]"})
