@@ -375,6 +375,7 @@ defmodule Factory.Engine do
         workdir: dir,
         model: model(run, step),
         allow: Agent.tools(step),
+        mcp_servers: run_tools(run, step),
         usage: %{source: "run_step", run_id: run.id, agent_id: step.agent && step.agent.id}
       )
 
@@ -396,6 +397,16 @@ defmodule Factory.Engine do
         {:error, reason}
     end
   end
+
+  # Agents that change the project mark the run's tasks done as they finish them
+  # (`Factory.RunTools`); ones that only read and check don't.
+  defp run_tools(run, step) do
+    if marks_tasks?(run, step),
+      do: [Factory.RunTools.mcp_server(Factory.RunTools.grant(run.id, step.id))],
+      else: []
+  end
+
+  defp marks_tasks?(run, step), do: run.tasks != [] and not Agent.read_only?(step)
 
   @doc "What an agent step is asked to do. Public for tests."
   def prompt(run, steps, step), do: fit_prompt(run, steps, step).text
@@ -452,6 +463,9 @@ defmodule Factory.Engine do
         else: "Make the changes in the project folder."
       ) <>
         " When you're done, reply with a short summary of what you did and what the next agent needs to know.",
+      marks_tasks?(run, step) &&
+        "As you finish each task in the spec, built and checked, mark it done with the " <>
+          "factory tool complete_tasks, giving its number. get_tasks shows which are done.",
       send_back_rule(steps, step)
     ]
     |> List.flatten()
@@ -547,15 +561,14 @@ defmodule Factory.Engine do
   defp finish(run, steps) do
     Runs.with_locked_run(run.id, fn run ->
       if run.status == "running" do
-        Factory.Repo.update_all(Ecto.assoc(run, :tasks), set: [status: "done"])
-
         {:ok, run} =
           Runs.update_run(run, %{status: "done", progress: Map.delete(run.progress, "current")})
 
         Runs.post(
           run,
           "factory",
-          "Done: all #{length(steps)} #{if length(steps) == 1, do: "step", else: "steps"} of the workflow ran."
+          "Done: all #{length(steps)} #{if length(steps) == 1, do: "step", else: "steps"} of the workflow ran." <>
+            tasks_note(run.tasks)
         )
 
         {:ok, run}
@@ -578,6 +591,22 @@ defmodule Factory.Engine do
     end)
 
     {:error, reason}
+  end
+
+  # Tasks are done when an agent marked them (`Factory.RunTools`), not because the run ended.
+  defp tasks_note([]), do: ""
+
+  defp tasks_note(tasks) do
+    case {Enum.count(tasks, &(&1.status == "done")), length(tasks)} do
+      {1, 1} ->
+        " Its task was marked done."
+
+      {all, all} ->
+        " All #{all} tasks were marked done."
+
+      {done, all} ->
+        " #{done} of #{all} tasks were marked done; check the others before you rely on them."
+    end
   end
 
   defp fail(run, step, reason) do

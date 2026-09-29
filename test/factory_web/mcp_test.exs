@@ -34,6 +34,27 @@ defmodule FactoryWeb.MCPTest do
              result["result"]
   end
 
+  test "a run step's token gets the run tools, which mark its tasks done", %{conn: conn} do
+    {:ok, run} = Runs.create_run()
+
+    {:ok, run} =
+      Runs.attach_spec(run, [{"tasks.md", "- [ ] 1. Ship it"}], [%{ref: "1", title: "Ship it"}])
+
+    {:ok, run} = Runs.update_run(run, %{status: "running", progress: %{"current" => "agent-1"}})
+    token = Factory.RunTools.grant(run.id, "agent-1")
+
+    %{"result" => %{"tools" => tools}} =
+      conn |> rpc("tools/list", %{}, token) |> json_response(200)
+
+    assert Enum.map(tools, & &1["name"]) == ["get_tasks", "complete_tasks"]
+
+    assert {"Marked done. Tasks (1 of 1 done):\n1. [x] Ship it", false} =
+             call_tool(conn, token, "complete_tasks", %{numbers: ["1"]})
+
+    # A planner's tool isn't one of a run step's.
+    assert {"There's no tool add_tasks.", true} = call_tool(conn, token, "add_tasks", %{})
+  end
+
   test "tools/list gives the plan tools without a token", %{conn: conn} do
     %{"result" => %{"tools" => tools}} = conn |> rpc("tools/list", %{}) |> json_response(200)
 

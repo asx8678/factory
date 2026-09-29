@@ -4,13 +4,15 @@ defmodule FactoryWeb.MCP do
   Factory's tools here (`Factory.PlanTools`). Each JSON-RPC request is answered with
   one JSON response; there's no event stream, so `GET` is refused as MCP allows.
 
-  Listing tools needs no token. Calling one needs the `Authorization: Bearer` token the
-  session was given; without a good one the call fails as a tool error, not with HTTP
-  401, which Kiro would take as a cue to sign in with OAuth.
+  The token says whose tools a session gets: a run step's (`Factory.RunTools`) or,
+  otherwise, the planner's (`Factory.PlanTools`). Calling a tool needs the
+  `Authorization: Bearer` token the session was given; without a good one the call
+  fails as a tool error, not with HTTP 401, which Kiro would take as a cue to sign in
+  with OAuth.
   """
   @behaviour Plug
   import Plug.Conn
-  alias Factory.PlanTools
+  alias Factory.{PlanTools, RunTools}
 
   # Answered with the version the client asks for, else this one.
   @protocol "2025-06-18"
@@ -48,17 +50,19 @@ defmodule FactoryWeb.MCP do
        protocolVersion: params["protocolVersion"] || @protocol,
        capabilities: %{tools: %{}},
        serverInfo: %{name: PlanTools.server_name(), version: "1.0.0"},
-       instructions: "Factory's tools for writing a chat's plan and its tasks."
+       instructions: "Factory's tools: a chat's plan and its tasks, or a run's progress."
      }}
   end
 
   defp handle(_conn, "ping", _params), do: {:ok, %{}}
 
-  defp handle(_conn, "tools/list", _params), do: {:ok, %{tools: PlanTools.tools()}}
+  defp handle(conn, "tools/list", _params), do: {:ok, %{tools: tools(token(conn)).tools()}}
 
   defp handle(conn, "tools/call", %{"name" => name} = params) when is_binary(name) do
+    token = token(conn)
+
     {text, error?} =
-      case PlanTools.call(token(conn), name, params["arguments"] || %{}) do
+      case tools(token).call(token, name, params["arguments"] || %{}) do
         {:ok, text} -> {text, false}
         {:error, text} -> {text, true}
       end
@@ -69,6 +73,8 @@ defmodule FactoryWeb.MCP do
   defp handle(_conn, "tools/call", _params), do: {:error, -32602, "Name the tool to call."}
 
   defp handle(_conn, method, _params), do: {:error, -32601, "#{method} isn't supported."}
+
+  defp tools(token), do: if(RunTools.token?(token), do: RunTools, else: PlanTools)
 
   defp token(conn) do
     case get_req_header(conn, "authorization") do

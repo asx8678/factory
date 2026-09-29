@@ -152,6 +152,18 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       cost(sessionId, 0.25)
       return out({ id: m.id, result: { stopReason: "end_turn" } })
     }
+    // A run step with Factory's run tools marks task 1 done ("[test:complete]"), or a task
+    // that doesn't exist too ("[test:complete-missing]"), then echoes what the tools said.
+    if (text.includes("[test:complete") && (mcp[sessionId] || []).length > 0) {
+      ;(async () => {
+        const numbers = text.includes("[test:complete-missing]") ? [1, 9] : [1]
+        const result = await callTool(sessionId, "complete_tasks", { numbers })
+        const said = result.denied ? "denied" : result.content[0].text
+        update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `Built task 1. [tools: ${said}]` } })
+        out({ id: m.id, result: { stopReason: "end_turn" } })
+      })()
+      return
+    }
     // A step told to send the work back does, until it's another pass.
     if (text.includes("[test:send-back]") && text.includes("Send back: <what to fix>")) {
       const again = text.includes("This is another pass")

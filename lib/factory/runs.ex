@@ -126,6 +126,26 @@ defmodule Factory.Runs do
     end
   end
 
+  @doc """
+  Marks these tasks (ids) of the run done and returns the run with its tasks. Call
+  `tasks_changed/1` with it once any transaction around this has committed.
+  """
+  def mark_tasks_done(%Run{} = run, task_ids) do
+    now = DateTime.utc_now(:second)
+
+    Repo.update_all(from(t in Task, where: t.run_id == ^run.id and t.id in ^task_ids),
+      set: [status: "done", updated_at: now]
+    )
+
+    Repo.preload(run, :tasks, force: true)
+  end
+
+  @doc "Tells the run's pages its tasks changed (see `mark_tasks_done/2`)."
+  def tasks_changed(%Run{} = run) do
+    broadcast("run:#{run.id}", {:run_updated, run})
+    broadcast("runs", {:runs_changed})
+  end
+
   @doc "Stores the spec files and replaces the run's tasks with the ones found in them."
   def attach_spec(%Run{} = run, files, tasks) do
     with_locked_run(run.id, fn run ->

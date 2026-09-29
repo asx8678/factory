@@ -237,6 +237,66 @@ defmodule Factory.EngineTest do
     refute Engine.running?(run.id)
   end
 
+  describe "task progress" do
+    # Agents reach Factory's run tools over HTTP, as Kiro does (FactoryWeb.MCP).
+    setup do
+      server =
+        start_supervised!(
+          {Bandit, plug: FactoryWeb.Endpoint, ip: :loopback, port: 0, startup_log: false}
+        )
+
+      {:ok, {_ip, port}} = ThousandIsland.listener_info(server)
+      Application.put_env(:factory, :mcp_url, "http://127.0.0.1:#{port}/mcp")
+      on_exit(fn -> Application.delete_env(:factory, :mcp_url) end)
+    end
+
+    defp with_tasks(run, titles) do
+      tasks = for {t, i} <- Enum.with_index(titles, 1), do: %{ref: "#{i}", title: t}
+      text = Enum.map_join(tasks, "\n", &"- [ ] #{&1.ref}. #{&1.title}")
+      {:ok, run} = Runs.attach_spec(run, [{"tasks.md", text}], tasks)
+      run
+    end
+
+    test "an agent marks the tasks it finished; the rest stay open and the end says so" do
+      %{w: w, planner: planner, coder: coder} = workflow("true")
+      {:ok, _} = Agents.update_agent(coder, %{prompt: "[test:complete]"})
+      run = w |> queued_run() |> with_tasks(["Add the toggle", "Remember the choice"])
+      Runs.subscribe(run.id)
+
+      assert {:ok, %{status: "done"} = run} = Engine.run(run.id)
+      assert [%{status: "done"}, %{status: "pending"}] = Runs.get_run(run.id).tasks
+
+      # The Coder saw the tools' answer; the Planner, which only reads, wasn't given them.
+      assert run.progress["outputs"]["agent-#{coder.id}"] =~ "Marked done. Tasks (1 of 2 done)"
+      refute run.progress["outputs"]["agent-#{planner.id}"] =~ "complete_tasks"
+      assert_received {:run_updated, %{tasks: [%{status: "done"}, %{status: "pending"}]}}
+
+      assert Enum.any?(
+               Runs.list_messages(run.id),
+               &(&1.body =~ "1 of 2 tasks were marked done; check the others")
+             )
+    end
+
+    test "a task that doesn't exist is reported; a step that's over can't mark tasks" do
+      %{w: w, coder: coder} = workflow("true")
+      {:ok, _} = Agents.update_agent(coder, %{prompt: "[test:complete-missing]"})
+      run = w |> queued_run() |> with_tasks(["Add the toggle"])
+
+      assert {:ok, run} = Engine.run(run.id)
+      assert run.progress["outputs"]["agent-#{coder.id}"] =~ "Marked done. No task 9."
+      assert [%{status: "done"}] = Runs.get_run(run.id).tasks
+      assert Enum.any?(Runs.list_messages(run.id), &(&1.body =~ "Its task was marked done."))
+
+      token = Factory.RunTools.grant(run.id, "agent-#{coder.id}")
+
+      assert {:error, "This step is over" <> _} =
+               Factory.RunTools.call(token, "complete_tasks", %{"numbers" => [1]})
+
+      assert {:error, "Factory didn't recognise this step." <> _} =
+               Factory.RunTools.call("forged", "get_tasks", %{})
+    end
+  end
+
   test "an empty workflow pauses without completing any tasks" do
     {:ok, workflow} = Workflows.create("Empty workflow")
     run = workflow |> queued_run() |> with_task()
