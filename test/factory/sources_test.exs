@@ -91,6 +91,19 @@ defmodule Factory.SourcesTest do
     assert {:error, :other_workflow} = Sources.attach(folder, copied_agent.id)
   end
 
+  test "a long instruction file is cut with a line saying how much was left out", %{
+    workflow: w
+  } do
+    body = String.duplicate("Use British spelling. ", 2000)
+
+    {:ok, _} =
+      Sources.create(w.id, %{kind: "instructions", name: "Rules", content: body})
+
+    text = Sources.context(w.id)
+    assert text =~ ~r/\[omitted \d+ UTF-8 bytes\]/
+    assert byte_size(text) < byte_size(body)
+  end
+
   test "an agent's first message carries the sources attached to it, and only those",
        %{workflow: w} do
     {:ok, rules} =

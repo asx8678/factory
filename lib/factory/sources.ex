@@ -461,6 +461,7 @@ defmodule Factory.Sources do
 
   # Context for Kiro
 
+  # Bytes of an instruction file or meta index that go into a prompt.
   @max_text 30_000
 
   @doc "The enabled, ready sources attached to an agent, as text for its prompt."
@@ -592,13 +593,19 @@ defmodule Factory.Sources do
     Path.join([sources_dir(), "#{s.id}-#{slug}", "sections"])
   end
 
-  # A file's text, read now so edits to it count; else the text given.
+  # A file's text, read now so edits to it count; else the text given. Over the limit
+  # it's cut with a line saying how much was left out, like the rest of a prompt.
   defp text(%Source{config: %{"path" => path}} = s) when is_binary(path) and path != "" do
     case File.read(Path.expand(path)) do
-      {:ok, body} -> body |> String.slice(0, @max_text) |> String.trim()
+      {:ok, body} -> bounded(body)
       {:error, _} -> "(#{s.name} couldn't be read at #{path}.)"
     end
   end
 
-  defp text(%Source{content: content}), do: content |> String.slice(0, @max_text) |> String.trim()
+  defp text(%Source{content: content}), do: bounded(content || "")
+
+  defp bounded(text) do
+    {text, _omitted} = text |> String.trim() |> Factory.Context.Bounds.excerpt(@max_text)
+    text
+  end
 end
