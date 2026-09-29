@@ -55,6 +55,18 @@ defmodule FactoryWeb.MCPTest do
     assert {"There's no tool add_tasks.", true} = call_tool(conn, token, "add_tasks", %{})
   end
 
+  test "a session's token doesn't expire; a step's does after a day" do
+    signed_at = System.system_time(:second) - 3 * 86_400
+    old = &Phoenix.Token.sign(FactoryWeb.Endpoint, "factory run tools", &1, signed_at: signed_at)
+
+    assert Factory.RunTools.token?(old.(%{session: 1}))
+    assert length(Factory.RunTools.tools(old.(%{session: 1}))) == 3
+
+    refute Factory.RunTools.token?(
+             old.(%{run_id: 1, step_id: "agent-1", tasks: true, verdict: false})
+           )
+  end
+
   test "tools/list gives the plan tools without a token", %{conn: conn} do
     %{"result" => %{"tools" => tools}} = conn |> rpc("tools/list", %{}) |> json_response(200)
 

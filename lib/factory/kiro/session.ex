@@ -11,6 +11,11 @@ defmodule Factory.Kiro.Session do
   session every message is also labelled with the agent's name, so Kiro knows who
   is talking.
 
+  Run steps come here too (`Factory.Kiro.run_step/4`): a job can name who waits for
+  its reply and the run step it's for. Every session gets Factory's MCP server with a
+  token for the session, so the agent can use the run tools (`Factory.RunTools`)
+  while it answers a run step; MCP permission requests are allowed by server name.
+
   Text streams to the run's chat as it arrives; a turn ends when Kiro answers the
   prompt request with a `stopReason`. Other RPCs have a 30-second deadline, configurable
   as `:rpc_timeout` in the `:kiro` settings; a timeout fails all waiting jobs.

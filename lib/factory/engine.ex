@@ -18,9 +18,14 @@ defmodule Factory.Engine do
   An action card (`Factory.Actions`) runs when the cards before it are done, with
   `{{summary}}` filled from what they handed over.
 
+  Each agent step runs on the agent's own Kiro session (`Factory.Kiro.run_step/4`), so
+  a step that comes round again carries on the same conversation. Steps that change
+  the project mark the run's tasks done with Factory's run tools (`Factory.RunTools`).
+
   An arrow pointing back to an earlier card (Reviewer → Coder) is a loop: the card it
-  starts from ends its reply with "Approved" or "Send back: <what to fix>", and sent
-  back, the work goes again from the earlier card with that feedback, up to twice.
+  starts from gives a verdict with the verdict tool (or ends its reply with "Approved"
+  or "Send back: <what to fix>"), and sent back, the work goes again from the earlier
+  card with that feedback, up to `max_rounds/0` times.
 
   Progress is kept on the run (`progress`), so a paused or failed run resumes at the
   step it stopped at. A failed step pauses the run; `/resume` tries it again.

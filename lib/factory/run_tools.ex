@@ -105,8 +105,21 @@ defmodule Factory.RunTools do
   @doc "Whether `token` was granted for a run step (else it's a planner's, or none)."
   def token?(token), do: match?({:ok, _}, verify(token))
 
-  defp verify(token),
-    do: Phoenix.Token.verify(FactoryWeb.Endpoint, @salt, token || "", max_age: 86_400)
+  # A step's token is used within the step, so a day is plenty. A session's token lives
+  # as long as the session (it's minted when the session starts, which may be days
+  # ago); what gates it is that the session exists and is on a step (`resolve/1`).
+  defp verify(token) do
+    case Phoenix.Token.verify(FactoryWeb.Endpoint, @salt, token || "", max_age: :infinity) do
+      {:ok, %{session: _}} = ok ->
+        ok
+
+      {:ok, _step} ->
+        Phoenix.Token.verify(FactoryWeb.Endpoint, @salt, token, max_age: 86_400)
+
+      error ->
+        error
+    end
+  end
 
   @doc """
   Runs tool `name` with `args` for the step `token` was granted to: `{:ok, text}` for
