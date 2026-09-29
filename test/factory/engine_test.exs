@@ -34,6 +34,8 @@ defmodule Factory.EngineTest do
       })
 
     {:ok, _} = Sources.attach(rules, coder.id)
+    # Steps run on each agent's Kiro session, which outlives the test unless stopped.
+    on_exit(fn -> for a <- [planner, coder, tester], do: Factory.Kiro.stop(a.id) end)
     %{w: w, planner: planner, coder: coder, tester: tester, action: action}
   end
 
@@ -135,6 +137,58 @@ defmodule Factory.EngineTest do
              ~s(<feedback from="Tester">\nadd the missing test\n</feedback>)
 
     assert run.progress["outputs"]["agent-#{tester.id}"] =~ "Approved"
+  end
+
+  test "steps run on each agent's own Kiro session, which keeps the conversation" do
+    %{w: w, coder: coder, tester: tester} = workflow("true")
+    {:ok, _} = Agents.link(tester.id, coder.id)
+    {:ok, _} = Agents.update_agent(tester, %{prompt: "[test:send-back]"})
+    run = queued_run(w)
+
+    assert {:ok, %{status: "done"}} = Engine.run(run.id)
+
+    # Both of the Coder's passes went to one session, which is still there for the chat.
+    pid = Factory.Kiro.whereis(coder.id)
+    assert is_pid(pid)
+    # The log is newest first.
+    passes = for %{kind: :user} = e <- Enum.reverse(:sys.get_state(pid).log), do: e.text
+    assert length(passes) == 2
+    assert List.last(passes) =~ "This is another pass"
+
+    # Each reply is posted once, by the session, and recorded as a run step.
+    coder_replies = Enum.filter(Runs.list_messages(run.id), &(&1.author == "Coder"))
+    assert length(coder_replies) == 2
+    assert %{calls: calls} = Factory.Usage.totals({:run, run.id})
+    assert calls >= 4
+
+    assert Factory.Repo.all(Factory.Usage.Event)
+           |> Enum.filter(&(&1.run_id == run.id))
+           |> Enum.all?(&(&1.source == "run_step"))
+
+    # Between steps (or in a chat), the session's token can't touch the run.
+    token = Factory.RunTools.grant_session(coder.id)
+    assert {:error, "These tools only work" <> _} = Factory.RunTools.call(token, "get_tasks", %{})
+  end
+
+  test "a session that stops while a step waits pauses the run at that step" do
+    %{w: w, coder: coder} = workflow("true")
+    {:ok, _} = Agents.update_agent(coder, %{prompt: "[test:hold]"})
+    run = queued_run(w)
+    Runs.subscribe(run.id)
+    parent = self()
+
+    worker = start_supervised!({Task, fn -> send(parent, {:finished, Engine.run(run.id)}) end})
+    ref = Process.monitor(worker)
+    coder_id = coder.id
+    assert_receive {:agent_stream, %{agent_id: ^coder_id}}, 5_000
+
+    Factory.Kiro.stop(coder.id)
+    assert_receive {:finished, {:error, reason}}, 5_000
+    assert reason =~ "Coder's Kiro session stopped before it answered."
+    assert_receive {:DOWN, ^ref, :process, ^worker, :normal}
+
+    assert %{status: "paused", progress: %{"current" => current}} = Runs.get_run(run.id)
+    assert current == "agent-#{coder.id}"
   end
 
   test "a reply's last line says whether to send the work back" do

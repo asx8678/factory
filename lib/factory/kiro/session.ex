@@ -42,8 +42,23 @@ defmodule Factory.Kiro.Session do
   @doc "Whether the session is ready with nothing to answer."
   def idle?(pid), do: GenServer.call(pid, :idle?)
 
-  @doc "Queues a message from `agent`; the reply is posted to the run."
-  def prompt(pid, agent, run_id, text), do: GenServer.call(pid, {:prompt, agent, run_id, text})
+  @doc """
+  Queues a message from `agent`; the reply is posted to the run. Options, for a run
+  step (`Factory.Kiro.run_step/4`):
+
+    * `:reply_to` - `{pid, ref}` that gets `{ref, {:ok, reply} | {:error, reason}}` when
+      the job ends, however it ends
+    * `:source` - what the call is recorded as in `Factory.Usage` (default "agent_turn")
+    * `:model` - the model for this job instead of the agent's
+    * `:context` - false when the text already carries the agent's sources and prompt
+    * `:activity` - what the agent's card says while it works
+    * `:step` - `%{id:, tasks:, verdict:}`, the run step Factory's run tools act on
+  """
+  def prompt(pid, agent, run_id, text, opts \\ []),
+    do: GenServer.call(pid, {:prompt, agent, run_id, text, opts})
+
+  @doc "The run step the session is answering, for `Factory.RunTools`: `%{run_id:, step:}` or nil."
+  def current_step(pid), do: GenServer.call(pid, :current_step)
 
   @doc """
   Compacts this session's conversation now (see the moduledoc). Not while it is
@@ -92,7 +107,17 @@ defmodule Factory.Kiro.Session do
 
   # A message waiting to be sent: who, where the reply goes, what they said.
   defmodule Job do
-    defstruct [:agent, :run_id, :text]
+    defstruct [
+      :agent,
+      :run_id,
+      :text,
+      :reply_to,
+      :model,
+      :activity,
+      :step,
+      source: "agent_turn",
+      context: true
+    ]
   end
 
   # A turn in progress: the job, what Kiro has said so far, tools it asked for.
@@ -103,6 +128,9 @@ defmodule Factory.Kiro.Session do
       :started,
       :ask,
       :request_id,
+      :reply_to,
+      :step,
+      source: "agent_turn",
       input_tokens: 0,
       text: "",
       denied: [],
@@ -146,7 +174,7 @@ defmodule Factory.Kiro.Session do
   end
 
   @impl true
-  def handle_call({:prompt, agent, run_id, text}, _from, state) do
+  def handle_call({:prompt, agent, run_id, text, opts}, _from, state) do
     if Kiro.workdir(Runs.get_run(run_id)) != state.workdir do
       {:reply, {:error, :busy}, state}
     else
@@ -156,10 +184,26 @@ defmodule Factory.Kiro.Session do
         Agents.set_activity(agent.id, "waiting", "Waiting for its turn")
       end
 
-      job = %Job{agent: agent, run_id: run_id, text: text}
+      job = %Job{
+        agent: agent,
+        run_id: run_id,
+        text: text,
+        reply_to: opts[:reply_to],
+        model: opts[:model],
+        activity: opts[:activity],
+        step: opts[:step],
+        source: opts[:source] || "agent_turn",
+        context: Keyword.get(opts, :context, true)
+      }
+
       {:reply, :ok, next(%{state | queue: state.queue ++ [job]})}
     end
   end
+
+  def handle_call(:current_step, _from, %{turn: %Turn{step: %{} = step} = turn} = state),
+    do: {:reply, %{run_id: turn.run_id, step: step}, state}
+
+  def handle_call(:current_step, _from, state), do: {:reply, nil, state}
 
   def handle_call(:idle?, _from, state),
     do:
@@ -272,7 +316,12 @@ defmodule Factory.Kiro.Session do
         error_response(kind, error, state)
 
       {:initialize, %{"result" => _}} ->
-        request(state, "session/new", %{cwd: state.workdir, mcpServers: []}, :new_session)
+        request(
+          state,
+          "session/new",
+          %{cwd: state.workdir, mcpServers: mcp_servers(state)},
+          :new_session
+        )
 
       {:new_session, %{"result" => %{"sessionId" => sid} = result}} ->
         next(%{
@@ -316,8 +365,17 @@ defmodule Factory.Kiro.Session do
 
     # What the answering agent may do (Factory.Agents.Agent.tools/1), as in a run:
     # the ones that only look read and search; the rest may also edit and run commands.
+    # Factory's own tools come over MCP, whose requests name their server and carry no
+    # kind; they check for themselves what the current step may do (`Factory.RunTools`).
     allowed = if state.turn, do: Agent.tools(state.turn.agent), else: []
-    wanted = if get_in(params, ["toolCall", "kind"]) in allowed, do: "allow", else: "reject"
+    server = get_in(params, ["_meta", "kiro", "mcpTool", "identity", "serverName"])
+
+    wanted =
+      if get_in(params, ["toolCall", "kind"]) in allowed or
+           (state.turn != nil and server == Factory.PlanTools.server_name()),
+         do: "allow",
+         else: "reject"
+
     outcome = Kiro.Permission.outcome(options, wanted)
     reply(state, id, %{outcome: outcome})
 
@@ -622,7 +680,7 @@ defmodule Factory.Kiro.Session do
   defp start_next(%{queue: [job | rest]} = state) do
     wanted =
       Enum.reject(
-        [{"model", job.agent.model}, {"mode", job.agent.kiro_mode}],
+        [{"model", job.model || job.agent.model}, {"mode", job.agent.kiro_mode}],
         fn {id, value} -> state.config[id] == value end
       )
 
@@ -642,6 +700,7 @@ defmodule Factory.Kiro.Session do
   # Kiro refused the model or mode for this job: tell its chat, drop the job, carry on.
   defp reject_switch(%{switching: %Job{} = job} = state, reason) do
     Agents.set_activity(job.agent.id, "error", reason)
+    answer(job.reply_to, {:error, reason})
 
     if run = Runs.get_run(job.run_id) do
       Runs.post(run, "factory", "#{job.agent.name} couldn't start: #{reason}",
@@ -655,7 +714,7 @@ defmodule Factory.Kiro.Session do
   defp reject_switch(state, _reason), do: state
 
   defp send_prompt(state, %Job{agent: agent} = job) do
-    {text, state} = with_context(state, agent, job.text)
+    {text, state} = with_context(state, agent, job.text, job.context)
 
     # After a compaction the conversation so far goes first.
     {text, state} =
@@ -663,11 +722,18 @@ defmodule Factory.Kiro.Session do
         do: {state.carry <> "\n\n" <> text, %{state | carry: nil}},
         else: {text, state}
 
-    Agents.set_activity(agent.id, "running", "Answering: " <> String.slice(job.text, 0, 60))
+    Agents.set_activity(
+      agent.id,
+      "running",
+      job.activity || "Answering: " <> String.slice(job.text, 0, 60)
+    )
 
     turn = %Turn{
       agent: agent,
       run_id: job.run_id,
+      reply_to: job.reply_to,
+      step: job.step,
+      source: job.source,
       ask: job.text,
       request_id: state.next_id,
       started: System.monotonic_time(:millisecond),
@@ -691,12 +757,16 @@ defmodule Factory.Kiro.Session do
   # The agent's prompt goes in front of its first message in this session; the session
   # keeps it for the rest of the conversation. In the shared session every message is
   # labelled with who is speaking.
-  defp with_context(state, agent, text) do
+  # A run step's text already carries them (`context?` false): the agent counts as primed.
+  defp with_context(state, agent, text, context?) do
     # The data sources attached to the agent, then its own prompt.
     context =
-      [Factory.Sources.context_for_agent(agent), String.trim(agent.prompt || "")]
-      |> Enum.reject(&(&1 == ""))
-      |> Enum.join("\n\n")
+      if context?,
+        do:
+          [Factory.Sources.context_for_agent(agent), String.trim(agent.prompt || "")]
+          |> Enum.reject(&(&1 == ""))
+          |> Enum.join("\n\n"),
+        else: ""
 
     first = not MapSet.member?(state.primed, agent.id)
     state = %{state | primed: MapSet.put(state.primed, agent.id)}
@@ -754,7 +824,7 @@ defmodule Factory.Kiro.Session do
     state = save_usage(state, agent.id, turn.credits || 0, context)
 
     Factory.Usage.record(%{
-      source: "agent_turn",
+      source: turn.source,
       run_id: turn.run_id,
       agent_id: agent.id,
       model: state.config["model"],
@@ -771,6 +841,15 @@ defmodule Factory.Kiro.Session do
     if run = Runs.get_run(turn.run_id) do
       Runs.post(run, "factory", text <> denied, author: agent.name, meta: meta)
     end
+
+    answer(
+      turn.reply_to,
+      cond do
+        error -> {:error, error}
+        String.trim(turn.text) == "" -> {:error, "Kiro ended the turn without a reply."}
+        true -> {:ok, turn.text <> denied}
+      end
+    )
 
     log_turn(%{state | turn: nil, last_run: turn.run_id}, turn, error)
   end
@@ -844,8 +923,9 @@ defmodule Factory.Kiro.Session do
 
     waiting = if state.switching, do: [state.switching | state.queue], else: state.queue
 
-    for %Job{agent: agent, run_id: run_id} <- waiting do
+    for %Job{agent: agent, run_id: run_id} = job <- waiting do
       Agents.set_activity(agent.id, "error", reason)
+      answer(job.reply_to, {:error, reason})
 
       if run = Runs.get_run(run_id) do
         Runs.post(run, "factory", "#{agent.name} couldn't start: #{reason}",
@@ -856,6 +936,14 @@ defmodule Factory.Kiro.Session do
 
     {:stop, :normal, %{state | queue: [], switching: nil}}
   end
+
+  # Whoever waits for a job (a run step) hears how it ended.
+  defp answer(nil, _result), do: :ok
+  defp answer({pid, ref}, result), do: send(pid, {ref, result})
+
+  # Factory's run tools, with a token for this session (see `Factory.RunTools`).
+  defp mcp_servers(state),
+    do: [Factory.RunTools.mcp_server(Factory.RunTools.grant_session(state.key))]
 
   # JSON-RPC out
 

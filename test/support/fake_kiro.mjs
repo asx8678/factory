@@ -50,7 +50,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     const { sessionId, prompt } = m.params
     const text = prompt[0].text
     // Hold a turn open while tests deliver timeout and late-response messages.
-    if (text.endsWith("[test:wait]"))
+    if (text.endsWith("[test:wait]") || text.includes("[test:hold]"))
       return update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "waiting" } })
     // Task planning: step 1 reads a file (asking permission, which Factory should allow for
     // reads) and asks questions; step 2 suggests tasks.

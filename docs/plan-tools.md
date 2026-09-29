@@ -29,9 +29,22 @@ chat bubble.
 - `mix precommit`: 206 tests pass. The fake Kiro (`test/support/fake_kiro.mjs`) calls
   the tools over HTTP; planning tests start a Bandit listener and set `:mcp_url`.
 
+## Run tools (added)
+
+- `Factory.RunTools` on the same `/mcp` server: `get_tasks` and `complete_tasks` for steps
+  that change the project, `verdict` for a step with an arrow back. The token decides
+  which tool set `tools/list` gives (`FactoryWeb.MCP`).
+- Run steps run on each agent's own `Factory.Kiro.Session` (`Factory.Kiro.run_step/4`),
+  not a throwaway `Kiro.ask`. Every session gets Factory's MCP server with a session
+  token; a tool call resolves to the step the session is answering and is refused
+  outside one. The session allows MCP permission requests by `serverName`.
+- Deferred: not resending the job and spec on a later step to the same session. That
+  interacts with `primed`, `carry` and `restart` after compaction.
+
 ## Next
 
-1. **Persistent planner session.** Give `Factory.Kiro.Session` the Factory MCP server
+1. **Persistent planner session.** Run steps now use sessions with the MCP server
+   (above); the chat planner still uses `Kiro.ask`. Give `Factory.Kiro.Session` the Factory MCP server
    for planner agents, so follow-up messages keep their context (cheaper and faster
    than a fresh `Kiro.ask` each time) and `/ask Planner create tasks for X` works after
    the draft too. The token would map to the session; the tool finds the run from the

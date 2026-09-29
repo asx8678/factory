@@ -382,24 +382,27 @@ defmodule Factory.Engine do
 
   defp do_step(run, steps, step) do
     set_activity(step.agent, "running", "Working on “#{run.title}”")
-    dir = run.settings["project_dir"] || Kiro.config(:workspace)
-
     Runs.post(run, "factory", "#{step.name} is on it#{handed_by(steps, step)}.", meta: meta(step))
     prompt = fit_prompt(run, steps, step)
 
+    # On the agent's own Kiro session, which posts the reply to the chat and keeps the
+    # conversation for a later pass. The prompt carries its sources and instructions.
     result =
-      Kiro.ask(prompt.text,
-        workdir: dir,
+      Kiro.run_step(step.agent, run.id, prompt.text,
+        source: "run_step",
         model: model(run, step),
-        allow: Agent.tools(step),
-        mcp_servers: run_tools(run, step),
-        usage: %{source: "run_step", run_id: run.id, agent_id: step.agent && step.agent.id}
+        context: false,
+        activity: "Working on “#{run.title}”",
+        step: %{
+          id: step.id,
+          tasks: marks_tasks?(run, step),
+          verdict: Map.get(step, :loops, []) != []
+        }
       )
 
     case result do
       {:ok, reply} ->
         set_activity(step.agent, "done", nil)
-        say(run, step, reply)
 
         {:ok, reply,
          %{
@@ -416,20 +419,8 @@ defmodule Factory.Engine do
   end
 
   # Agents that change the project mark the run's tasks done as they finish them
-  # (`Factory.RunTools`); ones that only read and check don't.
-  # A step with an arrow back also gets the verdict tool.
-  defp run_tools(run, step) do
-    tasks = marks_tasks?(run, step)
-    verdict = Map.get(step, :loops, []) != []
-
-    if tasks or verdict do
-      token = Factory.RunTools.grant(run.id, step.id, tasks: tasks, verdict: verdict)
-      [Factory.RunTools.mcp_server(token)]
-    else
-      []
-    end
-  end
-
+  # (`Factory.RunTools`); ones that only read and check don't. A step with an arrow
+  # back also has the verdict tool.
   defp marks_tasks?(run, step), do: run.tasks != [] and not Agent.read_only?(step)
 
   @doc "What an agent step is asked to do. Public for tests."

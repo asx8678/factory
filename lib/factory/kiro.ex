@@ -39,6 +39,62 @@ defmodule Factory.Kiro do
   end
 
   @doc """
+  Runs one step of a run on the agent's own Kiro session (or the shared one) and waits
+  for the reply: `{:ok, reply}` or `{:error, reason}`. The session posts the reply to
+  the run's chat as it does for any message, and keeps the conversation, so a step
+  sent back to this agent carries on where it left off. `opts` are
+  `Factory.Kiro.Session.prompt/5`'s, without `:reply_to`.
+
+  The wait ends when the session answers, when it stops, or after the prompt timeout
+  twice over plus a minute (it may first finish another message).
+  """
+  def run_step(agent, run_id, text, opts \\ []) do
+    dir = workdir(Factory.Runs.get_run(run_id))
+    key = session_key(agent)
+    ref = make_ref()
+    opts = Keyword.put(opts, :reply_to, {self(), ref})
+
+    queued =
+      locked(key, fn ->
+        with {:ok, pid} <- ensure_session(key, dir),
+             :ok <- Session.prompt(pid, agent, run_id, text, opts),
+             do: {:ok, pid}
+      end)
+
+    case queued do
+      {:ok, pid} ->
+        monitor = Process.monitor(pid)
+        wait = 2 * config(:prompt_timeout) + 60_000
+
+        receive do
+          {^ref, result} ->
+            Process.demonitor(monitor, [:flush])
+            result
+
+          {:DOWN, ^monitor, :process, ^pid, _reason} ->
+            # A last answer may have been sent just before it stopped.
+            receive do
+              {^ref, result} -> result
+            after
+              0 -> {:error, "#{agent.name}'s Kiro session stopped before it answered."}
+            end
+        after
+          wait ->
+            Process.demonitor(monitor, [:flush])
+            {:error, "#{agent.name} didn't answer within #{div(wait, 60_000)} minutes."}
+        end
+
+      {:error, :busy} ->
+        {:error,
+         "#{agent.name}'s Kiro session is working in another project folder. " <>
+           "Try again when it's idle."}
+
+      {:error, reason} ->
+        {:error, "Couldn't start Kiro for #{agent.name}: #{inspect(reason)}"}
+    end
+  end
+
+  @doc """
   The agent's session, working in `dir`, started if needed. A session working in another
   folder (a chat on another project) starts again in `dir` once it's idle; until then
   `{:error, :busy}`.

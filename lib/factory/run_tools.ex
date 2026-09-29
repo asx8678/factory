@@ -11,8 +11,11 @@ defmodule Factory.RunTools do
       send it back with what to fix. It's kept in `progress["verdicts"]`; a reply
       ending in "Approved" or "Send back: …" still works without it.
 
-  Each step gets a token (`grant/3`) naming its run, its step and which tools it has.
-  A call only writes while the run is on that step (`progress["current"]`) and hasn't
+  A token says which step a call is for. A run step on its agent's Kiro session
+  (`Factory.Kiro.run_step/4`) is reached through the session's token
+  (`grant_session/1`): the session knows the step it's answering, and outside one (a
+  chat message) the tools refuse. `grant/3` names a run and step directly. Either way
+  a call only writes while the run is on that step (`progress["current"]`) and hasn't
   been cancelled or finished, so a step that was replaced or a run that moved on
   can't change anything.
   """
@@ -65,9 +68,13 @@ defmodule Factory.RunTools do
   @doc "Every run tool, as MCP `tools/list` gives them."
   def tools, do: @tools
 
-  @doc "The tools the step `token` was granted to has."
+  @doc """
+  The tools `token` offers. A session's lists them all, as Kiro reads them once when
+  the session starts; each call is checked against the step then (`call/3`).
+  """
   def tools(token) do
     case verify(token) do
+      {:ok, %{session: _}} -> @tools
       {:ok, grant} -> Enum.filter(@tools, &allowed?(grant, &1.name))
       _ -> []
     end
@@ -89,6 +96,9 @@ defmodule Factory.RunTools do
     })
   end
 
+  @doc "A token for a Kiro session (`:shared` or an agent id): calls act on the step it's answering."
+  def grant_session(key), do: Phoenix.Token.sign(FactoryWeb.Endpoint, @salt, %{session: key})
+
   @doc "The MCP server to give Kiro for a step: Factory's, with the step's token."
   def mcp_server(token), do: Factory.PlanTools.mcp_server(token)
 
@@ -104,6 +114,7 @@ defmodule Factory.RunTools do
   """
   def call(token, name, args) when is_map(args) do
     with {:ok, grant} <- verify(token) |> or_error("Factory didn't recognise this step."),
+         {:ok, grant} <- resolve(grant),
          true <-
            (Enum.any?(@tools, &(&1.name == name)) and allowed?(grant, name)) ||
              {:error, "There's no tool #{name}."} do
@@ -132,6 +143,20 @@ defmodule Factory.RunTools do
   end
 
   def call(_token, _name, _args), do: {:error, "The arguments must be an object."}
+
+  # A session's token stands for the step the session is answering right now.
+  defp resolve(%{session: key}) do
+    with pid when is_pid(pid) <- Factory.Kiro.whereis(key),
+         %{run_id: run_id, step: step} <- Factory.Kiro.Session.current_step(pid) do
+      {:ok, %{run_id: run_id, step_id: step.id, tasks: step.tasks, verdict: step.verdict}}
+    else
+      _ -> {:error, "These tools only work while you're on a step of a factory run."}
+    end
+  catch
+    :exit, _ -> {:error, "These tools only work while you're on a step of a factory run."}
+  end
+
+  defp resolve(grant), do: {:ok, grant}
 
   defp or_error({:ok, _} = ok, _text), do: ok
   defp or_error(_error, text), do: {:error, text <> " End your turn."}
