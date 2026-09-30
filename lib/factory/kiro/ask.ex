@@ -189,6 +189,13 @@ defmodule Factory.Kiro.Ask do
     {:cont, acc}
   end
 
+  # A one-off question has nobody to ask mid-turn: a tool's question is cancelled, and
+  # the tool carries on without it.
+  defp handle(conn, %{"id" => rid, "method" => "_kiro/mcp/elicitation"}, _id, acc) do
+    send_json(conn.port, %{jsonrpc: "2.0", id: rid, result: %{action: "cancel"}})
+    {:cont, acc}
+  end
+
   defp handle(conn, %{"id" => rid, "method" => method}, _id, acc) do
     send_json(conn.port, %{
       jsonrpc: "2.0",

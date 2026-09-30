@@ -228,6 +228,22 @@ defmodule Factory.Runs do
     Repo.all(from m in Message, where: m.run_id == ^run_id, order_by: m.id)
   end
 
+  @doc """
+  Changes a message's meta with `fun` and tells the chat, which shows it again (a
+  question answered or expired).
+  """
+  def update_message_meta(message_id, fun) do
+    case Repo.get(Message, message_id) do
+      nil ->
+        nil
+
+      message ->
+        message = message |> Ecto.Changeset.change(meta: fun.(message.meta)) |> Repo.update!()
+        broadcast("run:#{message.run_id}", {:message, message})
+        message
+    end
+  end
+
   def post(%Run{} = run, role, body, opts \\ []) do
     message =
       Repo.insert!(%Message{

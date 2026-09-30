@@ -599,6 +599,11 @@ defmodule FactoryWeb.ChatParts do
       <p :if={@message.meta["unclear"]} class="mt-2 text-sm text-base-content/55">
         Answer below, and I'll make the tasks.
       </p>
+      <.elicitation
+        :if={@message.meta["elicitation"]}
+        id={"elicitation-#{@message.id}"}
+        message={@message}
+      />
       <.question_form
         :if={answerable?(@message, @run)}
         id={"answers-#{@message.id}"}
@@ -642,6 +647,135 @@ defmodule FactoryWeb.ChatParts do
     </div>
     """
   end
+
+  attr :id, :string, required: true
+  attr :message, :map, required: true
+
+  # A question a tool asks mid-turn (MCP elicitation, `Factory.Kiro.Session`): a form
+  # from its schema while it's open (the agent waits), then what was answered.
+  def elicitation(assigns) do
+    e = assigns.message.meta["elicitation"]
+    schema = e["schema"] || %{}
+    required = schema["required"] || []
+
+    fields =
+      for {name, prop} <- schema["properties"] || %{} do
+        %{
+          name: name,
+          label: prop["title"] || prop["description"] || humanize(name),
+          hint: if(prop["title"], do: prop["description"]),
+          type: prop["type"],
+          options: prop["enum"],
+          labels: prop["enumNames"] || prop["enum"],
+          default: prop["default"],
+          required: name in required
+        }
+      end
+
+    assigns = assign(assigns, e: e, fields: fields)
+
+    ~H"""
+    <form
+      :if={@e["status"] == "open"}
+      id={@id}
+      phx-submit="elicit_answer"
+      class="mt-3 space-y-3 rounded-2xl border border-primary/30 bg-primary/5 p-3"
+    >
+      <input type="hidden" name="key" value={@e["key"]} />
+      <input type="hidden" name="agent_id" value={@message.meta["agent_id"]} />
+      <p class="text-xs font-medium text-primary">
+        <.icon name="hero-hand-raised-mini" class="size-4" /> {@message.author} is waiting for your answer
+      </p>
+      <fieldset :for={f <- @fields}>
+        <legend class="mb-1.5 text-sm">{f.label}</legend>
+        <p :if={f.hint} class="-mt-1 mb-1.5 text-xs text-base-content/55">{f.hint}</p>
+        <%= cond do %>
+          <% f.options -> %>
+            <div class="flex flex-wrap gap-1.5">
+              <label
+                :for={{option, label} <- Enum.zip(f.options, f.labels)}
+                class="cursor-pointer rounded-full border border-base-content/15 px-3 py-1 text-[13px] transition-colors hover:border-primary/50 has-[input:checked]:border-primary has-[input:checked]:bg-primary/12 has-[input:checked]:text-primary"
+              >
+                <input
+                  type="radio"
+                  name={"fields[#{f.name}]"}
+                  value={option}
+                  checked={option == (f.default || hd(f.options))}
+                  class="sr-only"
+                />
+                {label}
+              </label>
+            </div>
+          <% f.type == "boolean" -> %>
+            <div class="flex gap-1.5">
+              <label
+                :for={{value, label} <- [{"true", "Yes"}, {"false", "No"}]}
+                class="cursor-pointer rounded-full border border-base-content/15 px-3 py-1 text-[13px] transition-colors hover:border-primary/50 has-[input:checked]:border-primary has-[input:checked]:bg-primary/12 has-[input:checked]:text-primary"
+              >
+                <input
+                  type="radio"
+                  name={"fields[#{f.name}]"}
+                  value={value}
+                  checked={value == to_string(f.default == true)}
+                  class="sr-only"
+                />
+                {label}
+              </label>
+            </div>
+          <% true -> %>
+            <input
+              type={if f.type in ["number", "integer"], do: "number", else: "text"}
+              name={"fields[#{f.name}]"}
+              value={f.default}
+              required={f.required}
+              class="w-full rounded-lg border border-base-content/15 bg-base-100 px-3 py-1.5 text-sm outline-none focus:border-primary"
+            />
+        <% end %>
+      </fieldset>
+      <div class="flex items-center gap-2 pt-1">
+        <button
+          type="submit"
+          name="action"
+          value="accept"
+          class="rounded-full bg-primary px-3.5 py-1.5 text-[13px] font-medium text-primary-content transition-opacity hover:opacity-90"
+        >
+          Send
+        </button>
+        <button
+          type="submit"
+          name="action"
+          value="decline"
+          formnovalidate
+          class="rounded-full px-3 py-1.5 text-[13px] text-base-content/60 transition-colors hover:bg-base-content/[0.06] hover:text-base-content"
+        >
+          Decline
+        </button>
+      </div>
+    </form>
+    <p
+      :if={@e["status"] != "open"}
+      id={@id}
+      class="mt-2 text-xs text-base-content/55"
+    >
+      <%= case @e["status"] do %>
+        <% "answered" -> %>
+          <.icon name="hero-check-mini" class="size-4 text-success" />
+          You answered: {answer_text(@e["answer"])}
+        <% "declined" -> %>
+          You declined to answer.
+        <% _ -> %>
+          No longer waiting: the turn ended before an answer.
+      <% end %>
+    </p>
+    """
+  end
+
+  defp answer_text(answer) when is_map(answer),
+    do: Enum.map_join(answer, ", ", fn {k, v} -> "#{humanize(k)}: #{v}" end)
+
+  defp answer_text(_), do: ""
+
+  defp humanize(name), do: name |> to_string() |> String.replace("_", " ") |> String.capitalize()
 
   # A planner's questions with options can be answered by picking, while the run is
   # still being planned.

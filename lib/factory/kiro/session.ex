@@ -75,6 +75,14 @@ defmodule Factory.Kiro.Session do
   def prompt(pid, agent, run_id, text, opts \\ []),
     do: GenServer.call(pid, {:prompt, agent, run_id, text, opts})
 
+  @doc """
+  The person's answer to a tool's question (MCP elicitation): `action` is "accept" (with
+  `content`, the form's values), "decline" or "cancel". `{:error, :gone}` when the
+  question is no longer open.
+  """
+  def answer_elicitation(pid, key, action, content \\ %{}),
+    do: GenServer.call(pid, {:elicitation, key, action, content})
+
   @doc "The run step the session is answering, for `Factory.RunTools`: `%{run_id:, step:}` or nil."
   def current_step(pid), do: GenServer.call(pid, :current_step)
 
@@ -128,7 +136,10 @@ defmodule Factory.Kiro.Session do
     # the compacted conversation, to go in front of the next message
     carry: nil,
     # the chat of the latest turn, where a compaction is noted when no other is given
-    last_run: nil
+    last_run: nil,
+    # questions a tool is asking the person mid-turn (MCP elicitation), by key:
+    # %{rpc: Kiro's request id, message_id:, run_id:}
+    elicitations: %{}
   ]
 
   # A message waiting to be sent: who, where the reply goes, what they said.
@@ -257,6 +268,31 @@ defmodule Factory.Kiro.Session do
 
   def handle_call(:current_turn, _from, state), do: {:reply, nil, state}
 
+  def handle_call({:elicitation, key, action, content}, _from, state) do
+    case Map.pop(state.elicitations, key) do
+      {nil, _} ->
+        {:reply, {:error, :gone}, state}
+
+      {entry, rest} ->
+        result =
+          if action == "accept",
+            do: %{action: "accept", content: content},
+            else: %{action: action}
+
+        reply(state, entry.rpc, result)
+        status = if action == "accept", do: "answered", else: "declined"
+
+        Runs.update_message_meta(entry.message_id, fn meta ->
+          meta
+          |> put_in(["elicitation", "status"], status)
+          |> put_in(["elicitation", "answer"], if(action == "accept", do: content))
+        end)
+
+        if state.turn, do: Agents.set_activity(state.turn.agent.id, "running", "Carrying on")
+        {:reply, :ok, %{state | elicitations: rest}}
+    end
+  end
+
   def handle_call(:idle?, _from, state),
     do:
       {:reply, state.ready and state.turn == nil and state.switching == nil and state.queue == [],
@@ -340,6 +376,7 @@ defmodule Factory.Kiro.Session do
 
   @impl true
   def terminate(reason, state) do
+    close_elicitations(state)
     cancel_requests(state)
     close_port(state.port)
     Agents.notify_changed()
@@ -453,6 +490,41 @@ defmodule Factory.Kiro.Session do
       state
       |> update_turn(fn turn -> %{turn | denied: turn.denied ++ [title]} end)
       |> track_tool(Map.put(params["toolCall"] || %{}, "status", "denied"))
+    end
+  end
+
+  # A tool (over MCP) asks the person something mid-turn: the question goes to the chat
+  # as a form, and the answer back to Kiro (`answer_elicitation/5`). Kiro waits.
+  defp handle_message(
+         %{"id" => id, "method" => "_kiro/mcp/elicitation", "params" => params},
+         state
+       ) do
+    elicitation = params["elicitation"] || %{}
+    run = state.turn && Runs.get_run(state.turn.run_id)
+
+    if run == nil or elicitation["mode"] not in [nil, "form"] do
+      reply(state, id, %{action: "cancel"})
+      state
+    else
+      agent = state.turn.agent
+      key = Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
+
+      message =
+        Runs.post(run, "factory", elicitation["message"] || "A question for you.",
+          author: agent.name,
+          meta: %{
+            "agent_id" => agent.id,
+            "elicitation" => %{
+              "key" => key,
+              "schema" => elicitation["requestedSchema"] || %{},
+              "status" => "open"
+            }
+          }
+        )
+
+      Agents.set_activity(agent.id, "waiting", "Waiting for your answer")
+      entry = %{rpc: id, message_id: message.id, run_id: run.id}
+      %{state | elicitations: Map.put(state.elicitations, key, entry)}
     end
   end
 
@@ -633,6 +705,7 @@ defmodule Factory.Kiro.Session do
   end
 
   defp restart(state) do
+    state = close_elicitations(state)
     cancel_requests(state)
     close_port(state.port)
 
@@ -889,6 +962,7 @@ defmodule Factory.Kiro.Session do
   defp finish_turn(%{turn: nil} = state, _error, _stop_reason), do: state
 
   defp finish_turn(%{turn: turn} = state, error, stop_reason) do
+    state = close_elicitations(state)
     {request, pending} = Map.pop(state.pending, turn.request_id)
     if request, do: Process.cancel_timer(request.timer)
     state = %{state | pending: pending}
@@ -1042,6 +1116,23 @@ defmodule Factory.Kiro.Session do
     fun.(update)
   rescue
     e -> Logger.warning("A Kiro tool callback failed: #{Exception.message(e)}")
+  end
+
+  # Questions still open when the turn ends: Kiro is told they were cancelled, and the
+  # chat shows them as expired.
+  defp close_elicitations(%{elicitations: open} = state) when map_size(open) == 0, do: state
+
+  defp close_elicitations(state) do
+    for {_key, entry} <- state.elicitations do
+      reply(state, entry.rpc, %{action: "cancel"})
+
+      Runs.update_message_meta(
+        entry.message_id,
+        &put_in(&1, ["elicitation", "status"], "expired")
+      )
+    end
+
+    %{state | elicitations: %{}}
   end
 
   # Whoever waits for a job (a run step) hears how it ended.

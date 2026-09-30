@@ -296,6 +296,42 @@ defmodule Factory.PlanTools do
   """
   def call_in_turn(run_id, agent, name, args, planning \\ nil)
 
+  # In a session the person can be asked now, mid-turn (MCP elicitation, through
+  # `FactoryWeb.MCP` and the chat): `{:elicit, request, then}`. `then` gets the answer
+  # (`%{"action" => …, "content" => …}`); without one, the questions are shown after
+  # the turn as before, or left for the reply.
+  def call_in_turn(run_id, agent, "ask_user", args, planning) when is_map(args) do
+    questions = questions(args)
+
+    check =
+      Runs.with_locked_run(run_id, fn run ->
+        planner = Factory.Chat.planner_for(run)
+
+        cond do
+          run.status == "cancelled" ->
+            {:error, "This run was cancelled. End your turn."}
+
+          planner == nil or planner.id != agent.id ->
+            {:error, "Only the run's planner asks about its plan."}
+
+          planning != nil and
+              (run.status != "draft" or run.planner_generation != planning.generation) ->
+            {:error,
+             "This plan was replaced by a newer request or the run has started. Stop and end your turn."}
+
+          true ->
+            {:ok, :asking}
+        end
+      end)
+
+    case {questions, check} do
+      {[], _} -> {:error, "Ask at least one question."}
+      {_, {:error, text}} when is_binary(text) -> {:error, text}
+      {_, {:error, _}} -> {:error, "This chat no longer exists. End your turn."}
+      _ -> {:elicit, elicitation(questions), &after_answer(&1, questions, planning)}
+    end
+  end
+
   def call_in_turn(run_id, agent, name, args, planning) when is_map(args) do
     with true <- Enum.any?(@tools, &(&1.name == name)) || {:error, "There's no tool #{name}."} do
       result =
@@ -352,6 +388,46 @@ defmodule Factory.PlanTools do
 
   def call_in_turn(_run_id, _agent, _name, _args, _planning),
     do: {:error, "The arguments must be an object."}
+
+  # The questions as an MCP elicitation form: one field each, a choice when it has options.
+  defp elicitation(questions) do
+    properties =
+      for {q, i} <- Enum.with_index(questions, 1), into: %{} do
+        field = %{type: "string", title: q["question"]}
+        field = if q["options"] != [], do: Map.put(field, :enum, q["options"]), else: field
+        {"answer_#{i}", field}
+      end
+
+    %{
+      message:
+        if(length(questions) == 1,
+          do: "A question before I go on:",
+          else: "#{length(questions)} questions before I go on:"
+        ),
+      schema: %{type: "object", properties: properties, required: Map.keys(properties)}
+    }
+  end
+
+  defp after_answer(%{"action" => "accept", "content" => content}, questions, _planning)
+       when is_map(content) do
+    answers =
+      for {q, i} <- Enum.with_index(questions, 1),
+          answer = content["answer_#{i}"],
+          do: "- #{q["question"]} #{answer}"
+
+    {:ok, "The person answered:\n" <> Enum.join(answers, "\n") <> "\nCarry on with that."}
+  end
+
+  # Not answered now: a draft's planner shows them after the turn (`Factory.ChatPlanner`).
+  defp after_answer(_answer, questions, %{generation: g, notify: pid}) do
+    send(pid, {:plan_tools, g, {:questions, questions}})
+
+    {:ok,
+     "They didn't answer now; the questions are shown when your turn ends. End it now with a short message."}
+  end
+
+  defp after_answer(_answer, _questions, nil),
+    do: {:ok, "They didn't answer now. Ask the questions in your reply and end your turn."}
 
   # Before the start the spec change carries over to the run by itself
   # (`Factory.Specs.update_spec/2`); after it, the run's tasks follow here.
@@ -468,13 +544,7 @@ defmodule Factory.PlanTools do
   end
 
   defp apply_tool("ask_user", args, _run) do
-    questions =
-      for q <- List.wrap(args["questions"]),
-          is_map(q),
-          question = text(q["question"]),
-          question != "" do
-        %{"question" => question, "options" => q["options"] |> lines() |> Enum.take(4)}
-      end
+    questions = questions(args)
 
     if questions == [],
       do: {:error, "Ask at least one question."},
@@ -482,6 +552,16 @@ defmodule Factory.PlanTools do
         {:ok,
          {{:questions, Enum.take(questions, 5)},
           "They'll be shown when your turn ends. End it now with a short message."}}
+  end
+
+  defp questions(args) do
+    for q <- List.wrap(args["questions"]),
+        is_map(q),
+        question = text(q["question"]),
+        question != "" do
+      %{"question" => question, "options" => q["options"] |> lines() |> Enum.take(4)}
+    end
+    |> Enum.take(5)
   end
 
   defp write(spec, attrs, done) do

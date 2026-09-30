@@ -357,6 +357,18 @@ defmodule FactoryWeb.ChatLive do
     end
   end
 
+  # The answer to a question a tool asked mid-turn: back to that agent's Kiro session.
+  def handle_event("elicit_answer", %{"key" => key, "agent_id" => agent_id} = params, socket) do
+    action = if params["action"] == "decline", do: "decline", else: "accept"
+    agent = Agents.get_agent(agent_id)
+    content = if action == "accept", do: typed(params["fields"] || %{}, key, socket), else: %{}
+
+    case agent && Kiro.answer_elicitation(agent, key, action, content) do
+      :ok -> {:noreply, socket}
+      _ -> {:noreply, put_flash(socket, :error, "That question is no longer open.")}
+    end
+  end
+
   def handle_event("use_command", %{"cmd" => cmd}, socket) do
     {:noreply,
      socket |> assign(draft: cmd <> " ") |> push_event("chat:fill", %{text: cmd <> " "})}
@@ -391,6 +403,33 @@ defmodule FactoryWeb.ChatLive do
   end
 
   def handle_event(_flow_event, _params, socket), do: {:noreply, socket}
+
+  # Form values typed as the question's schema asks: numbers and yes/no as such.
+  defp typed(fields, key, socket) do
+    schema =
+      with %{} = run <- socket.assigns.run,
+           %Message{} = m <-
+             Repo.one(
+               from m in Message,
+                 where:
+                   m.run_id == ^run.id and fragment("?->'elicitation'->>'key'", m.meta) == ^key,
+                 limit: 1
+             ) do
+        get_in(m.meta, ["elicitation", "schema", "properties"]) || %{}
+      else
+        _ -> %{}
+      end
+
+    Map.new(fields, fn {name, value} ->
+      {name,
+       case {get_in(schema, [name, "type"]), value} do
+         {"boolean", v} -> v == "true"
+         {"integer", v} -> with {n, _} <- Integer.parse(v), do: n, else: (_ -> v)
+         {"number", v} -> with {n, _} <- Float.parse(v), do: n, else: (_ -> v)
+         {_, v} -> v
+       end}
+    end)
+  end
 
   defp compact_flash(socket, agent, :ok),
     do: put_flash(socket, :info, "Compacted #{agent.name}'s conversation.")

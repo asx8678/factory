@@ -181,6 +181,19 @@ defmodule Factory.Kiro do
     end
   end
 
+  @doc """
+  The person's answer to a question a tool asked `agent` mid-turn (see
+  `Factory.Kiro.Session.answer_elicitation/4`). `{:error, :gone}` when it's closed.
+  """
+  def answer_elicitation(agent, key, action, content \\ %{}) do
+    case whereis(session_key(agent)) do
+      nil -> {:error, :gone}
+      pid -> Session.answer_elicitation(pid, key, action, content)
+    end
+  catch
+    :exit, _ -> {:error, :gone}
+  end
+
   @doc "Sends the agent's prompt again before its next message, e.g. after it was edited."
   def forget(agent) do
     if pid = whereis(session_key(agent)), do: Session.forget(pid, agent.id)
