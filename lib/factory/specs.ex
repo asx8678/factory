@@ -887,6 +887,64 @@ defmodule Factory.Specs do
     end
   end
 
+  # Changing a plan from the chat, while its run is still being planned. The chat's
+  # planner writes the tasks without the Spec page's step order (Factory.PlanTools),
+  # and so do these; only an approved tasks step is closed to them.
+
+  @doc """
+  Changes task `index` of a plan being made in the chat: its title, details (one per
+  line) and requirements (comma separated). `{:error, :locked}` once the tasks step is
+  approved on the Spec page.
+  """
+  def edit_plan_task(%SpecDoc{} = spec, index, %{} = params) do
+    title = params |> Map.get("title", "") |> to_string() |> String.trim()
+
+    details =
+      params |> Map.get("details", "") |> to_string() |> String.split(~r/\R/u) |> clean_lines()
+
+    requirements =
+      params |> Map.get("requirements", "") |> to_string() |> String.split(",") |> clean_lines()
+
+    {preamble, blocks} = Spec.blocks(spec.tasks)
+
+    cond do
+      SpecDoc.approved?(spec, "tasks") ->
+        {:error, :locked}
+
+      title == "" ->
+        {:error, :blank_title}
+
+      Enum.at(blocks, index) == nil ->
+        {:error, :not_found}
+
+      true ->
+        blocks = List.update_at(blocks, index, &Spec.edit_block(&1, title, details, requirements))
+        update_spec(spec, %{tasks: Spec.render_blocks(preamble, blocks)})
+    end
+  end
+
+  @doc "Removes task `index` from a plan being made in the chat, like `edit_plan_task/3`."
+  def remove_plan_task(%SpecDoc{} = spec, index) do
+    {preamble, blocks} = Spec.blocks(spec.tasks)
+
+    cond do
+      SpecDoc.approved?(spec, "tasks") ->
+        {:error, :locked}
+
+      Enum.at(blocks, index) == nil ->
+        {:error, :not_found}
+
+      true ->
+        kept = List.delete_at(blocks, index)
+        tasks = if kept == [], do: "", else: Spec.render_blocks(preamble, kept)
+
+        with {:ok, spec} <- update_spec(spec, %{tasks: tasks}) do
+          titles = Enum.map(kept, & &1.title)
+          set_queue(spec, Enum.filter(spec.queue, &(&1 in titles)))
+        end
+    end
+  end
+
   @doc "Adds tasks (by title) to the end of the queue; ones already queued stay put."
   def queue_tasks(%SpecDoc{} = spec, titles),
     do: set_queue(spec, spec.queue ++ Enum.reject(titles, &(&1 in spec.queue)))

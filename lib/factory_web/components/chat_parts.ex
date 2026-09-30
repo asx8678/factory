@@ -756,49 +756,27 @@ defmodule FactoryWeb.ChatParts do
   attr :startable, :boolean, required: true
 
   # The planner's tasks, and the question whether to build them.
+  # What a planner reply created, in short: the tasks themselves are in the plan below
+  # the conversation while it's being made (FactoryWeb.PlanPanel), so this opens on click.
   defp plan_card(assigns) do
     ~H"""
-    <div id={@id} class="task-card-active mt-3 rounded-xl border p-4">
-      <p class="flex items-center gap-2 text-xs font-medium text-base-content/55">
-        <.icon name="hero-clipboard-document-list-mini" class="size-4 text-primary" />
+    <details id={@id} class="group mt-2 rounded-lg border border-base-content/10 text-sm">
+      <summary class="flex cursor-pointer list-none items-center gap-2 px-3 py-1.5 text-xs text-base-content/60 hover:text-base-content [&::-webkit-details-marker]:hidden">
+        <.icon name="hero-clipboard-document-list-micro" class="size-3.5 text-primary" />
         Created {length(@tasks)} {if length(@tasks) == 1, do: "task", else: "tasks"}
-      </p>
-      <ol class="mt-3 space-y-1.5">
-        <li :for={{title, i} <- Enum.with_index(@tasks, 1)} class="flex gap-3 text-sm">
-          <span class="w-5 shrink-0 text-right tabular-nums text-base-content/45">{i}.</span>
+        <span :if={@startable} class="text-base-content/45">· the plan is below</span>
+        <.icon
+          name="hero-chevron-down-micro"
+          class="ml-auto size-3.5 transition-transform group-open:rotate-180"
+        />
+      </summary>
+      <ol class="space-y-1 border-t border-base-content/10 px-3 py-2">
+        <li :for={{title, i} <- Enum.with_index(@tasks, 1)} class="flex gap-2.5">
+          <span class="w-4 shrink-0 text-right text-xs tabular-nums text-base-content/40">{i}</span>
           <span>{title}</span>
         </li>
       </ol>
-      <p
-        :if={@spec_hint && @startable}
-        class="mt-3 flex items-center gap-2 text-xs text-base-content/55"
-      >
-        <.icon name="hero-document-plus-mini" class="size-4" />
-        Have a spec or requirements? Add them in Specs above and I'll plan again. Or go on without.
-      </p>
-      <div
-        :if={@startable}
-        class="mt-4 flex flex-wrap items-center gap-3 border-t border-base-content/10 pt-4"
-      >
-        <span class="mr-auto text-sm font-medium">Do you want to implement these changes?</span>
-        <button
-          type="button"
-          phx-click={JS.focus(to: "#chat-input")}
-          class="btn btn-ghost btn-sm"
-        >
-          Keep refining
-        </button>
-        <button
-          id={"implement-#{@id}"}
-          type="button"
-          phx-click="action"
-          phx-value-action="start"
-          class="btn btn-primary btn-sm"
-        >
-          <.icon name="hero-play-mini" class="size-4" /> Yes, implement
-        </button>
-      </div>
-    </div>
+    </details>
     """
   end
 

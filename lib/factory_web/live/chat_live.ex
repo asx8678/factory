@@ -1,7 +1,7 @@
 defmodule FactoryWeb.ChatLive do
   use FactoryWeb, :live_view
   import Ecto.Query, only: [from: 2]
-  alias Factory.{Agents, Chat, Engine, FileBrowser, Kiro, Runs, Workflows}
+  alias Factory.{Agents, Chat, Engine, FileBrowser, Kiro, Runs, Specs, Workflows}
   alias Factory.Repo
   alias Factory.Runs.Message
   import FactoryWeb.ChatParts
@@ -28,6 +28,13 @@ defmodule FactoryWeb.ChatLive do
      |> assign(workflows: Workflows.list(), browser: nil, folder_warn: false, to: nil)
      |> assign(pick: Workflows.picked())
      |> assign(base_ids: [])
+     |> assign(
+       plan_spec: nil,
+       plan_sub: nil,
+       plan_editing: nil,
+       plan_asking: nil,
+       plan_improve: %{}
+     )
      |> set_dir("")
      |> load_agents()
      |> assign(form: to_form(%{"body" => ""}, as: :chat))
@@ -49,6 +56,7 @@ defmodule FactoryWeb.ChatLive do
          |> FactoryWeb.UsageMeter.scope(:today)
          |> assign(run: nil, pick: Workflows.picked())
          |> assign(base_ids: [])
+         |> load_plan()
          |> set_dir("")
          |> load_agents()
          |> assign(page_title: (focus && focus.name) || "Chat", run: nil, focus: focus, count: 0)
@@ -75,7 +83,8 @@ defmodule FactoryWeb.ChatLive do
              |> assign(base_ids: run.settings["base_spec_ids"] || [])
              |> load_agents()
              |> assign(page_title: run.title, run: run, focus: focus, streaming: %{})
-             |> load_messages()}
+             |> load_messages()
+             |> load_plan()}
         end
     end
   end
@@ -369,6 +378,67 @@ defmodule FactoryWeb.ChatLive do
     end
   end
 
+  # The plan being made (FactoryWeb.PlanPanel): each task edited, removed, or handed to
+  # Kiro to dig deeper or change as asked.
+
+  @dig_deeper "Dig deeper: read the code this task touches and make it concrete. Name the " <>
+                "exact files and functions it changes, list the steps in order, and say how " <>
+                "to check it works. Keep it one small change."
+
+  def handle_event("plan_edit", %{"i" => i}, socket),
+    do: {:noreply, assign(socket, plan_editing: String.to_integer(i), plan_asking: nil)}
+
+  def handle_event("plan_edit_cancel", _, socket),
+    do: {:noreply, assign(socket, plan_editing: nil)}
+
+  def handle_event("plan_save", %{"i" => i, "task" => params}, socket) do
+    socket
+    |> assign(plan_editing: nil)
+    |> plan_changed(Specs.edit_plan_task(plan_spec(socket), String.to_integer(i), params))
+  end
+
+  def handle_event("plan_remove", %{"i" => i}, socket) do
+    socket
+    |> assign(plan_editing: nil, plan_asking: nil)
+    |> plan_changed(Specs.remove_plan_task(plan_spec(socket), String.to_integer(i)))
+  end
+
+  def handle_event("plan_deeper", %{"i" => i}, socket),
+    do: {:noreply, ask_kiro(socket, String.to_integer(i), @dig_deeper)}
+
+  def handle_event("plan_ask_open", %{"i" => ""}, socket),
+    do: {:noreply, assign(socket, plan_asking: nil)}
+
+  def handle_event("plan_ask_open", %{"i" => i}, socket) do
+    task = socket |> plan_tasks() |> Enum.at(String.to_integer(i))
+    {:noreply, assign(socket, plan_asking: task && task.title, plan_editing: nil)}
+  end
+
+  def handle_event("plan_ask", %{"i" => i, "instruction" => instruction}, socket) do
+    {:noreply, socket |> assign(plan_asking: nil) |> ask_kiro(String.to_integer(i), instruction)}
+  end
+
+  # Kiro's version replaces the task.
+  def handle_event("plan_use", %{"title" => title}, socket) do
+    with %{status: :done, suggestion: s} <- socket.assigns.plan_improve[title],
+         i when is_integer(i) <- Enum.find_index(plan_tasks(socket), &(&1.title == title)) do
+      params = %{
+        "title" => s.title,
+        "details" => Enum.join(s.details, "\n"),
+        "requirements" => Enum.join(s.requirements, ", ")
+      }
+
+      socket
+      |> update(:plan_improve, &Map.delete(&1, title))
+      |> plan_changed(Specs.edit_plan_task(plan_spec(socket), i, params))
+    else
+      _ -> {:noreply, update(socket, :plan_improve, &Map.delete(&1, title))}
+    end
+  end
+
+  def handle_event("plan_discard", %{"title" => title}, socket),
+    do: {:noreply, update(socket, :plan_improve, &Map.delete(&1, title))}
+
   def handle_event("use_command", %{"cmd" => cmd}, socket) do
     {:noreply,
      socket |> assign(draft: cmd <> " ") |> push_event("chat:fill", %{text: cmd <> " "})}
@@ -430,6 +500,76 @@ defmodule FactoryWeb.ChatLive do
        end}
     end)
   end
+
+  # The run's spec, where its plan lives; followed while the chat is open, so Kiro's
+  # work on a task and every change to the plan show here.
+  defp load_plan(socket) do
+    run = socket.assigns.run
+    spec = run && run.spec_id && Specs.get_spec(run.spec_id)
+    old = socket.assigns.plan_sub
+
+    if connected?(socket) and old != (spec && spec.id) do
+      if old, do: Phoenix.PubSub.unsubscribe(Factory.PubSub, "spec:#{old}")
+      if spec, do: Specs.subscribe(spec.id)
+    end
+
+    assign(socket,
+      plan_spec: spec,
+      plan_sub: spec && spec.id,
+      plan_editing: nil,
+      plan_asking: nil,
+      plan_improve: %{}
+    )
+  end
+
+  defp plan_spec(socket),
+    do: socket.assigns.plan_spec && Specs.get_spec(socket.assigns.plan_spec.id)
+
+  defp plan_tasks(%{assigns: %{plan_spec: nil}}), do: []
+
+  defp plan_tasks(%{assigns: %{plan_spec: spec}}),
+    do: spec.tasks |> Kernel.||("") |> Factory.Spec.blocks() |> elem(1)
+
+  defp plan_changed(socket, {:ok, spec}), do: {:noreply, assign(socket, plan_spec: spec)}
+
+  defp plan_changed(socket, {:error, :locked}),
+    do:
+      {:noreply,
+       put_flash(
+         socket,
+         :error,
+         "The tasks are approved on the Spec page: reopen them there to change them."
+       )}
+
+  defp plan_changed(socket, {:error, :blank_title}),
+    do: {:noreply, put_flash(socket, :error, "A task needs a title.")}
+
+  defp plan_changed(socket, _error),
+    do: {:noreply, put_flash(socket, :error, "That task changed meanwhile. Try again.")}
+
+  defp ask_kiro(socket, i, instruction) do
+    with %{} = spec <- plan_spec(socket),
+         {:ok, title} <- Specs.improve_task(spec, i, instruction) do
+      entry = %{status: :thinking, activity: nil, suggestion: nil, error: nil}
+      update(socket, :plan_improve, &Map.put(&1, title, entry))
+    else
+      _ -> put_flash(socket, :error, "That task changed meanwhile. Try again.")
+    end
+  end
+
+  # The plan panel shows while the run is being planned, in the All view, once there are
+  # tasks, and not while the planner is rewriting them.
+  defp show_plan?(assigns) do
+    run = assigns.run
+
+    run != nil and run.status == "draft" and assigns.focus == nil and
+      assigns.plan_spec != nil and run.tasks != [] and
+      not (assigns.planner != nil and Map.has_key?(assigns.streaming, assigns.planner.id))
+  end
+
+  # No base specs and no requirements of its own: offer to add some.
+  defp plan_spec_hint?(assigns),
+    do: assigns.base_ids == [] and String.trim(assigns.plan_spec.requirements || "") == ""
 
   defp compact_flash(socket, agent, :ok),
     do: put_flash(socket, :info, "Compacted #{agent.name}'s conversation.")
@@ -508,6 +648,35 @@ defmodule FactoryWeb.ChatLive do
 
   # The run list changes with every progress write of every run; reload it once per
   # short while rather than once per write.
+  # The run's spec (FactoryWeb.PlanPanel): the plan changed, or Kiro is working on a task.
+  def handle_info({:spec_updated, %{id: id} = spec}, %{assigns: %{plan_sub: id}} = socket),
+    do: {:noreply, assign(socket, plan_spec: spec)}
+
+  def handle_info({:task_activity, title, text}, socket) do
+    {:noreply,
+     update(socket, :plan_improve, fn improve ->
+       if improve[title], do: put_in(improve, [title, :activity], text), else: improve
+     end)}
+  end
+
+  def handle_info({:task_improved, title, result}, socket) do
+    {:noreply,
+     update(socket, :plan_improve, fn improve ->
+       case {improve[title], result} do
+         {nil, _} -> improve
+         {e, {:ok, s}} -> Map.put(improve, title, %{e | status: :done, suggestion: s})
+         {e, {:error, why}} -> Map.put(improve, title, %{e | status: :error, error: why})
+       end
+     end)}
+  end
+
+  # The spec's other news is for the Spec page.
+  def handle_info({event, _}, socket) when event in [:spec_updated, :plan_activity],
+    do: {:noreply, socket}
+
+  def handle_info({event, _, _}, socket) when event in [:draft_activity, :task_drafted],
+    do: {:noreply, socket}
+
   def handle_info({:runs_changed}, socket) do
     if socket.assigns[:runs_reload] do
       {:noreply, socket}
@@ -560,6 +729,8 @@ defmodule FactoryWeb.ChatLive do
            Enum.map(old.tasks, & &1.title) != Enum.map(run.tasks, & &1.title))
 
     socket = assign(socket, run: run, page_title: run.title)
+    # A draft's spec is made when planning starts: follow it from then on.
+    socket = if run.spec_id != socket.assigns.plan_sub, do: load_plan(socket), else: socket
     {:noreply, if(changed, do: refresh_messages(socket), else: socket)}
   end
 
@@ -689,6 +860,16 @@ defmodule FactoryWeb.ChatLive do
                 run={@run}
                 agents={@agents}
                 focus={@focus}
+              />
+            </div>
+            <div :if={show_plan?(assigns)} class="mx-auto max-w-3xl px-5 pt-5">
+              <FactoryWeb.PlanPanel.panel
+                run={@run}
+                tasks={plan_tasks(%{assigns: assigns})}
+                editing={@plan_editing}
+                asking={@plan_asking}
+                improve={@plan_improve}
+                spec_hint={plan_spec_hint?(assigns)}
               />
             </div>
             <div :if={@live != []} class="mx-auto flex max-w-3xl flex-col gap-5 px-5 pt-5">
