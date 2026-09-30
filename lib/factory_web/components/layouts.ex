@@ -71,13 +71,13 @@ defmodule FactoryWeb.Layouts do
           <svg viewBox="0 0 20 20" class="size-5" aria-hidden="true">
             <path
               d="M10 4 L4 15 M10 4 L16 15 M4 15 L16 15"
-              class="stroke-primary"
+              class="stroke-base-content"
               stroke-width="1.5"
               fill="none"
             />
-            <circle cx="10" cy="4" r="2.6" class="fill-primary" />
-            <circle cx="4" cy="15" r="2.6" class="fill-primary" />
-            <circle cx="16" cy="15" r="2.6" class="fill-primary" />
+            <circle cx="10" cy="4" r="2.6" class="fill-base-content" />
+            <circle cx="4" cy="15" r="2.6" class="fill-base-content" />
+            <circle cx="16" cy="15" r="2.6" class="fill-base-content" />
           </svg>
           Factory
         </.link>
@@ -90,7 +90,7 @@ defmodule FactoryWeb.Layouts do
             class={[
               "flex items-center whitespace-nowrap border-b-2 px-2.5 text-[13px] transition-colors",
               if(@active == key,
-                do: "border-primary text-base-content font-medium",
+                do: "border-base-content text-base-content font-medium",
                 else: "border-transparent text-base-content/55 hover:text-base-content"
               )
             ]}
@@ -140,7 +140,7 @@ defmodule FactoryWeb.Layouts do
     <div
       id="kiro-signed-out"
       role="status"
-      class="flex items-center gap-2 rounded-full border border-warning/40 bg-warning/10 py-0.5 pr-1 pl-2.5 text-xs text-base-content/80"
+      class="flex items-center gap-2 rounded-full border border-base-300 bg-base-200/70 py-0.5 pr-1 pl-2.5 text-xs text-base-content/80"
     >
       <.icon name="hero-exclamation-triangle-mini" class="size-4 shrink-0 text-warning" />
       <span class="whitespace-nowrap">
@@ -153,7 +153,7 @@ defmodule FactoryWeb.Layouts do
         type="button"
         phx-click="kiro_check"
         disabled={@checking}
-        class="rounded-full bg-base-100 px-2 py-0.5 font-medium text-base-content/75 shadow-sm transition-colors hover:text-base-content disabled:opacity-60"
+        class="rounded-full border border-base-300 bg-base-100 px-2 py-0.5 font-medium text-base-content/80 transition-colors hover:border-base-content/25 hover:text-base-content disabled:opacity-60"
       >
         {if @checking, do: "Checking…", else: "Check again"}
       </button>
@@ -170,7 +170,7 @@ defmodule FactoryWeb.Layouts do
     <div
       id="kiro-limited"
       role="status"
-      class="flex items-center gap-2 rounded-full border border-warning/40 bg-warning/10 py-0.5 pr-1 pl-2.5 text-xs text-base-content/80"
+      class="flex items-center gap-2 rounded-full border border-base-300 bg-base-200/70 py-0.5 pr-1 pl-2.5 text-xs text-base-content/80"
     >
       <.icon name="hero-exclamation-triangle-mini" class="size-4 shrink-0 text-warning" />
       <span class="whitespace-nowrap">
@@ -182,7 +182,7 @@ defmodule FactoryWeb.Layouts do
         phx-click="kiro_limit_check"
         disabled={@checking}
         title="Asks Kiro for one word: free if it's still refused, a fraction of a credit if not"
-        class="rounded-full bg-base-100 px-2 py-0.5 font-medium text-base-content/75 shadow-sm transition-colors hover:text-base-content disabled:opacity-60"
+        class="rounded-full border border-base-300 bg-base-100 px-2 py-0.5 font-medium text-base-content/80 transition-colors hover:border-base-content/25 hover:text-base-content disabled:opacity-60"
       >
         {if @checking, do: "Checking…", else: "Check again"}
       </button>
@@ -203,7 +203,7 @@ defmodule FactoryWeb.Layouts do
     >
       <span class="text-base-content/45">{FactoryWeb.UsageMeter.label(@usage.scope)}</span>
       <span class="flex items-center gap-1">
-        <.icon name="hero-bolt-micro" class="size-3.5 text-warning/80" />
+        <.icon name="hero-bolt-micro" class="size-3.5 text-base-content/40" />
         {FactoryWeb.Usage.credits(@usage.credits)}
         <span :if={@usage[:limit]} id="usage-limit" class="text-base-content/40">
           / {FactoryWeb.Usage.credits(@usage.limit)}

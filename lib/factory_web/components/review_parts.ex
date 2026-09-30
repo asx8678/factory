@@ -344,7 +344,7 @@ defmodule FactoryWeb.ReviewParts do
           </span>
           <span
             :if={@pick[:latest]}
-            class="shrink-0 rounded bg-amber-400/15 px-1.5 text-[10.5px] font-medium text-amber-600 dark:text-amber-300"
+            class="shrink-0 rounded bg-warning/15 px-1.5 text-[10.5px] font-medium text-warning"
           >
             Latest changes
           </span>

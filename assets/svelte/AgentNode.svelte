@@ -142,7 +142,7 @@
       <div class="truncate text-[11px] opacity-55">{data.kiro ? data.model : "Not connected"}</div>
     </div>
     {#if data.kiro}
-      <span class="shrink-0 self-start rounded-md bg-primary/15 px-1.5 py-0.5 text-[11px] font-medium text-primary" title={data.shared ? "Talks in the shared Kiro session" : "Has its own Kiro session"}>{data.shared ? "Kiro · shared" : "Kiro"}</span>
+      <span class="shrink-0 self-start rounded-md bg-base-content/[0.06] px-1.5 py-0.5 text-[11px] font-medium text-base-content/60" title={data.shared ? "Talks in the shared Kiro session" : "Has its own Kiro session"}>{data.shared ? "Kiro · shared" : "Kiro"}</span>
     {/if}
   </div>
 
@@ -205,11 +205,11 @@
         type="button"
         title={data.has_context ? "Edit prompt" : "Add a prompt"}
         class={[
-          // Calm by default, yellow on hover.
+          // Calm, neutral; a dot says it has one.
           "nodrag nopan relative -mr-1 flex h-7 shrink-0 items-center gap-1 rounded-lg border px-2 font-medium transition-colors",
-          "hover:border-amber-400/50 hover:bg-amber-300/15 hover:text-amber-700 dark:hover:text-amber-200 [&:hover>.hero-document-text]:text-current",
+          "hover:border-base-content/25 hover:bg-base-content/[0.05] hover:text-base-content",
           data.has_context
-            ? "border-base-content/15 text-base-content/70 [&>.hero-document-text]:text-amber-600/70 dark:[&>.hero-document-text]:text-amber-200/60"
+            ? "border-base-content/15 text-base-content/70 [&>.hero-document-text]:text-base-content/60"
             : "border-base-content/10 text-base-content/45",
         ]}
         onclick={(e) => {
@@ -220,11 +220,11 @@
         <span class="hero-document-text size-4"></span>
         Prompt
         {#if data.has_context}
-          <span class="absolute -right-1 -top-1 size-1.5 rounded-full bg-amber-300/70 ring-2 ring-surface"></span>
+          <span class="absolute -right-1 -top-1 size-1.5 rounded-full bg-base-content/45 ring-2 ring-surface"></span>
         {/if}
       </button>
     {:else if data.has_context}
-      <span class="hero-document-text size-4 shrink-0 text-amber-600/80 dark:text-amber-200/70" title="Has a prompt"></span>
+      <span class="hero-document-text size-4 shrink-0 text-base-content/50" title="Has a prompt"></span>
     {/if}
   </div>
 </div>

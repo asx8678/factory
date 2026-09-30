@@ -58,7 +58,7 @@ defmodule FactoryWeb.WorkflowParts do
             :if={@dirty}
             class="flex shrink-0 items-center gap-1.5 text-xs text-base-content/50"
           >
-            <span class="size-1.5 rounded-full bg-amber-300/80"></span> Unsaved
+            <span class="size-1.5 rounded-full bg-warning"></span> Unsaved
           </span>
 
           <div class="ml-auto flex shrink-0 items-center gap-1.5">
@@ -278,28 +278,28 @@ defmodule FactoryWeb.WorkflowParts do
         <.icon
           :if={@workflow.key}
           name={type_icon(@workflow.key, :micro)}
-          class="size-4 shrink-0 text-primary"
+          class="size-4 shrink-0 text-base-content/60"
         />
         <h1 id="workflow-name" class="truncate text-[14px] font-semibold">{@workflow.name}</h1>
         <span
           :if={@workflow.key}
-          class="rounded bg-base-content/10 px-1.5 py-0.5 text-[11px] font-medium text-base-content/60"
+          class="rounded border border-base-300 px-1.5 py-0.5 text-[11px] font-medium text-base-content/60"
         >
           Standard
         </span>
         <span
           :if={@modified}
           id="workflow-modified"
-          class="rounded bg-warning/15 px-1.5 py-0.5 text-[11px] font-medium text-warning"
+          class="inline-flex items-center gap-1.5 rounded border border-base-300 px-1.5 py-0.5 text-[11px] font-medium text-base-content/70"
         >
-          Modified
+          <span class="size-1.5 rounded-full bg-warning"></span> Modified
         </span>
         <span
           :if={@workflow.current}
           title="Plain chats talk to this workflow's agents"
-          class="rounded bg-success/15 px-1.5 py-0.5 text-[11px] font-medium text-success"
+          class="inline-flex items-center gap-1.5 rounded border border-base-300 px-1.5 py-0.5 text-[11px] font-medium text-base-content/70"
         >
-          Used in chat
+          <span class="size-1.5 rounded-full bg-success"></span> Used in chat
         </span>
       </div>
 
@@ -392,7 +392,11 @@ defmodule FactoryWeb.WorkflowParts do
         @open && "bg-base-content/[0.06] font-medium"
       ]}
     >
-      <.icon :if={@w.key} name={type_icon(@w.key, :micro)} class="size-4 shrink-0 text-primary" />
+      <.icon
+        :if={@w.key}
+        name={type_icon(@w.key, :micro)}
+        class="size-4 shrink-0 text-base-content/60"
+      />
       <.icon :if={!@w.key} name="hero-squares-2x2-micro" class="size-4 shrink-0 text-base-content/45" />
       <span class="min-w-0 flex-1 truncate">{@w.name}</span>
       <span :if={@w.current} class="size-1.5 rounded-full bg-success" title="Used in chat"></span>

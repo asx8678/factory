@@ -1124,7 +1124,7 @@ defmodule FactoryWeb.ChatLive do
               )
             ]}
           >
-            <.icon name="hero-document-text-micro" class="size-3.5 text-primary" /> Spec
+            <.icon name="hero-document-text-micro" class="size-3.5 text-base-content/55" /> Spec
             <span
               :if={@run && @run.tasks != []}
               class="tabular-nums text-base-content/50"
@@ -1243,7 +1243,7 @@ defmodule FactoryWeb.ChatLive do
           <%!-- Choosing the repository to review comes before anything is said. --%>
           <div
             :if={@review_step != :source}
-            class="pointer-events-none absolute inset-x-0 bottom-0 bg-linear-to-t from-base-200 from-60% to-transparent px-4 pb-4 pt-10"
+            class="pointer-events-none absolute inset-x-0 bottom-0 bg-linear-to-t from-base-100 from-60% to-transparent px-4 pb-4 pt-10"
           >
             <.composer
               form={@form}

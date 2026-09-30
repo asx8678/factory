@@ -126,7 +126,10 @@ defmodule FactoryWeb.ChatParts do
       aria-disabled="true"
       class="flex items-center gap-1.5 rounded-full border border-base-300 px-2.5 py-0.5 text-[13px]"
     >
-      <.icon name={FactoryWeb.RunParts.workflow_icon(@workflow, :micro)} class="size-4 text-primary" />
+      <.icon
+        name={FactoryWeb.RunParts.workflow_icon(@workflow, :micro)}
+        class="size-4 text-base-content/60"
+      />
       <span class="max-w-48 truncate">{@workflow.name}</span>
     </div>
     <details
@@ -138,7 +141,7 @@ defmodule FactoryWeb.ChatParts do
       <summary class="flex cursor-pointer list-none items-center gap-1.5 rounded-full border border-base-300 px-2.5 py-0.5 text-[13px] hover:bg-base-content/[0.06]">
         <.icon
           name={FactoryWeb.RunParts.workflow_icon(@workflow, :micro)}
-          class="size-4 text-primary"
+          class="size-4 text-base-content/60"
         />
         <span class="max-w-48 truncate">{@workflow.name}</span>
         <.icon name="hero-chevron-down-mini" class="size-4 opacity-50" />
@@ -157,7 +160,10 @@ defmodule FactoryWeb.ChatParts do
             w.id == @workflow.id && "bg-base-200"
           ]}
         >
-          <.icon name={FactoryWeb.RunParts.workflow_icon(w, :micro)} class="size-4 text-primary" />
+          <.icon
+            name={FactoryWeb.RunParts.workflow_icon(w, :micro)}
+            class="size-4 text-base-content/60"
+          />
           <span class="flex-1 truncate">{w.name}</span>
           <.icon :if={w.id == @workflow.id} name="hero-check-mini" class="size-4" />
         </button>
@@ -325,7 +331,7 @@ defmodule FactoryWeb.ChatParts do
       phx-click="control"
       phx-value-command="/resume"
       title="Go on from the step it stopped at"
-      class="flex h-6 shrink-0 items-center gap-1 rounded-md bg-primary/12 px-1.5 text-xs font-medium text-primary hover:bg-primary/20"
+      class="flex h-6 shrink-0 items-center gap-1 rounded-md bg-base-content/[0.06] px-1.5 text-xs font-medium text-base-content/80 transition-colors hover:bg-base-content/10 hover:text-base-content"
     >
       <.icon name="hero-play-micro" class="size-3.5" /> Resume
     </button>
@@ -437,7 +443,7 @@ defmodule FactoryWeb.ChatParts do
         New run · {Calendar.strftime(Date.utc_today(), "%-d %b")}
       </p>
       <h1 class="mt-1 text-2xl font-semibold leading-tight tracking-tight">
-        What are we building in <span class="text-primary">{Path.basename(@dir)}</span>?
+        What are we building in <span class="font-semibold">{Path.basename(@dir)}</span>?
       </h1>
 
       <p class="mt-2 text-base-content/60">
@@ -654,7 +660,7 @@ defmodule FactoryWeb.ChatParts do
     ~H"""
     <div id={@id}>
       <p class="mb-1.5 flex items-center gap-2 text-sm">
-        <span class="grid size-5 place-items-center rounded-md bg-primary text-primary-content">
+        <span class="grid size-5 place-items-center rounded-md bg-base-content text-base-100">
           <.icon name="hero-bolt-solid" class="size-3" />
         </span>
         <span class="font-semibold">Factory</span>
@@ -705,7 +711,7 @@ defmodule FactoryWeb.ChatParts do
     ~H"""
     <details id={@id} class="group mt-2 rounded-lg border border-base-content/10 text-sm">
       <summary class="flex cursor-pointer list-none items-center gap-2 px-3 py-1.5 text-xs text-base-content/60 hover:text-base-content [&::-webkit-details-marker]:hidden">
-        <.icon name="hero-clipboard-document-list-micro" class="size-3.5 text-primary" />
+        <.icon name="hero-clipboard-document-list-micro" class="size-3.5 text-base-content/55" />
         Created {length(@tasks)} {if length(@tasks) == 1, do: "task", else: "tasks"}
         <span :if={@startable} class="text-base-content/45">· the plan is below</span>
         <.icon
@@ -977,7 +983,7 @@ defmodule FactoryWeb.ChatParts do
       </ul>
 
       <div class={[
-        "composer-box rounded-xl border border-base-content/15 shadow-[0_1px_2px_rgb(0_0_0/0.06),0_8px_28px_-8px_rgb(0_0_0/0.28)] transition-[border-color,box-shadow] focus-within:border-base-content/30 focus-within:shadow-[0_1px_2px_rgb(0_0_0/0.06),0_10px_32px_-8px_rgb(0_0_0/0.36)]",
+        "composer-box rounded-xl border border-base-content/15 shadow-[0_1px_2px_rgb(0_0_0/0.05),0_6px_20px_-10px_rgb(0_0_0/0.22)] transition-[border-color,box-shadow] focus-within:border-base-content/30 focus-within:shadow-[0_1px_2px_rgb(0_0_0/0.05),0_8px_24px_-10px_rgb(0_0_0/0.3)]",
         @glow && "is-glow"
       ]}>
         <div :if={@uploads.spec.entries != []} class="flex flex-wrap gap-2 px-4 pt-4">
@@ -1082,11 +1088,11 @@ defmodule FactoryWeb.ChatParts do
     >
       <summary class={[
         "flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-full px-3 text-sm transition-colors hover:bg-base-content/[0.06] hover:text-base-content",
-        if(@current, do: "bg-primary/10 text-base-content", else: "text-base-content/70")
+        if(@current, do: "bg-base-content/[0.06] text-base-content", else: "text-base-content/70")
       ]}>
         <.icon
           name={if @current, do: FactoryWeb.RunParts.kind_icon(@current.kind), else: "hero-bolt-mini"}
-          class={["size-4", @current && "text-primary"]}
+          class={["size-4", @current && "text-base-content/65"]}
         />
         <span class="max-w-40 truncate">{if @current, do: @current.name, else: "Factory"}</span>
         <.icon name="hero-chevron-down-mini" class="size-4 opacity-50" />

@@ -68,18 +68,21 @@ defmodule FactoryWeb.SpecParts do
     |> String.replace(~r/^([-*+]|\d+[.)])\s+/, "")
   end
 
-  # What a base spec is about, from its name and text: {label, icon, colour classes}.
+  # What a base spec is about, from its name and text: {label, icon, classes}. The icon
+  # tells them apart; they share one quiet tile.
   # Icon names are written out in full so Tailwind's heroicons plugin sees them.
   @categories [
     {~r/secur|secret|auth|privacy/i, "Security", "hero-shield-check-mini",
-     "bg-error/12 text-error"},
-    {~r/test|qa\b|quality/i, "Testing", "hero-beaker-mini", "bg-success/12 text-success"},
+     "bg-base-content/[0.06] text-base-content/65"},
+    {~r/test|qa\b|quality/i, "Testing", "hero-beaker-mini",
+     "bg-base-content/[0.06] text-base-content/65"},
     {~r/git|pull request|commit|branch|review/i, "Git", "hero-arrows-right-left-mini",
-     "bg-warning/15 text-warning"},
-    {~r/access|a11y|\bui\b|design|css/i, "UI", "hero-eye-mini", "bg-info/12 text-info"},
+     "bg-base-content/[0.06] text-base-content/65"},
+    {~r/access|a11y|\bui\b|design|css/i, "UI", "hero-eye-mini",
+     "bg-base-content/[0.06] text-base-content/65"},
     {~r/doc|readme|changelog/i, "Docs", "hero-book-open-mini",
-     "bg-fuchsia-500/12 text-fuchsia-500"},
-    {~r/./, "Code", "hero-code-bracket-mini", "bg-indigo-500/12 text-indigo-500"}
+     "bg-base-content/[0.06] text-base-content/65"},
+    {~r/./, "Code", "hero-code-bracket-mini", "bg-base-content/[0.06] text-base-content/65"}
   ]
 
   @doc "What a base spec is about: `{label, icon, classes}`."
@@ -106,7 +109,7 @@ defmodule FactoryWeb.SpecParts do
 
   attr :spec, :map, required: true
 
-  @doc "A base spec's category, as a small coloured icon."
+  @doc "A base spec's category, as a small icon on a quiet tile."
   def category_icon(assigns) do
     assigns = assign(assigns, :category, category(assigns.spec))
 

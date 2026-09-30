@@ -200,7 +200,8 @@ defmodule FactoryWeb.SpecsLive do
       <div class="mb-4 flex flex-wrap items-end justify-between gap-3">
         <div>
           <h2 class="flex items-center gap-2 text-lg font-medium">
-            <.icon name="hero-clipboard-document-list" class="size-5 text-primary" /> Run specs
+            <.icon name="hero-clipboard-document-list" class="size-5 text-base-content/50" />
+            Run specs
           </h2>
           <p class="mt-0.5 text-sm text-base-content/60">
             One run each: from its main spec to requirements, design and tasks.
@@ -403,7 +404,7 @@ defmodule FactoryWeb.SpecsLive do
         <div class="mb-4 flex flex-wrap items-end justify-between gap-3">
           <div>
             <h2 class="flex items-center gap-2 text-lg font-medium">
-              <.icon name="hero-building-library" class="size-5 text-primary" /> Base specs
+              <.icon name="hero-building-library" class="size-5 text-base-content/50" /> Base specs
             </h2>
             <p class="mt-0.5 text-sm text-base-content/60">
               Kept for good: company rules, conventions, standards. Include them in a workflow,

@@ -44,7 +44,10 @@ defmodule FactoryWeb.RunParts do
     ~H"""
     <span class={[
       "inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium",
-      if(@kind, do: "bg-primary/15 text-primary", else: "bg-base-content/10 text-base-content/60"),
+      if(@kind,
+        do: "bg-base-content/[0.07] text-base-content/75",
+        else: "bg-base-content/[0.05] text-base-content/55"
+      ),
       @class
     ]}>
       <.icon :if={@kind} name={type_icon(@kind, :micro)} class="size-3" />
@@ -61,7 +64,9 @@ defmodule FactoryWeb.RunParts do
     ~H"""
     <span class={["inline-flex items-center gap-2 text-xs tabular-nums", @class]}>
       <span class="inline-flex items-center gap-0.5 font-medium">
-        <.icon name="hero-bolt-micro" class="size-3.5 text-warning/80" />{Fmt.credits(@totals.credits)}
+        <.icon name="hero-bolt-micro" class="size-3.5 text-base-content/40" />{Fmt.credits(
+          @totals.credits
+        )}
       </span>
       <span class="text-base-content/50">≈{Fmt.tokens(@totals.tokens)}</span>
     </span>

@@ -430,7 +430,7 @@ defmodule FactoryWeb.UsageLive do
                   else: "calls"}</span>
                 <span class="text-base-content/55">≈{Fmt.tokens(s.tokens)}</span>
                 <span class="flex min-w-16 items-center justify-end gap-1 font-medium">
-                  <.icon name="hero-bolt-micro" class="size-3.5 text-warning/80" />{Fmt.credits(
+                  <.icon name="hero-bolt-micro" class="size-3.5 text-base-content/40" />{Fmt.credits(
                     s.credits
                   )}
                 </span>
@@ -523,7 +523,7 @@ defmodule FactoryWeb.UsageLive do
 
   defp kind_class("Spec"), do: "bg-info/15 text-info"
   defp kind_class(k) when k in ["Other", "Chat"], do: "bg-base-content/10 text-base-content/60"
-  defp kind_class(_run_type), do: "bg-primary/15 text-primary"
+  defp kind_class(_run_type), do: "bg-base-content/[0.07] text-base-content/75"
 
   defp link_for({:run, id}), do: ~p"/runs/#{id}"
   defp link_for({:spec, id}), do: ~p"/specs/#{id}"

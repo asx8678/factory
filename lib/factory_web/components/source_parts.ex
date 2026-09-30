@@ -53,7 +53,7 @@ defmodule FactoryWeb.SourceParts do
         aria-labelledby="sources-title"
       >
         <header class="flex items-center gap-3 border-b border-base-content/10 px-5 py-4">
-          <span class="grid size-9 place-items-center rounded-xl bg-primary/12 text-primary">
+          <span class="grid size-9 place-items-center rounded-xl bg-base-content/[0.06] text-base-content/70">
             <.icon name="hero-circle-stack" class="size-5" />
           </span>
           <div class="min-w-0 flex-1">
@@ -220,7 +220,7 @@ defmodule FactoryWeb.SourceParts do
           phx-value-kind={kind}
           class="group flex items-start gap-3 rounded-xl border border-base-content/10 p-3.5 text-left transition-colors hover:border-success/40 hover:bg-success/10"
         >
-          <span class="grid size-10 shrink-0 place-items-center rounded-xl bg-primary/12 text-primary">
+          <span class="grid size-10 shrink-0 place-items-center rounded-xl bg-base-content/[0.06] text-base-content/70">
             <.icon name={icon(kind, :outline)} class="size-5" />
           </span>
           <span>
@@ -259,7 +259,7 @@ defmodule FactoryWeb.SourceParts do
       class="px-5 py-4"
     >
       <div class="mb-4 flex items-center gap-3">
-        <span class="grid size-10 place-items-center rounded-xl bg-primary/12 text-primary">
+        <span class="grid size-10 place-items-center rounded-xl bg-base-content/[0.06] text-base-content/70">
           <.icon name={icon(@kind, :outline)} class="size-5" />
         </span>
         <div>

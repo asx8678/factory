@@ -499,7 +499,7 @@ defmodule FactoryWeb.SuggestTasks do
                 title={"How it's checked:\n" <> Enum.join(task["verify"], "\n")}
                 class="flex items-center gap-0.5"
               >
-                <.icon name="hero-check-circle-micro" class="size-3.5 text-teal-500" />
+                <.icon name="hero-check-circle-micro" class="size-3.5 text-success" />
                 {length(task["verify"])}
               </span>
               <span :if={task["model"]} title="The model to build it with">

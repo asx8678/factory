@@ -756,7 +756,7 @@ defmodule FactoryWeb.TaskList do
       <span :if={checks(@task) != []} class="block">
         <span class="mb-1 block text-[11px] font-medium text-base-content/50">Verify</span>
         <span :for={c <- checks(@task)} class="flex gap-2 py-0.5 text-base-content/75">
-          <.icon name="hero-check-circle-micro" class="mt-[3px] size-3.5 shrink-0 text-teal-500" />
+          <.icon name="hero-check-circle-micro" class="mt-[3px] size-3.5 shrink-0 text-success" />
           <span class="min-w-0"><.inline text={c} /></span>
         </span>
       </span>
@@ -943,28 +943,29 @@ defmodule FactoryWeb.TaskList do
   end
 
   # What a task is, from its title or, when that doesn't say, its first step:
-  # {label, icon, colour classes}, in the colours base specs use (FactoryWeb.SpecParts).
+  # {label, icon, classes}, on the quiet tile base specs use (FactoryWeb.SpecParts).
   # The first that matches wins. Icon names are written out in full so Tailwind's
   # heroicons plugin sees them.
   @kinds [
     {~r/^(verify|check|confirm|typecheck|lint|run|smoke)\b|\btypecheck/i, "Check",
-     "hero-check-badge-mini", "bg-teal-500/12 text-teal-500"},
-    {~r/\btest(s|ing|ed)?\b/i, "Test", "hero-beaker-mini", "bg-success/12 text-success"},
+     "hero-check-badge-mini", "bg-base-content/[0.06] text-base-content/65"},
+    {~r/\btest(s|ing|ed)?\b/i, "Test", "hero-beaker-mini",
+     "bg-base-content/[0.06] text-base-content/65"},
     {~r/\b(docs?|documentation|readme|changelog|moduledoc|comments?)\b/i, "Docs",
-     "hero-book-open-mini", "bg-fuchsia-500/12 text-fuchsia-500"},
+     "hero-book-open-mini", "bg-base-content/[0.06] text-base-content/65"},
     {~r/^(fix|repair|resolve)\b|\b(bugs?|crash\w*|regression)\b/i, "Fix", "hero-bug-ant-mini",
-     "bg-orange-500/12 text-orange-500"},
+     "bg-base-content/[0.06] text-base-content/65"},
     {~r/\b(auth\w*|permissions?|secrets?|csrf|xss|sanitiz\w*|encrypt\w*)\b/i, "Security",
-     "hero-shield-check-mini", "bg-error/12 text-error"},
+     "hero-shield-check-mini", "bg-base-content/[0.06] text-base-content/65"},
     {~r/\b(migrations?|schema|database|db|tables?|columns?|seeds?|quer(y|ies))\b/i, "Data",
-     "hero-circle-stack-mini", "bg-warning/15 text-warning"},
+     "hero-circle-stack-mini", "bg-base-content/[0.06] text-base-content/65"},
     {~r/\b(api|endpoints?|functions?|helpers?|types?|interfaces?|modules?|exports?)\b/i, "Code",
-     "hero-code-bracket-mini", "bg-indigo-500/12 text-indigo-500"},
+     "hero-code-bracket-mini", "bg-base-content/[0.06] text-base-content/65"},
     {~r/\b(ui|buttons?|pages?|screens?|views?|templates?|components?|layouts?|styles?|css|modals?|forms?|icons?|themes?)\b/i,
-     "UI", "hero-swatch-mini", "bg-info/12 text-info"}
+     "UI", "hero-swatch-mini", "bg-base-content/[0.06] text-base-content/65"}
   ]
 
-  @code {"Code", "hero-code-bracket-mini", "bg-indigo-500/12 text-indigo-500"}
+  @code {"Code", "hero-code-bracket-mini", "bg-base-content/[0.06] text-base-content/65"}
 
   @doc "What kind of task this is: `{label, icon, classes}` (Test, Check, Docs, UI, Code…)."
   def kind(task) do
@@ -977,7 +978,7 @@ defmodule FactoryWeb.TaskList do
     |> Kernel.||(@code)
   end
 
-  # The kind's colour for text alone: its classes without the background.
+  # The kind's tone for text alone: its classes without the background.
   defp kind_text({_label, _icon, classes}),
     do:
       classes |> String.split() |> Enum.reject(&String.starts_with?(&1, "bg-")) |> Enum.join(" ")
