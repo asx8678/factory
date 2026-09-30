@@ -2,17 +2,17 @@ defmodule FactoryWeb.PlanPanel do
   @moduledoc """
   The plan of a run being made in the chat (`FactoryWeb.ChatLive`): the run's name,
   then each task as its own card, with what to change and how to check it. A task can
-  be edited or removed, or handed to Kiro to dig deeper into the code or to change as
+  be edited or removed, or handed to Kiro to improve from the code or to change as
   asked; Kiro's version is shown beside the task until it's used or discarded. The
   panel ends with the choice to implement the plan.
 
   A task too thin to build without guessing (`Factory.Specs.TaskCheck`) is marked with
-  what it's missing; Flesh out has Kiro read the code it touches and fill it in. Review plan has the planner look at the
-  code and the whole plan again, and improve it.
+  what it's missing. Check scope has the planner compare the plan with what was asked
+  and report, changing nothing; Improve plan has it rework the plan from the code.
 
   Events (to the chat LiveView): `plan_edit`, `plan_edit_cancel`, `plan_save`,
   `plan_remove`, `plan_refine`, `plan_ask_open`, `plan_ask`, `plan_use`,
-  `plan_discard`, `plan_review`; `action` with "start" to implement.
+  `plan_discard`, `plan_scope`, `plan_review`; `action` with "start" to implement.
   """
   alias Factory.Specs.TaskCheck
   use FactoryWeb, :html
@@ -27,7 +27,9 @@ defmodule FactoryWeb.PlanPanel do
 
   attr :working, :string,
     default: nil,
-    doc: "what the planner is doing, while it reworks the plan"
+    doc: "what the planner is doing, while it works on the plan"
+
+  attr :checking, :boolean, default: false, doc: "whether that work is a scope check"
 
   attr :spec_hint, :boolean, default: false
 
@@ -60,14 +62,24 @@ defmodule FactoryWeb.PlanPanel do
           {length(@thin)} {if length(@thin) == 1, do: "needs", else: "need"} more context
         </span>
         <button
+          id="chat-plan-scope"
+          type="button"
+          phx-click="plan_scope"
+          disabled={@working != nil}
+          title="Kiro reads the code and checks the plan against what you asked: what's covered, missing or beyond scope, the risks, and whether the tasks are the right size. It doesn't change the plan."
+          class="flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-xs text-base-content/70 hover:bg-base-content/[0.06] hover:text-base-content disabled:opacity-40"
+        >
+          <.icon name="hero-magnifying-glass-micro" class="size-3.5" /> Check scope
+        </button>
+        <button
           id="chat-plan-review"
           type="button"
           phx-click="plan_review"
           disabled={@working != nil}
-          title="Kiro looks at the code and the whole plan again, then improves it: concrete tasks, the right size, the tests it needs"
+          title="Kiro looks at the code and the whole plan again, then reworks it: concrete tasks, the right size, the tests it needs, and what a scope check found"
           class="flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-xs font-medium text-primary hover:bg-primary/10 disabled:opacity-40"
         >
-          <.icon name="hero-sparkles-micro" class="size-3.5" /> Review plan
+          <.icon name="hero-sparkles-micro" class="size-3.5" /> Improve plan
         </button>
         <button
           id="chat-plan-spec"
@@ -86,13 +98,15 @@ defmodule FactoryWeb.PlanPanel do
         class="flex items-center gap-2 border-b border-base-content/10 bg-primary/[0.04] px-3.5 py-1.5 text-xs text-base-content/65"
       >
         <span class="loading loading-spinner loading-xs text-primary"></span>
-        <span class="shrink-0 font-medium text-base-content/80">Reworking the plan</span>
+        <span class="shrink-0 font-medium text-base-content/80">
+          {if @checking, do: "Checking the scope", else: "Reworking the plan"}
+        </span>
         <span class="min-w-0 truncate">{@working}</span>
       </p>
 
       <ol class={[
         "divide-y divide-base-content/[0.07] transition-opacity",
-        @working && "pointer-events-none opacity-70"
+        @working && !@checking && "pointer-events-none opacity-70"
       ]}>
         <li
           :for={{task, i} <- Enum.with_index(@tasks)}
@@ -173,7 +187,7 @@ defmodule FactoryWeb.PlanPanel do
               <p
                 :if={(i + 1) in @thin and @improve[task.title] == nil}
                 id={"chat-plan-thin-#{i}"}
-                title="Flesh it out, or edit it, so an agent can build it without guessing"
+                title="Improve it, or edit it, so an agent can build it without guessing"
                 class="mt-1.5 flex items-center gap-1.5 text-xs text-warning"
               >
                 <.icon name="hero-exclamation-triangle-micro" class="size-3.5" />
@@ -294,7 +308,7 @@ defmodule FactoryWeb.PlanPanel do
         title="Kiro reads the code this task touches and rewrites it: the exact files, the steps, how to check it"
         class="flex h-6 items-center gap-1 rounded-md px-1.5 text-xs text-primary hover:bg-primary/10 disabled:opacity-40"
       >
-        <.icon name="hero-sparkles-micro" class="size-3.5" /> Flesh out
+        <.icon name="hero-sparkles-micro" class="size-3.5" /> Improve
       </button>
       <button
         id={"chat-plan-change-#{@i}"}

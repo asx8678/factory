@@ -504,6 +504,12 @@ defmodule FactoryWeb.ChatParts do
     ~H"""
     <div id={@id}>
       <p
+        :if={@message.meta["check"]}
+        class="mb-2 inline-flex items-center gap-1.5 rounded-md bg-base-content/[0.06] px-2 py-0.5 text-xs font-medium text-base-content/70"
+      >
+        <.icon name="hero-magnifying-glass-micro" class="size-3.5" /> Scope check
+      </p>
+      <p
         :if={@message.meta["unclear"]}
         class="mb-2 inline-flex items-center gap-1.5 rounded-full bg-warning/12 px-2.5 py-0.5 text-xs font-medium text-warning"
       >

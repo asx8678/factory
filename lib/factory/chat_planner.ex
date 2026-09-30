@@ -41,11 +41,13 @@ defmodule Factory.ChatPlanner do
   @doc """
   Plans in the background; the reply is posted to the run. `extra:` is one more request
   for this turn only, not a message in the chat nor part of what the person asked
-  (a plan review asked with a button).
+  (a plan review asked with a button). `check: true` makes it a check that reports and
+  can't change the plan: the plan tools only read it or ask (a scope check); the reply
+  is posted as it is, marked `"check" => true`.
   """
   def start(%Run{} = run, planner, opts \\ []) do
     with {:ok, {run, files, prompt}} <- prepare(run, planner, opts[:extra]) do
-      start_request(run, planner, files, prompt)
+      start_request(run, planner, files, prompt, opts[:check] == true)
     end
   end
 
@@ -87,7 +89,7 @@ defmodule Factory.ChatPlanner do
     end)
   end
 
-  defp start_request(run, planner, files, prompt) do
+  defp start_request(run, planner, files, prompt, check?) do
     dir = run.settings["project_dir"] || Kiro.config(:workspace)
     generation = run.planner_generation
 
@@ -98,18 +100,19 @@ defmodule Factory.ChatPlanner do
       # On the planner's own Kiro session, which keeps the conversation between
       # messages; a one-off session when that one is busy in another folder.
       result =
-        case plan_in_session(run, planner, prompt, generation, dir) do
-          {:error, :busy} -> plan_once(run, planner, prompt, generation, dir)
+        case plan_in_session(run, planner, prompt, generation, dir, check?) do
+          {:error, :busy} -> plan_once(run, planner, prompt, generation, dir, check?)
           result -> result
         end
 
+      result = with {:ok, r} <- result, do: {:ok, Map.put(r, :check, check?)}
       finish(run.id, generation, planner, files, result)
     end)
 
     :ok
   end
 
-  defp plan_in_session(run, planner, prompt, generation, dir) do
+  defp plan_in_session(run, planner, prompt, generation, dir, check?) do
     {brief, ask} = prompt.parts
 
     brief =
@@ -127,15 +130,15 @@ defmodule Factory.ChatPlanner do
         stream: false,
         activity: "Planning “#{run.title}”",
         on_tool: &show_progress(run.id, planner, Planner.describe_tool(&1, dir)),
-        planning: %{generation: generation, notify: self()},
+        planning: %{generation: generation, notify: self(), read_only: check?},
         on_busy: :return
       )
 
-    with {:ok, reply} <- reply, do: read_result(reply, generation)
+    with {:ok, reply} <- reply, do: read_result(reply, generation, check?)
   end
 
-  defp plan_once(run, planner, prompt, generation, dir) do
-    token = PlanTools.grant(run.id, generation, planner)
+  defp plan_once(run, planner, prompt, generation, dir, check?) do
+    token = PlanTools.grant(run.id, generation, planner, read_only: check?)
 
     with {:ok, reply} <-
            Kiro.ask(prompt.full,
@@ -146,14 +149,24 @@ defmodule Factory.ChatPlanner do
              on_tool: &show_progress(run.id, planner, Planner.describe_tool(&1, dir)),
              usage: %{source: "plan_chat", run_id: run.id, agent_id: planner.id}
            ) do
-      read_result(reply, generation)
+      read_result(reply, generation, check?)
     end
   end
 
   # What the tools reported while Kiro worked (`Factory.PlanTools`). Without any tool
   # call, the reply is the JSON plan the prompt asks for when the tools are missing, or
   # just an answer that leaves the plan as it is.
-  defp read_result(reply, generation) do
+  # A check's reply is what it found, never a plan to apply.
+  defp read_result(reply, generation, true) do
+    _ = tool_events(generation, [])
+
+    case String.trim(reply) do
+      "" -> {:error, "The check ended without a reply."}
+      reply -> {:ok, %{reply: reply, questions: [], written: true}}
+    end
+  end
+
+  defp read_result(reply, generation, false) do
     reply = String.trim(reply)
 
     case tool_events(generation, []) do
@@ -195,6 +208,12 @@ defmodule Factory.ChatPlanner do
         {:ok, :stale}
       end
     end)
+  end
+
+  # A check (Check scope): what it found goes to the chat as it is; the plan is unchanged.
+  defp finish(run, planner, _files, {:ok, %{check: true, reply: reply}}) do
+    Agents.set_activity(planner.id, "idle", nil)
+    post(run, planner, reply, %{"check" => true})
   end
 
   # Written with the tools: the spec already has the plan. With no tasks yet, it's the

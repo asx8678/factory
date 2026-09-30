@@ -193,13 +193,25 @@ defmodule Factory.PlanTools do
   A token for one planning request: calls with it write to run `run_id` while its
   `planner_generation` is `generation`, and are reported to the calling process.
   """
-  def grant(run_id, generation, planner) do
+  def grant(run_id, generation, planner, opts \\ []) do
     Phoenix.Token.sign(FactoryWeb.Endpoint, @salt, %{
       run_id: run_id,
       generation: generation,
       planner: %{id: planner.id, name: planner.name},
-      pid: self()
+      pid: self(),
+      # A check (Check scope) reads the plan and may ask, but doesn't change it.
+      read_only: Keyword.get(opts, :read_only, false)
     })
+  end
+
+  @reading_tools ~w(get_plan ask_user)
+
+  defp read_only_refusal(name) do
+    if name in @reading_tools,
+      do: nil,
+      else:
+        {:error,
+         "This is a check: report what you'd change in your reply, and leave the plan as it is."}
   end
 
   @doc "The MCP server to give a Kiro session (ACP `session/new`), with the token."
@@ -257,7 +269,7 @@ defmodule Factory.PlanTools do
       result =
         Runs.with_locked_run(grant.run_id, fn run ->
           if run.status == "draft" and run.planner_generation == grant.generation do
-            apply_tool(name, args, run)
+            (Map.get(grant, :read_only) && read_only_refusal(name)) || apply_tool(name, args, run)
           else
             {:error,
              "This plan was replaced by a newer request or the run has started. Stop and end your turn."}
@@ -300,6 +312,10 @@ defmodule Factory.PlanTools do
   # `FactoryWeb.MCP` and the chat): `{:elicit, request, then}`. `then` gets the answer
   # (`%{"action" => …, "content" => …}`); without one, the questions are shown after
   # the turn as before, or left for the reply.
+  def call_in_turn(_run_id, _agent, name, _args, %{read_only: true})
+      when name not in @reading_tools,
+      do: read_only_refusal(name)
+
   def call_in_turn(run_id, agent, "ask_user", args, planning) when is_map(args) do
     questions = questions(args)
 

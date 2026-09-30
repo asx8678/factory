@@ -34,7 +34,8 @@ defmodule FactoryWeb.ChatLive do
        plan_editing: nil,
        plan_asking: nil,
        plan_improve: %{},
-       plan_inline: nil
+       plan_inline: nil,
+       plan_checking: false
      )
      |> set_dir("")
      |> load_agents()
@@ -382,7 +383,7 @@ defmodule FactoryWeb.ChatLive do
   # The plan being made (FactoryWeb.PlanPanel): each task edited, removed, or handed to
   # Kiro to flesh out from the code or change as asked; or the whole plan reviewed again.
 
-  @refine "Flesh out this task: read the code it touches and make it concrete. " <>
+  @refine "Improve this task: read the code it touches and make it concrete. " <>
             "Name the exact files and functions it changes, list the steps in order, and say " <>
             "how to check it's done. Keep it one small change."
 
@@ -438,6 +439,34 @@ defmodule FactoryWeb.ChatLive do
   def handle_event("plan_refine", %{"i" => i}, socket),
     do: {:noreply, ask_kiro(socket, String.to_integer(i), @refine)}
 
+  # A check of the plan against what was asked, reported in the chat; nothing changes.
+  @scope_check """
+  Check the scope of work before anything is built. Read the code this plan touches and \
+  compare the plan with what I asked for. Don't change the plan: this is a check.
+
+  Reply with short sections, only the ones that have something in them:
+  - **Covered**: what the plan does that the request needs.
+  - **Missing**: what the request needs that no task covers, such as edge cases, data or \
+  migrations, config, error handling, docs, tests.
+  - **Beyond scope**: tasks or steps that go further than what was asked.
+  - **Risks**: what could break, and what's unclear that I should decide.
+  - **Size**: tasks too big to build and check in one go, or too small to stand alone.
+
+  End with the one or two changes you'd make first.\
+  """
+
+  def handle_event("plan_scope", _, socket) do
+    run = socket.assigns.run && Runs.get_run(socket.assigns.run.id)
+    planner = socket.assigns.planner
+
+    if run && planner && run.status == "draft" do
+      Factory.ChatPlanner.start(run, planner, extra: @scope_check, check: true)
+      {:noreply, assign(socket, plan_checking: true)}
+    else
+      {:noreply, put_flash(socket, :error, "This run has no planner to check its plan.")}
+    end
+  end
+
   # The planner looks at the code and the whole plan again. The request goes to the
   # planner only, not into the chat; its reply does.
   def handle_event("plan_review", _, socket) do
@@ -446,7 +475,7 @@ defmodule FactoryWeb.ChatLive do
 
     if run && planner && run.status == "draft" do
       Factory.ChatPlanner.start(run, planner, extra: review_request(plan_tasks(socket)))
-      {:noreply, socket}
+      {:noreply, assign(socket, plan_checking: false)}
     else
       {:noreply, put_flash(socket, :error, "This run has no planner to review its plan.")}
     end
@@ -593,7 +622,8 @@ defmodule FactoryWeb.ChatLive do
     "Look at the code again and improve this plan. Make every task concrete: the files " <>
       "and functions it changes, the steps in order, and how to check it's done. Split " <>
       "tasks that are too big, merge ones that are too small, add any missing tests, and " <>
-      "keep what I've edited." <>
+      "keep what I've edited. If you checked the scope earlier in this chat, act on what " <>
+      "you found." <>
       if(thin == [], do: "", else: " These need more context: #{Enum.join(thin, "; ")}.")
   end
 
@@ -795,8 +825,13 @@ defmodule FactoryWeb.ChatLive do
     do: {:noreply, assign(socket, runs: Runs.list_runs(), runs_reload: nil)}
 
   def handle_info({:message, message}, socket) do
-    # An agent's final reply replaces its live bubble.
+    # An agent's final reply replaces its live bubble; the planner's ends a scope check.
     socket = update(socket, :streaming, &Map.delete(&1, message.meta["agent_id"]))
+
+    socket =
+      if socket.assigns.planner && message.meta["agent_id"] == socket.assigns.planner.id,
+        do: assign(socket, plan_checking: false),
+        else: socket
 
     socket =
       if message.author && socket.assigns.run,
@@ -979,6 +1014,7 @@ defmodule FactoryWeb.ChatLive do
                 improve={@plan_improve}
                 inline={@plan_inline}
                 working={planner_activity(assigns)}
+                checking={@plan_checking}
                 spec_hint={plan_spec_hint?(assigns)}
               />
             </div>
