@@ -494,6 +494,17 @@ defmodule FactoryWeb.SuggestTasks do
               </span>
             </span>
             <span class="flex shrink-0 items-center gap-2 pt-px text-xs text-base-content/50">
+              <span
+                :if={List.wrap(task["verify"]) != []}
+                title={"How it's checked:\n" <> Enum.join(task["verify"], "\n")}
+                class="flex items-center gap-0.5"
+              >
+                <.icon name="hero-check-circle-micro" class="size-3.5 text-teal-500" />
+                {length(task["verify"])}
+              </span>
+              <span :if={task["model"]} title="The model to build it with">
+                {Factory.Kiro.model_name(task["model"])}
+              </span>
               <span :if={task["requirements"] != []} title="Requirements it covers">
                 Req {Enum.join(task["requirements"], ", ")}
               </span>
@@ -556,5 +567,9 @@ defmodule FactoryWeb.SuggestTasks do
 
   # A suggestion's details: a list of lines, or one string in suggestions saved before
   # tasks had one shape.
+  # What the task is for, else (a suggestion without an objective) its steps.
+  defp details_text(%{"objective" => objective}) when is_binary(objective) and objective != "",
+    do: objective
+
   defp details_text(task), do: task["details"] |> List.wrap() |> Enum.join(" ")
 end

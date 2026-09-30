@@ -175,18 +175,14 @@ defmodule FactoryWeb.TaskList do
               ]}>
                 <.inline text={task.title} />
               </span>
+              <%!-- A task written before tasks had an objective shows its first step. --%>
               <span
-                :if={task.details != [] and !MapSet.member?(@expanded, i)}
+                :if={!task[:objective] and task.details != [] and !MapSet.member?(@expanded, i)}
                 class="mt-1 block max-w-[72ch] line-clamp-2 text-[13px] leading-[1.6] text-base-content/60"
               >
                 <.inline text={hd(task.details)} />
               </span>
-              <ul
-                :if={task.details != [] and MapSet.member?(@expanded, i)}
-                class="mt-2 max-w-[72ch] space-y-1.5 text-[13px] leading-[1.6] text-base-content/75"
-              >
-                <li :for={d <- task.details}><.inline text={d} /></li>
-              </ul>
+              <.task_parts task={task} open={MapSet.member?(@expanded, i)} />
             </button>
 
             <div class="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-base-content/50">
@@ -195,7 +191,7 @@ defmodule FactoryWeb.TaskList do
                 <span class="tabular-nums text-base-content/45">#{i + 1}</span>
               </span>
               <button
-                :if={task.details != []}
+                :if={task.details != [] or checks(task) != []}
                 type="button"
                 phx-click="task_toggle"
                 phx-value-i={i}
@@ -208,12 +204,9 @@ defmodule FactoryWeb.TaskList do
                     MapSet.member?(@expanded, i) && "rotate-90"
                   ]}
                 />
-                {cond do
-                  MapSet.member?(@expanded, i) -> "Less"
-                  length(task.details) > 1 -> "#{length(task.details) - 1} more"
-                  true -> "More"
-                end}
+                {if MapSet.member?(@expanded, i), do: "Less", else: parts_count(task)}
               </button>
+              <.model_tag model={task[:model]} />
               <span :if={task.requirements != []} class="flex flex-wrap items-center gap-1">
                 <span>Req</span>
                 <span
@@ -399,40 +392,7 @@ defmodule FactoryWeb.TaskList do
       <p :if={@from_kiro} class="flex items-center gap-1.5 text-xs text-info">
         <.icon name="hero-sparkles-micro" class="size-3.5" /> Filled in with Kiro's suggestion
       </p>
-      <label class="block">
-        <span class="mb-1 block text-xs font-medium text-base-content/60">Title</span>
-        <input
-          name="title"
-          value={@task.title}
-          required
-          autocomplete="off"
-          phx-mounted={JS.focus()}
-          class="h-8 w-full rounded-md border border-base-300 bg-base-100 px-2.5 text-sm font-medium outline-none focus:border-base-content/30"
-        />
-      </label>
-      <label class="block">
-        <span class="mb-1 flex items-baseline justify-between text-xs font-medium text-base-content/60">
-          Details
-          <span class="font-normal text-base-content/45">One per line · `code` in backticks</span>
-        </span>
-        <textarea
-          name="details"
-          rows={max(3, length(@task.details) + 1)}
-          class="block w-full resize-y rounded-md border border-base-300 bg-base-100 px-2.5 py-2 text-[13px] leading-relaxed outline-none focus:border-base-content/30"
-        >{Enum.join(@task.details, "\n")}</textarea>
-      </label>
-      <label class="block">
-        <span class="mb-1 flex items-baseline justify-between text-xs font-medium text-base-content/60">
-          Requirements <span class="font-normal text-base-content/45">Comma separated</span>
-        </span>
-        <input
-          name="requirements"
-          value={Enum.join(@task.requirements, ", ")}
-          autocomplete="off"
-          placeholder="1.1, 1.2"
-          class="h-8 w-full rounded-md border border-base-300 bg-base-100 px-2.5 font-mono text-xs outline-none focus:border-base-content/30"
-        />
-      </label>
+      <.task_fields task={@task} focus />
       <div class="flex items-center gap-2">
         <button type="submit" class="btn btn-primary btn-xs">Save</button>
         <button type="button" phx-click="task_edit_cancel" class="btn btn-ghost btn-xs">
@@ -445,7 +405,15 @@ defmodule FactoryWeb.TaskList do
 
   # What the edit form starts from: Kiro's suggestion when there is one.
   defp draft(task, %{status: :done, suggestion: s}),
-    do: %{task | title: s.title, details: s.details, requirements: s.requirements}
+    do:
+      Map.merge(task, %{
+        title: s.title,
+        objective: s.objective,
+        details: s.details,
+        verify: s.verify,
+        model: s.model,
+        requirements: s.requirements
+      })
 
   defp draft(task, _), do: task
 
@@ -638,10 +606,10 @@ defmodule FactoryWeb.TaskList do
             name="action"
             value="refine"
             disabled={!draft_text?(@draft)}
-            title="Kiro turns what you wrote into a full task"
+            title="AI reads what you wrote and the code, then suggests the full task"
             class="btn btn-primary btn-sm"
           >
-            <.icon name="hero-sparkles-mini" class="size-4" /> Improve with Kiro
+            <.icon name="hero-sparkles-mini" class="size-4" /> Suggest with AI
           </button>
           <button
             id="draft-add"
@@ -655,8 +623,8 @@ defmodule FactoryWeb.TaskList do
           </button>
           <span id="draft-hint" class="text-xs text-base-content/50 sm:ml-auto">
             {if draft_text?(@draft),
-              do: "Kiro reads your idea and the code, then writes the full task for you to review.",
-              else: "Write your idea in your own words, then let Kiro turn it into a full task."}
+              do: "AI reads your idea and the code, then suggests the full task for you to review.",
+              else: "Write your idea in your own words, then let AI suggest the full task."}
           </span>
         </div>
       </form>
@@ -705,25 +673,7 @@ defmodule FactoryWeb.TaskList do
         phx-submit="draft_save"
         class="space-y-3"
       >
-        <input
-          name="title"
-          value={@draft.suggestion.title}
-          required
-          autocomplete="off"
-          class="h-8 w-full rounded-md border border-base-300 bg-base-100 outline-none placeholder:text-base-content/40 focus:border-base-content/30 px-3 text-[14px] font-medium"
-        />
-        <textarea
-          name="details"
-          rows={max(3, length(@draft.suggestion.details) + 1)}
-          class="block w-full resize-y rounded-md border border-base-300 bg-base-100 outline-none placeholder:text-base-content/40 focus:border-base-content/30 px-3 py-2 text-[13px] leading-relaxed"
-        >{Enum.join(@draft.suggestion.details, "\n")}</textarea>
-        <input
-          name="requirements"
-          value={Enum.join(@draft.suggestion.requirements, ", ")}
-          autocomplete="off"
-          placeholder="Requirements, comma separated"
-          class="h-8 w-full rounded-md border border-base-300 bg-base-100 outline-none placeholder:text-base-content/40 focus:border-base-content/30 px-3 font-mono text-xs"
-        />
+        <.task_fields task={@draft.suggestion} focus />
         <div class="flex items-center gap-2">
           <button type="submit" class="btn btn-primary btn-sm">
             <.icon name="hero-plus-mini" class="size-4" /> Add task
@@ -746,27 +696,182 @@ defmodule FactoryWeb.TaskList do
         <.icon name="hero-sparkles-micro" class="size-3.5" /> {@label}
       </p>
       <p class="text-[14px] font-medium leading-6"><.inline text={@suggestion.title} /></p>
-      <ul
-        :if={@suggestion.details != []}
-        class="max-w-[72ch] space-y-1.5 text-[13px] leading-[1.6] text-base-content/80"
-      >
-        <li :for={d <- @suggestion.details}><.inline text={d} /></li>
-      </ul>
-      <p
-        :if={@suggestion.requirements != []}
-        class="flex flex-wrap items-center gap-1 text-[11px] text-base-content/50"
-      >
-        Req
-        <span
-          :for={r <- @suggestion.requirements}
-          class="font-mono text-[10.5px] tracking-tight text-base-content/60 [font-stretch:80%]"
-        >
-          {r}
+      <.task_parts task={@suggestion} />
+      <p class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-base-content/50">
+        <.model_tag model={@suggestion[:model]} />
+        <span :if={@suggestion.requirements != []} class="flex flex-wrap items-center gap-1">
+          Req
+          <span
+            :for={r <- @suggestion.requirements}
+            class="font-mono text-[10.5px] tracking-tight text-base-content/60 [font-stretch:80%]"
+          >
+            {r}
+          </span>
         </span>
       </p>
       <p :if={@suggestion.why != ""} class="text-xs italic text-base-content/55">
         {@suggestion.why}
       </p>
+    </div>
+    """
+  end
+
+  attr :task, :map, required: true
+  attr :open, :boolean, default: true, doc: "whether the approach and checks show"
+
+  @doc """
+  A task's objective, then (when open) its approach as numbered steps and the checks
+  that prove it's done. The Spec page, the chat's plan and Kiro's suggestions show
+  tasks this way.
+  """
+  def task_parts(assigns) do
+    ~H"""
+    <span
+      :if={@task[:objective]}
+      class="mt-1 block max-w-[72ch] text-[13px] leading-[1.6] text-base-content/75"
+    >
+      <.inline text={@task.objective} />
+    </span>
+    <span
+      :if={@open and (@task.details != [] or checks(@task) != [])}
+      class="mt-2.5 block max-w-[72ch] space-y-2.5 text-[13px] leading-[1.6]"
+    >
+      <span :if={@task.details != []} class="block">
+        <span class="mb-1 block text-[11px] font-medium text-base-content/50">Approach</span>
+        <span
+          :for={{d, n} <- Enum.with_index(@task.details, 1)}
+          class="flex gap-2 py-0.5 text-base-content/75"
+        >
+          <span class="w-4 shrink-0 text-right tabular-nums text-base-content/35">{n}</span>
+          <span class="min-w-0"><.inline text={d} /></span>
+        </span>
+      </span>
+      <span :if={checks(@task) != []} class="block">
+        <span class="mb-1 block text-[11px] font-medium text-base-content/50">Verify</span>
+        <span :for={c <- checks(@task)} class="flex gap-2 py-0.5 text-base-content/75">
+          <.icon name="hero-check-circle-micro" class="mt-[3px] size-3.5 shrink-0 text-teal-500" />
+          <span class="min-w-0"><.inline text={c} /></span>
+        </span>
+      </span>
+    </span>
+    """
+  end
+
+  attr :model, :string, default: nil
+
+  @doc "The model a task is to be built with, as a small tag; nothing when it names none."
+  def model_tag(assigns) do
+    ~H"""
+    <span :if={@model} title="The model to build it with" class="flex items-center gap-1">
+      <.icon name="hero-cpu-chip-micro" class="size-3" />{Factory.Kiro.model_name(@model)}
+    </span>
+    """
+  end
+
+  @doc "A task's checks (its `Verify:` lines); none for a task written before it had them."
+  def checks(task), do: Map.get(task, :verify) || []
+
+  # What opening a task shows, for its toggle: "3 steps · 2 checks".
+  defp parts_count(task) do
+    [
+      task.details != [] && "#{length(task.details)} #{plural(task.details, "step")}",
+      checks(task) != [] && "#{length(checks(task))} #{plural(checks(task), "check")}"
+    ]
+    |> Enum.filter(& &1)
+    |> Enum.join(" · ")
+  end
+
+  defp plural([_], word), do: word
+  defp plural(_list, word), do: word <> "s"
+
+  attr :task, :map, required: true
+  attr :focus, :boolean, default: false
+  attr :as, :string, default: nil, doc: ~s(nests the fields' names, e.g. "task" for task[title])
+
+  @doc """
+  A task's fields, for editing it or a new one Kiro wrote: the form sends title,
+  objective, details and verify (a line each), model and requirements.
+  """
+  def task_fields(assigns) do
+    as = assigns.as
+
+    assigns =
+      assign(assigns,
+        models: Factory.Kiro.models() -- ["auto"],
+        n: fn field -> if as, do: "#{as}[#{field}]", else: field end
+      )
+
+    ~H"""
+    <label class="block">
+      <span class="mb-1 block text-xs font-medium text-base-content/60">Title</span>
+      <input
+        name={@n.("title")}
+        value={@task.title}
+        required
+        autocomplete="off"
+        phx-mounted={@focus && JS.focus()}
+        class="h-8 w-full rounded-md border border-base-300 bg-base-100 px-2.5 text-sm font-medium outline-none focus:border-base-content/30"
+      />
+    </label>
+    <label class="block">
+      <span class="mb-1 flex items-baseline justify-between text-xs font-medium text-base-content/60">
+        Objective <span class="font-normal text-base-content/45">What's true when it's done</span>
+      </span>
+      <input
+        name={@n.("objective")}
+        value={@task[:objective]}
+        autocomplete="off"
+        placeholder="e.g. A person can download this month's invoices as a CSV file."
+        class="h-8 w-full rounded-md border border-base-300 bg-base-100 px-2.5 text-[13px] outline-none placeholder:text-base-content/35 focus:border-base-content/30"
+      />
+    </label>
+    <label class="block">
+      <span class="mb-1 flex items-baseline justify-between text-xs font-medium text-base-content/60">
+        Approach
+        <span class="font-normal text-base-content/45">One step per line · `code` in backticks</span>
+      </span>
+      <textarea
+        name={@n.("details")}
+        rows={max(3, length(@task.details) + 1)}
+        class="block w-full resize-y rounded-md border border-base-300 bg-base-100 px-2.5 py-2 text-[13px] leading-relaxed outline-none focus:border-base-content/30"
+      >{Enum.join(@task.details, "\n")}</textarea>
+    </label>
+    <label class="block">
+      <span class="mb-1 flex items-baseline justify-between text-xs font-medium text-base-content/60">
+        Verify <span class="font-normal text-base-content/45">One check per line</span>
+      </span>
+      <textarea
+        name={@n.("verify")}
+        rows={max(2, length(checks(@task)) + 1)}
+        placeholder="e.g. `mix test test/app/export_test.exs` passes"
+        class="block w-full resize-y rounded-md border border-base-300 bg-base-100 px-2.5 py-2 text-[13px] leading-relaxed outline-none placeholder:text-base-content/35 focus:border-base-content/30"
+      >{Enum.join(checks(@task), "\n")}</textarea>
+    </label>
+    <div class="grid gap-3 sm:grid-cols-2">
+      <label class="block">
+        <span class="mb-1 block text-xs font-medium text-base-content/60">Model</span>
+        <select
+          name={@n.("model")}
+          class="h-8 w-full rounded-md border border-base-300 bg-base-100 px-2 text-[13px] outline-none focus:border-base-content/30"
+        >
+          <option value="" selected={@task[:model] in [nil, "", "auto"]}>Auto</option>
+          <option :for={m <- @models} value={m} selected={@task[:model] == m}>
+            {Factory.Kiro.model_name(m)}
+          </option>
+        </select>
+      </label>
+      <label class="block">
+        <span class="mb-1 flex items-baseline justify-between text-xs font-medium text-base-content/60">
+          Requirements <span class="font-normal text-base-content/45">Comma separated</span>
+        </span>
+        <input
+          name={@n.("requirements")}
+          value={Enum.join(@task.requirements, ", ")}
+          autocomplete="off"
+          placeholder="1.1, 1.2"
+          class="h-8 w-full rounded-md border border-base-300 bg-base-100 px-2.5 font-mono text-xs outline-none focus:border-base-content/30"
+        />
+      </label>
     </div>
     """
   end

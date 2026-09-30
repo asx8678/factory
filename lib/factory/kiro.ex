@@ -13,6 +13,50 @@ defmodule Factory.Kiro do
   @doc "The models this Kiro offers (see `Factory.Kiro.Catalog`), else the ones it shipped with."
   def models, do: values(Factory.Kiro.Catalog.models()) || @models
 
+  @doc """
+  The model Factory plans with: the one chosen in Settings, else the strongest this
+  Kiro offers (`strongest/0`).
+  """
+  def planning_model, do: chosen("planning_model") || strongest()
+
+  @doc """
+  The model that checks each finished task against its checks: the one chosen in
+  Settings, else the newest Claude Haiku this Kiro offers, which is quick and cheap
+  and isn't the model that built it.
+  """
+  def verify_model do
+    chosen("verify_model") ||
+      models() |> Enum.filter(&String.contains?(&1, "haiku")) |> Enum.sort(:desc) |> List.first() ||
+      "auto"
+  end
+
+  @doc """
+  The strongest model this Kiro offers: the newest Claude Opus when there is one, else
+  Claude Sonnet 4.5, else "auto".
+  """
+  def strongest do
+    models = models()
+
+    models |> Enum.filter(&String.contains?(&1, "opus")) |> Enum.sort(:desc) |> List.first() ||
+      Enum.find(~w(claude-sonnet-4.5 claude-sonnet-4), &(&1 in models)) || "auto"
+  end
+
+  # A model chosen in Settings, while this Kiro still offers it.
+  defp chosen(key) do
+    case Factory.Prefs.get(key) do
+      model when is_binary(model) -> if model in models(), do: model
+      _ -> nil
+    end
+  end
+
+  @doc "The name Kiro gives model `value`, e.g. \"Claude Sonnet 4.5\"; the value when it gives none."
+  def model_name(value) do
+    case Enum.find(Factory.Kiro.Catalog.models() || [], &(&1["value"] == value)) do
+      %{"name" => name} when is_binary(name) and name != "" -> name
+      _ -> value
+    end
+  end
+
   @doc "The modes this Kiro offers, like `models/0`."
   def modes, do: values(Factory.Kiro.Catalog.modes()) || @modes
 

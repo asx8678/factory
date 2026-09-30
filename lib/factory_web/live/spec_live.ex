@@ -268,11 +268,7 @@ defmodule FactoryWeb.SpecLive do
   def handle_event("improve_apply", %{"title" => title}, socket) do
     with %{status: :done, suggestion: s} <- socket.assigns.improve[title],
          i when is_integer(i) <- task_index(socket, title) do
-      params = %{
-        "title" => s.title,
-        "details" => Enum.join(s.details, "\n"),
-        "requirements" => Enum.join(s.requirements, ", ")
-      }
+      params = Specs.task_params(s)
 
       tasks_changed(
         close_improve(socket, title),
@@ -358,13 +354,7 @@ defmodule FactoryWeb.SpecLive do
   def handle_event("draft_accept", _, socket) do
     case socket.assigns.draft do
       %{suggestion: %{} = s} ->
-        params = %{
-          "title" => s.title,
-          "details" => Enum.join(s.details, "\n"),
-          "requirements" => Enum.join(s.requirements, ", ")
-        }
-
-        added(socket, Specs.add_task(socket.assigns.spec, params))
+        added(socket, Specs.add_task(socket.assigns.spec, Specs.task_params(s)))
 
       _ ->
         {:noreply, socket}

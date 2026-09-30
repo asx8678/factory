@@ -26,7 +26,10 @@ defmodule Factory.Specs.PlannerTest do
              "requirements" => [1.2, "2"]
            }) == %{
              "title" => "Add export",
+             "objective" => "",
              "details" => ["In `lib/a.ex`.", "Test it."],
+             "verify" => [],
+             "model" => nil,
              "requirements" => ["1.2", "2"]
            }
 

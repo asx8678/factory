@@ -821,13 +821,16 @@ defmodule Factory.Specs do
         {:error, :blank_title}
 
       true ->
+        changes = task_changes(params)
+
         add_tasks(spec, [
           %{
             "title" => String.replace(title, ~r/\s*\R\s*/u, " "),
-            "details" =>
-              params |> Map.get("details", "") |> String.split(~r/\R/u) |> clean_lines(),
-            "requirements" =>
-              params |> Map.get("requirements", "") |> String.split(",") |> clean_lines()
+            "objective" => changes[:objective],
+            "details" => changes[:details] || [],
+            "verify" => changes[:verify] || [],
+            "model" => changes[:model],
+            "requirements" => changes[:requirements] || []
           }
         ])
     end
@@ -839,10 +842,9 @@ defmodule Factory.Specs do
   """
   def update_task(%SpecDoc{} = spec, index, %{} = params) do
     title = params |> Map.get("title", "") |> String.trim()
-    details = params |> Map.get("details", "") |> String.split(~r/\R/u) |> clean_lines()
 
-    requirements =
-      params |> Map.get("requirements", "") |> String.split(",") |> clean_lines()
+    changes =
+      params |> Map.put_new("details", "") |> Map.put_new("requirements", "") |> task_changes()
 
     old = spec |> task_list() |> Enum.at(index)
 
@@ -856,7 +858,7 @@ defmodule Factory.Specs do
       true ->
         with {:ok, spec} <-
                rewrite_tasks(spec, fn blocks ->
-                 List.update_at(blocks, index, &Spec.edit_block(&1, title, details, requirements))
+                 List.update_at(blocks, index, &Spec.edit_block(&1, changes))
                end) do
           new_title = spec |> task_list() |> Enum.at(index) |> Map.fetch!(:title)
 
@@ -870,6 +872,43 @@ defmodule Factory.Specs do
 
   defp clean_lines(lines),
     do: lines |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
+
+  @doc """
+  A task (a block from `task_list/1`, or Kiro's suggestion) as the text a task form
+  sends: title, objective, details and verify (one per line), model, and
+  requirements (comma separated).
+  """
+  def task_params(task) do
+    %{
+      "title" => task.title,
+      "objective" => Map.get(task, :objective) || "",
+      "details" => Enum.join(task.details, "\n"),
+      "verify" => Enum.join(Map.get(task, :verify) || [], "\n"),
+      "model" => Map.get(task, :model) || "",
+      "requirements" => Enum.join(task.requirements, ", ")
+    }
+  end
+
+  # A task form's text as changes for `Factory.Spec.edit_block/2`: only the fields it
+  # sent, so a form without the objective, checks or model leaves them as they are. A
+  # model this Kiro doesn't offer, or none, clears it.
+  defp task_changes(params) do
+    lines = fn text -> text |> to_string() |> String.split(~r/\R/u) |> clean_lines() end
+
+    %{
+      title: params["title"] && params["title"] |> to_string() |> String.trim(),
+      objective: params["objective"] && to_string(params["objective"]),
+      details: params["details"] && lines.(params["details"]),
+      verify: params["verify"] && lines.(params["verify"]),
+      model:
+        params["model"] &&
+          if(params["model"] in Factory.Kiro.models(), do: params["model"], else: ""),
+      requirements:
+        params["requirements"] &&
+          params["requirements"] |> to_string() |> String.split(",") |> clean_lines()
+    }
+    |> Map.reject(fn {_, v} -> is_nil(v) end)
+  end
 
   defp drop_indices(blocks, indices) do
     for {block, i} <- Enum.with_index(blocks), i not in indices, do: block
@@ -900,11 +939,8 @@ defmodule Factory.Specs do
   def edit_plan_task(%SpecDoc{} = spec, index, %{} = params) do
     title = params |> Map.get("title", "") |> to_string() |> String.trim()
 
-    details =
-      params |> Map.get("details", "") |> to_string() |> String.split(~r/\R/u) |> clean_lines()
-
-    requirements =
-      params |> Map.get("requirements", "") |> to_string() |> String.split(",") |> clean_lines()
+    changes =
+      params |> Map.put_new("details", "") |> Map.put_new("requirements", "") |> task_changes()
 
     {preamble, blocks} = Spec.blocks(spec.tasks)
 
@@ -919,7 +955,7 @@ defmodule Factory.Specs do
         {:error, :not_found}
 
       true ->
-        blocks = List.update_at(blocks, index, &Spec.edit_block(&1, title, details, requirements))
+        blocks = List.update_at(blocks, index, &Spec.edit_block(&1, changes))
         update_spec(spec, %{tasks: Spec.render_blocks(preamble, blocks)})
     end
   end

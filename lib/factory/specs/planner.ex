@@ -13,14 +13,16 @@ defmodule Factory.Specs.Planner do
 
   # The one shape a task has wherever Kiro writes one: suggestions, a run's plan, a chat
   # plan without tools, an improved or drafted task, and `Factory.PlanTools.add_tasks`.
-  @task_json ~s|{"title": "<imperative, under 80 characters>", "details": ["<one step or note per item, 1 to 6 items; wrap code and paths in backticks>"], "requirements": ["<requirement number, e.g. 1.2>"]}|
+  @task_json ~s|{"title": "<imperative, under 80 characters>", "objective": "<one or two sentences: what is true when it's done>", "details": ["<a step of the approach, in order, naming the files and functions it changes; 1 to 8 items; code and paths in backticks>"], "verify": ["<a check that proves it's done: a command and what it must show, a test that must pass, or what to look at; 1 to 4 items>"], "model": "<the model to build it with, from the list>", "requirements": ["<requirement number, e.g. 1.2>"]}|
 
   @doc "The task shape Kiro is asked for, as JSON with placeholders."
   def task_json, do: @task_json
 
   @doc """
-  A task Kiro wrote, in the one shape: `%{"title", "details" => [line], "requirements" =>
-  [ref]}`, or nil without a title. Details may come as a list or as text (one per line).
+  A task Kiro wrote, in the one shape: `%{"title", "objective", "details" => [step],
+  "verify" => [check], "model", "requirements" => [ref]}`, or nil without a title.
+  Lists may come as lists or as text (one per line). A model this Kiro doesn't offer
+  is dropped (nil), so a made-up name never reaches a run.
   """
   def task(%{"title" => title} = t) when is_binary(title) do
     case title |> String.replace(~r/\s*\R\s*/u, " ") |> String.trim() do
@@ -30,9 +32,14 @@ defmodule Factory.Specs.Planner do
       title ->
         %{
           "title" => String.slice(title, 0, 200),
+          "objective" =>
+            t["objective"] |> text() |> String.replace(~r/\s*\R\s*/u, " ") |> String.slice(0, 500),
           # Only text: a number among the details is noise, unlike a requirement's "1.2".
           "details" =>
             t["details"] |> List.wrap() |> Enum.filter(&is_binary/1) |> lines() |> Enum.take(12),
+          "verify" =>
+            t["verify"] |> List.wrap() |> Enum.filter(&is_binary/1) |> lines() |> Enum.take(6),
+          "model" => if(t["model"] in Factory.Kiro.models(), do: t["model"]),
           "requirements" =>
             t["requirements"] |> List.wrap() |> Enum.map(&to_string/1) |> lines() |> Enum.take(8)
         }
@@ -40,6 +47,49 @@ defmodule Factory.Specs.Planner do
   end
 
   def task(_), do: nil
+
+  @doc """
+  What every task says, wherever Kiro writes one (the chat's plan, the Spec page, a
+  run's plan, an improved or a new task): what to do, a suggested way to do it, and
+  how to check it was done right, with the model to build it on.
+  """
+  def task_standard do
+    """
+    Every task says what to do, a suggested way to do it, and how to check it was done \
+    right, so the agent that builds it doesn't guess and a different model can verify it:
+    - title: what changes, imperative, under 80 characters.
+    - objective: one or two sentences on what is true when it's done, in terms the \
+    person would recognise: behaviour and outcomes, not code.
+    - details, the approach: the steps in order, each naming the exact files and \
+    functions it changes and what changes in them, done the way the code works today.
+    - verify: 1 to 4 checks that prove it's done correctly, each one something a \
+    reviewer who didn't build it can run or see: a command and what it must show \
+    (`mix test test/app/export_test.exs` passes), a test that must exist and pass, or \
+    what to look at and where. "It works" isn't a check.
+    - model: the model to build it with: #{model_guide()}
+    - requirements: the requirement numbers it covers, when the spec numbers them.
+    Keep each task one change that can be built and verified on its own, and put the \
+    tests a change needs in its own task's steps and checks.
+    """
+  end
+
+  # The models a task may name, from what this Kiro offers, with when to pick each.
+  defp model_guide do
+    models = Factory.Kiro.models()
+    strong = Factory.Kiro.strongest()
+
+    light =
+      models |> Enum.filter(&String.contains?(&1, "haiku")) |> Enum.sort(:desc) |> List.first()
+
+    [
+      "auto" in models && "auto for most tasks",
+      strong != "auto" && "#{strong} for tricky, cross-cutting or risky ones",
+      light && "#{light} for small, mechanical edits"
+    ]
+    |> Enum.filter(& &1)
+    |> Enum.join("; ")
+    |> Kernel.<>(".")
+  end
 
   @doc "The tasks in `list` that have a title, in the one shape (`task/1`)."
   def tasks(list), do: list |> List.wrap() |> Enum.map(&task/1) |> Enum.reject(&is_nil/1)
@@ -88,20 +138,28 @@ defmodule Factory.Specs.Planner do
     """
     <task-planning step="tasks">
     You are planning how to build the spec below in the project in the current folder. \
-    You may read files again to check details. Don't change anything and don't run commands.
+    Don't change anything and don't run commands.
 
-    What you found about the project:
+    What you found about the project on a first look:
     #{project}
 
     Questions and answers:
     #{qa}
 
-    Suggest about 20 implementation tasks in build order. Each task is one small change \
-    that can be built and tested on its own, names the files or modules it touches, and \
-    traces back to the requirements it covers. Include tasks for tests. Don't repeat tasks \
-    the spec's tasks file already has.
+    Work through it in this order, and don't skip reading the code:
+    1. From the spec and the answers, list for yourself each thing that must be true \
+    when this is done.
+    2. Read the code this touches: the files and functions that change, what depends \
+    on them (callers, templates, routes, migrations, config), and the tests that cover \
+    them and how they're written. The summary above is a start, not enough to plan from.
+    3. Plan the tasks in build order, as many as the work needs and no more: usually 3 \
+    to 10, more for a big feature. Every expectation from step 1 is covered by a task, \
+    and nothing goes further than the spec asks. Don't repeat tasks the spec's tasks \
+    file already has.
 
-    Add them with the factory tool suggest_tasks, 3 to 6 at a time, in build order, then \
+    #{String.trim(task_standard())}
+
+    Add them with the factory tool suggest_tasks, 2 to 5 at a time, in build order, then \
     end your turn with one short sentence. The person picks which to keep.
 
     Only if the factory tools aren't available, reply instead with only this JSON object, \
@@ -129,7 +187,10 @@ defmodule Factory.Specs.Planner do
     current =
       Enum.join(
         ["Title: #{task.title}"] ++
+          List.wrap(task[:objective] && "Objective: #{task.objective}") ++
           Enum.map(task.details, &"- #{&1}") ++
+          Enum.map(Map.get(task, :verify, []), &"Verify: #{&1}") ++
+          List.wrap(task[:model] && "Model: #{task.model}") ++
           if(task.requirements == [],
             do: [],
             else: ["Requirements: #{Enum.join(task.requirements, ", ")}"]
@@ -162,12 +223,11 @@ defmodule Factory.Specs.Planner do
     3. Read the tasks before and after it in tasks.md: it shouldn't redo their work or \
     use anything built after it.
 
-    Then rewrite it: a title that says what changes; steps in order, naming the exact \
-    files and functions and what changes in each; a last step that says how to check it's \
-    done (the test to add or run, or what to look at). Keep it one small change that can \
-    be built and tested on its own. Keep what the person wrote unless it's wrong, and \
-    don't add work beyond what the task is for. Keep requirement numbers that still \
-    apply. Wrap code, paths and commands in `backticks`.
+    Then rewrite it to the task standard below. Keep what the person wrote unless it's \
+    wrong, and don't add work beyond what the task is for. Keep requirement numbers that \
+    still apply. Wrap code, paths and commands in `backticks`.
+
+    #{String.trim(task_standard())}
 
     #{json_shape()}
     </task-planning>
@@ -204,12 +264,11 @@ defmodule Factory.Specs.Planner do
     3. Read the spec's tasks: don't repeat what one already does, and note which task \
     this one should come after.
 
-    Then write it: a title that says what changes; steps in order, naming the exact \
-    files and functions and what changes in each; a last step that says how to check it's \
-    done (the test to add or run, or what to look at). Keep it one small change that can \
-    be built and tested on its own. Keep to what the person meant: fill in what's \
-    missing, and don't add work they didn't ask for. Use the spec's requirement numbers \
-    it covers. Wrap code, paths and commands in `backticks`.
+    Then write it to the task standard below. Keep to what the person meant: fill in \
+    what's missing, and don't add work they didn't ask for. Use the spec's requirement \
+    numbers it covers. Wrap code, paths and commands in `backticks`.
+
+    #{String.trim(task_standard())}
 
     #{json_shape()}
     </task-planning>
@@ -229,8 +288,7 @@ requirements with WHEN/THEN acceptance criteria (for a bug: the expected behavio
 approach, risks and how it will be tested (for a bug: the likely cause and the fix).|,
      ~s|"design": "<markdown>"|},
     {"tasks",
-     ~s|- "tasks": small implementation tasks in build order, each buildable and testable on \
-its own, naming the files it touches and the requirement numbers it covers. Include tests.|,
+     ~s|- "tasks": implementation tasks in build order, each written to the task standard below.|,
      ~s|"tasks": [#{@task_json}]|}
   ]
 
@@ -252,7 +310,9 @@ its own, naming the files it touches and the requirement numbers it covers. Incl
 
     size =
       if "tasks" in write,
-        do: if(type.id == "feature", do: "About 8 to 20 tasks.", else: "Usually 3 to 10 tasks."),
+        do:
+          "As many tasks as the work needs and no more: usually 3 to 10, more for a big feature.\n\n" <>
+            String.trim(task_standard()),
         else: ""
 
     asked = for {part, what, _} <- @run_parts, part in write, do: what
@@ -379,11 +439,12 @@ its own, naming the files it touches and the requirement numbers it covers. Incl
     where it goes in the code, how to tell it works), call ask_user with 1 to 5 short, \
     specific questions and leave the plan as it is.
     - With no plan yet, or when the person wants a different one, call create_plan with a \
-    summary and your approach, then add_tasks: small implementation tasks in build order, \
-    2 to 5 per call, each buildable and testable on its own, naming the files it touches. \
-    Include tests.
+    summary and your approach, then add_tasks: the tasks in build order, 2 to 5 per \
+    call, as many as the work needs and no more.
     - With a plan already, refine it with what the person said last: update_task, \
     remove_tasks and add_tasks. Keep what still fits; the person may have edited tasks.
+
+    #{String.trim(task_standard())}
 
     When you're done, end with a short reply to the person, 2 to 4 sentences: how you'd \
     do it and why, what you changed, or what you need to know. Don't list the tasks: \
@@ -412,9 +473,10 @@ its own, naming the files it touches and the requirement numbers it covers. Incl
     and the tests that cover it.
     3. Trace. Match each expectation to the tasks that deliver it. An expectation with \
     no task is missing; a task or step that serves no expectation is beyond scope.
-    4. Judge each task: could an agent build it without guessing (the files, the steps, \
-    a way to check it's done)? Is it one change that can be built and tested alone? Is \
-    it in build order, with nothing used before the task that makes it?
+    4. Judge each task against the task standard below: does it say what's true when \
+    it's done, how to build it (the files and steps), and how another model can check \
+    it (runnable checks)? Is it one change that can be built and tested alone? Is it \
+    in build order, with nothing used before the task that makes it?
     5. Look for what breaks: behaviour that changes for existing users or callers, data \
     to migrate, tests that will fail, permissions and security, errors and empty states.
 
@@ -436,6 +498,8 @@ its own, naming the files it touches and the requirement numbers it covers. Incl
 
     A line or two per point. Factory shows this report above the plan, and the person's \
     Refine button acts on it.
+
+    #{String.trim(task_standard())}
     """
   end
 
@@ -458,10 +522,9 @@ its own, naming the files it touches and the requirement numbers it covers. Incl
     4. Decide the changes: tasks to fix, split, merge, reorder, drop or add.
 
     Then change the plan, as little as it takes:
-    - Every task ends up with a title that says what changes; steps in order, naming the \
-    exact files and functions and what changes in each; a last step that says how to \
-    check it's done (the test to add or run, or what to look at); and the requirement \
-    numbers it covers.
+    - Every task ends up meeting the task standard below: its objective, the approach \
+    as steps, its checks and its model. Fill in what an older task is missing without \
+    changing what it does.
     - One change per task, buildable and testable on its own, in build order. Tests go in \
     the task that needs them or the one right after.
     - Leave good tasks as they are. The person may have written or edited tasks: keep \
@@ -474,6 +537,8 @@ its own, naming the files it touches and the requirement numbers it covers. Incl
 
     End with a short reply to the person, 2 to 4 sentences: what you changed and why, \
     and what you left for them to decide. Don't list the tasks: Factory shows them.
+
+    #{String.trim(task_standard())}
 
     Only if the factory tools aren't available, reply instead with only this JSON object, \
     holding the whole reworked plan:
@@ -538,7 +603,10 @@ its own, naming the files it touches and the requirement numbers it covers. Incl
     """
   end
 
-  @doc "Reads an improved or new task: `{:ok, %{title:, details:, requirements:, why:}}`."
+  @doc """
+  Reads an improved or new task: `{:ok, %{title:, objective:, details:, verify:, model:,
+  requirements:, why:}}`.
+  """
   def parse_improvement(reply) do
     with {:ok, data} <- decode(reply) do
       case task(data) do
@@ -549,7 +617,10 @@ its own, naming the files it touches and the requirement numbers it covers. Incl
           {:ok,
            %{
              title: t["title"],
+             objective: if(t["objective"] == "", do: nil, else: t["objective"]),
              details: t["details"],
+             verify: t["verify"],
+             model: t["model"],
              requirements: t["requirements"],
              why: text(data["why"])
            }}
@@ -605,17 +676,23 @@ its own, naming the files it touches and the requirement numbers it covers. Incl
     tasks
     |> Enum.with_index(first)
     |> Enum.map_join("\n\n", fn {task, n} ->
-      details = task["details"] |> List.wrap() |> Enum.reject(&(String.trim(&1) == ""))
-      lines = ["- [ ] #{n}. #{task["title"]}" | Enum.map(details, &"  - #{&1}")]
+      {_, [block]} = Factory.Spec.blocks("- [ ] #{n}. #{task["title"]}")
 
-      lines =
-        if task["requirements"] != [],
-          do: lines ++ ["  - _Requirements: #{Enum.join(task["requirements"], ", ")}_"],
-          else: lines
-
-      Enum.join(lines, "\n")
+      block
+      |> Factory.Spec.edit_block(%{
+        title: task["title"],
+        objective: task["objective"],
+        details: clean(task["details"]),
+        verify: clean(task["verify"]),
+        model: task["model"],
+        requirements: clean(task["requirements"])
+      })
+      |> Map.fetch!(:lines)
+      |> Enum.join("\n")
     end)
   end
+
+  defp clean(list), do: list |> List.wrap() |> Enum.reject(&(String.trim(&1) == ""))
 
   @doc "A short line for what Kiro is doing, from an ACP tool_call update."
   def describe_tool(update, workdir) do

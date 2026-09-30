@@ -8,6 +8,11 @@ defmodule Factory.Spec do
   @checkbox ~r/^[-*] \[[ xX]\]\s+(?:(\d+(?:\.\d+)*)\.?\s+)?(.+)$/
   @numbered ~r/^(\d+)[.)]\s+(.+)$/
 
+  # A task's labelled sub-items (see `blocks/1`).
+  @objective ~r/^\*{0,2}Objective:?\*{0,2}:?\s*/i
+  @verify ~r/^\*{0,2}(Verify|Verification):?\*{0,2}:?\s*/i
+  @model ~r/^_?\*{0,2}Model:?\*{0,2}:?\s*|_$/i
+
   @doc "Returns `[%{ref: \"1\" | nil, title: \"...\"}]` in document order."
   def parse_tasks(markdown) do
     lines = String.split(markdown, ~r/\R/u)
@@ -44,10 +49,22 @@ defmodule Factory.Spec do
   Splits a tasks file into its tasks, keeping every line so it can be written back.
   Returns `{preamble_lines, blocks}`; each block is
 
-      %{title:, ref:, done:, details: [line], requirements: [ref], lines: [raw line]}
+      %{title:, ref:, done:, objective:, details: [line], verify: [line], model:,
+        requirements: [ref], lines: [raw line]}
 
-  where `details` are the task's sub-items (without the bullet) and `requirements`
-  come from a `_Requirements: 1.1, 1.2_` line.
+  A task's sub-items say what it is for, how to build it and how to check it:
+
+      - [ ] 2. Add the reset form
+        - Objective: A person who forgot their password can ask for a reset link.
+        - Add `reset_form/1` to `lib/app_web/live/sign_in_live.ex`.
+        - Verify: `mix test test/app_web/live/sign_in_live_test.exs` passes.
+        - _Model: auto_
+        - _Requirements: 1.1, 1.2_
+
+  `objective` is the `Objective:` line, `verify` the `Verify:` lines, `model` the
+  `_Model: …_` line and `requirements` the `_Requirements: …_` line; every other
+  sub-item is a step of the approach, in `details`. Tasks written before these had
+  only steps, which read as they always did.
   """
   def blocks(markdown) do
     lines = String.split(markdown || "", ~r/\R/u)
@@ -78,38 +95,83 @@ defmodule Factory.Spec do
         [_, ref, title] -> [ref, title]
       end
 
-    {requirements, details} =
+    items =
       rest
       |> Enum.map(&(&1 |> String.trim() |> String.replace(~r/^[-*]\s+/, "")))
       |> Enum.reject(&(&1 == ""))
-      |> Enum.split_with(&Regex.match?(~r/^_?Requirements?:/i, &1))
+      |> Enum.group_by(&part/1)
 
     requirements =
-      requirements
-      |> Enum.flat_map(fn line ->
+      Enum.flat_map(Map.get(items, :requirements, []), fn line ->
         line
         |> String.replace(~r/^_?Requirements?:\s*|_$/i, "")
         |> String.split(",", trim: true)
         |> Enum.map(&String.trim/1)
       end)
 
+    objective =
+      case Enum.map(Map.get(items, :objective, []), &value(&1, @objective)) do
+        [] -> nil
+        lines -> Enum.join(lines, " ")
+      end
+
+    model =
+      case Map.get(items, :model, []) do
+        [line | _] -> value(line, @model)
+        [] -> nil
+      end
+
     %{
       ref: if(ref == "", do: nil, else: ref),
       title: String.trim(title),
       done: Regex.match?(~r/^[-*] \[[xX]\]/, first),
-      details: details,
+      objective: objective,
+      details: Map.get(items, :details, []),
+      verify: Enum.map(Map.get(items, :verify, []), &value(&1, @verify)),
+      model: model,
       requirements: requirements,
       lines: lines
     }
   end
 
+  # Which part of a task a sub-item is.
+  defp part(line) do
+    cond do
+      Regex.match?(~r/^_?Requirements?:/i, line) -> :requirements
+      Regex.match?(@objective, line) -> :objective
+      Regex.match?(@verify, line) -> :verify
+      Regex.match?(~r/^_?\*{0,2}Model:/i, line) -> :model
+      true -> :details
+    end
+  end
+
+  defp value(line, label), do: line |> String.replace(label, "") |> String.trim()
+
   @doc """
-  Rewrites a block with a new title, details and requirements, keeping its
-  bullet, checkbox and number. Details are written as sub-items, then the
-  requirements as a `_Requirements: …_` line.
+  Rewrites a block with a new title, steps (details) and requirements, keeping its
+  bullet, checkbox and number, and its objective, checks and model.
   """
-  def edit_block(%{lines: [first | _]} = block, title, details, requirements) do
-    title = title |> String.replace(~r/\s*\R\s*/u, " ") |> String.trim()
+  def edit_block(block, title, details, requirements),
+    do: edit_block(block, %{title: title, details: details, requirements: requirements})
+
+  @doc """
+  Rewrites a block with the fields in `changes` (`:title`, `:objective`, `:details`,
+  `:verify`, `:model`, `:requirements`); the others stay as they are. Written in the
+  order `blocks/1` reads them: objective, steps, checks, model, requirements.
+  """
+  def edit_block(%{lines: [first | _]} = block, %{} = changes) do
+    block =
+      Map.merge(
+        %{objective: nil, verify: [], model: nil},
+        block
+      )
+
+    fields =
+      Map.merge(block, Map.take(changes, ~w(title objective details verify model requirements)a))
+
+    title = fields.title |> String.replace(~r/\s*\R\s*/u, " ") |> String.trim()
+    objective = blank_nil(fields.objective)
+    model = blank_nil(fields.model)
 
     first =
       case Regex.run(~r/^([-*] \[[ xX]\]\s+(?:\d+(?:\.\d+)*\.?\s+)?|\d+[.)]\s+)/, first) do
@@ -118,14 +180,34 @@ defmodule Factory.Spec do
       end
 
     rest =
-      Enum.map(details, &"  - #{&1}") ++
-        if(requirements == [],
+      List.wrap(objective && "  - Objective: #{objective}") ++
+        Enum.map(fields.details, &"  - #{&1}") ++
+        Enum.map(fields.verify, &"  - Verify: #{&1}") ++
+        List.wrap(model && "  - _Model: #{model}_") ++
+        if(fields.requirements == [],
           do: [],
-          else: ["  - _Requirements: #{Enum.join(requirements, ", ")}_"]
+          else: ["  - _Requirements: #{Enum.join(fields.requirements, ", ")}_"]
         )
 
-    lines = [first | rest]
-    %{block | title: title, details: details, requirements: requirements, lines: lines}
+    %{
+      block
+      | title: title,
+        objective: objective,
+        details: fields.details,
+        verify: fields.verify,
+        model: model,
+        requirements: fields.requirements,
+        lines: [first | rest]
+    }
+  end
+
+  defp blank_nil(nil), do: nil
+
+  defp blank_nil(text) do
+    case text |> to_string() |> String.replace(~r/\s*\R\s*/u, " ") |> String.trim() do
+      "" -> nil
+      text -> text
+    end
   end
 
   defp trim_trailing_blank(lines),

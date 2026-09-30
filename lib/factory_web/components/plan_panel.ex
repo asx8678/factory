@@ -184,7 +184,42 @@ defmodule FactoryWeb.PlanPanel do
                 </p>
                 <.actions i={i} busy={@improve[task.title][:status] == :thinking} />
               </div>
-              <ul class="mt-1 space-y-0.5 text-[13px] leading-snug text-base-content/65">
+              <%!-- What's true when it's done. --%>
+              <.inline_field
+                :if={@inline == {i, "objective"}}
+                i={i}
+                part="objective"
+                value={task[:objective] || ""}
+                placeholder="What's true when it's done"
+                class="mt-1 w-full text-[13px] leading-snug"
+              />
+              <p
+                :if={@inline != {i, "objective"} and task[:objective]}
+                id={"chat-plan-objective-#{i}"}
+                data-edit="objective"
+                data-i={i}
+                title="Double-click to edit"
+                class="mt-1 cursor-text text-[13px] leading-snug text-base-content/80"
+              >
+                <TaskList.inline text={task.objective} />
+              </p>
+
+              <button
+                :if={@inline != {i, "objective"} and !task[:objective]}
+                id={"chat-plan-add-objective-#{i}"}
+                type="button"
+                phx-click="plan_inline"
+                phx-value-i={i}
+                phx-value-part="objective"
+                class="mt-1 flex items-center gap-1 text-xs text-warning/80 hover:text-base-content"
+              >
+                <.icon name="hero-plus-micro" class="size-3" />
+                Add the objective: what's true when it's done
+              </button>
+
+              <%!-- How: the steps. --%>
+              <p class="mt-2 text-[11px] font-medium text-base-content/45">Approach</p>
+              <ul class="mt-0.5 space-y-0.5 text-[13px] leading-snug text-base-content/65">
                 <li :for={{d, j} <- Enum.with_index(task.details)} class="flex gap-1.5">
                   <span class="text-base-content/30">–</span>
                   <.inline_field
@@ -227,8 +262,78 @@ defmodule FactoryWeb.PlanPanel do
                   </button>
                 </li>
               </ul>
-              <p :if={task.requirements != []} class="mt-1 text-xs text-base-content/45">
-                Requirements {Enum.join(task.requirements, ", ")}
+              <%!-- How to tell it's done right: the checks a different model runs. --%>
+              <p class="mt-2 text-[11px] font-medium text-base-content/45">Verify</p>
+              <ul
+                id={"chat-plan-checks-#{i}"}
+                class="mt-0.5 space-y-0.5 text-[13px] leading-snug text-base-content/65"
+              >
+                <li :for={{c, j} <- Enum.with_index(TaskList.checks(task))} class="flex gap-1.5">
+                  <.icon
+                    name="hero-check-circle-micro"
+                    class="mt-[2px] size-3.5 shrink-0 text-teal-500"
+                  />
+                  <.inline_field
+                    :if={@inline == {i, "check-#{j}"}}
+                    i={i}
+                    part={"check-#{j}"}
+                    value={c}
+                    class="flex-1 text-[13px] leading-snug"
+                  />
+                  <span
+                    :if={@inline != {i, "check-#{j}"}}
+                    data-edit={"check-#{j}"}
+                    data-i={i}
+                    title="Double-click to edit; clear it to remove the check"
+                    class="min-w-0 cursor-text"
+                  >
+                    <TaskList.inline text={c} />
+                  </span>
+                </li>
+                <li :if={@inline == {i, "newcheck"}} class="flex gap-1.5">
+                  <.icon
+                    name="hero-check-circle-micro"
+                    class="mt-[2px] size-3.5 shrink-0 text-base-content/30"
+                  />
+                  <.inline_field
+                    i={i}
+                    part="newcheck"
+                    value=""
+                    placeholder="A check: a command and what it must show, or what to look at"
+                    class="flex-1 text-[13px] leading-snug"
+                  />
+                </li>
+                <li :if={@inline != {i, "newcheck"}}>
+                  <button
+                    id={"chat-plan-add-check-#{i}"}
+                    type="button"
+                    phx-click="plan_inline"
+                    phx-value-i={i}
+                    phx-value-part="newcheck"
+                    class={[
+                      "flex items-center gap-1 text-xs transition-opacity hover:text-base-content focus:opacity-100",
+                      if(TaskList.checks(task) == [],
+                        do: "text-warning/80",
+                        else: "text-base-content/40 opacity-0 group-hover:opacity-100"
+                      )
+                    ]}
+                  >
+                    <.icon name="hero-plus-micro" class="size-3" />
+                    {if TaskList.checks(task) == [],
+                      do: "Add a check: how to tell it's done right",
+                      else: "Add a check"}
+                  </button>
+                </li>
+              </ul>
+
+              <p
+                :if={task[:model] || task.requirements != []}
+                class="mt-2 flex flex-wrap items-center gap-x-3 text-xs text-base-content/45"
+              >
+                <TaskList.model_tag model={task[:model]} />
+                <span :if={task.requirements != []}>
+                  Requirements {Enum.join(task.requirements, ", ")}
+                </span>
               </p>
               <p
                 :if={(i + 1) in @thin and @improve[task.title] == nil}
@@ -398,31 +503,9 @@ defmodule FactoryWeb.PlanPanel do
 
   defp edit_form(assigns) do
     ~H"""
-    <form id={"chat-plan-form-#{@i}"} phx-submit="plan_save" class="space-y-2">
+    <form id={"chat-plan-form-#{@i}"} phx-submit="plan_save" class="space-y-2.5">
       <input type="hidden" name="i" value={@i} />
-      <input
-        type="text"
-        name="task[title]"
-        value={@task.title}
-        required
-        aria-label="Title"
-        class="h-8 w-full rounded-md border border-base-300 bg-base-100 px-2.5 text-sm font-medium outline-none focus:border-base-content/30"
-      />
-      <textarea
-        name="task[details]"
-        rows={max(length(@task.details), 2) + 1}
-        aria-label="Steps, one per line"
-        placeholder="Steps or notes, one per line"
-        class="w-full rounded-md border border-base-300 bg-base-100 px-2.5 py-1.5 text-[13px] leading-snug outline-none focus:border-base-content/30"
-      >{Enum.join(@task.details, "\n")}</textarea>
-      <input
-        type="text"
-        name="task[requirements]"
-        value={Enum.join(@task.requirements, ", ")}
-        aria-label="Requirements"
-        placeholder="Requirements it covers, e.g. 1.1, 2.3"
-        class="h-7 w-full rounded-md border border-base-300 bg-base-100 px-2.5 text-xs outline-none focus:border-base-content/30"
-      />
+      <TaskList.task_fields task={@task} as="task" focus />
       <div class="flex justify-end gap-1.5">
         <button type="button" phx-click="plan_edit_cancel" class="btn btn-ghost btn-xs">
           Cancel
@@ -489,12 +572,10 @@ defmodule FactoryWeb.PlanPanel do
         <% :done -> %>
           <p class="text-xs font-medium text-primary">Kiro's version</p>
           <p class="mt-0.5 font-medium"><TaskList.inline text={@entry.suggestion.title} /></p>
-          <ul :if={@entry.suggestion.details != []} class="mt-1 space-y-0.5 text-base-content/70">
-            <li :for={d <- @entry.suggestion.details} class="flex gap-1.5">
-              <span class="text-base-content/30">–</span>
-              <span class="min-w-0"><TaskList.inline text={d} /></span>
-            </li>
-          </ul>
+          <TaskList.task_parts task={@entry.suggestion} />
+          <p :if={@entry.suggestion[:model]} class="mt-1.5 text-xs text-base-content/45">
+            <TaskList.model_tag model={@entry.suggestion.model} />
+          </p>
           <p
             :if={@entry.suggestion.why not in [nil, ""]}
             class="mt-1 text-xs text-base-content/50"

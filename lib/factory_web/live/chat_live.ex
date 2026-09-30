@@ -390,9 +390,11 @@ defmodule FactoryWeb.ChatLive do
   def handle_event("plan_edit_cancel", _, socket),
     do: {:noreply, assign(socket, plan_editing: nil)}
 
-  # Editing in place (double-click): a task's title, one of its steps, or a new step.
+  # Editing in place (double-click): a task's title or objective, one of its steps or
+  # checks, or a new step or check.
   def handle_event("plan_inline", %{"i" => i, "part" => part}, socket)
-      when part == "title" or part == "new" or binary_part(part, 0, 5) == "step-" do
+      when part in ["title", "objective", "new", "newcheck"] or
+             binary_part(part, 0, 5) == "step-" or binary_part(part, 0, 6) == "check-" do
     {:noreply,
      assign(socket,
        plan_inline: {String.to_integer("#{i}"), part},
@@ -485,11 +487,7 @@ defmodule FactoryWeb.ChatLive do
   def handle_event("plan_use", %{"title" => title}, socket) do
     with %{status: :done, suggestion: s} <- socket.assigns.plan_improve[title],
          i when is_integer(i) <- Enum.find_index(plan_tasks(socket), &(&1.title == title)) do
-      params = %{
-        "title" => s.title,
-        "details" => Enum.join(s.details, "\n"),
-        "requirements" => Enum.join(s.requirements, ", ")
-      }
+      params = Specs.task_params(s)
 
       socket
       |> update(:plan_improve, &Map.delete(&1, title))
@@ -567,36 +565,31 @@ defmodule FactoryWeb.ChatLive do
   # A task with one line changed in place, as edit_plan_task/3 takes it; :same when
   # nothing changed. An emptied step goes; an empty title or new step changes nothing.
   defp inline_change(task, part, value) do
-    fields = fn title, details ->
-      {:ok,
-       %{
-         "title" => title,
-         "details" => Enum.join(details, "\n"),
-         "requirements" => Enum.join(task.requirements, ", ")
-       }}
-    end
+    params = Specs.task_params(task)
+    objective = params["objective"]
+    steps = task.details
+    checks = Map.get(task, :verify) || []
 
     case part do
-      "title" when value in ["", task.title] ->
-        :same
+      "title" when value in ["", task.title] -> :same
+      "title" -> {:ok, %{params | "title" => value}}
+      "objective" when value == objective -> :same
+      "objective" -> {:ok, %{params | "objective" => value}}
+      "new" when value == "" -> :same
+      "new" -> {:ok, %{params | "details" => Enum.join(steps ++ [value], "\n")}}
+      "newcheck" when value == "" -> :same
+      "newcheck" -> {:ok, %{params | "verify" => Enum.join(checks ++ [value], "\n")}}
+      "step-" <> j -> line_change(params, "details", steps, String.to_integer(j), value)
+      "check-" <> j -> line_change(params, "verify", checks, String.to_integer(j), value)
+    end
+  end
 
-      "title" ->
-        fields.(value, task.details)
-
-      "new" when value == "" ->
-        :same
-
-      "new" ->
-        fields.(task.title, task.details ++ [value])
-
-      "step-" <> j ->
-        j = String.to_integer(j)
-
-        cond do
-          Enum.at(task.details, j) == value -> :same
-          value == "" -> fields.(task.title, List.delete_at(task.details, j))
-          true -> fields.(task.title, List.replace_at(task.details, j, value))
-        end
+  # One line of a task's steps or checks changed in place; emptied, it goes.
+  defp line_change(params, field, lines, j, value) do
+    cond do
+      Enum.at(lines, j) == value -> :same
+      value == "" -> {:ok, %{params | field => Enum.join(List.delete_at(lines, j), "\n")}}
+      true -> {:ok, %{params | field => Enum.join(List.replace_at(lines, j, value), "\n")}}
     end
   end
 

@@ -53,7 +53,9 @@ defmodule Factory.PlanTools do
       description:
         "Adds implementation tasks to the plan, in build order, at the end or after task " <>
           "number `after` (0 for the start). Add a few at a time (2 to 5). Each task is one " <>
-          "small change that can be built and tested on its own and names the files it touches.",
+          "change that can be built and verified on its own: what's true when it's done " <>
+          "(objective), the steps naming the files it changes (details), how to check it " <>
+          "(verify) and the model to build it with.",
       inputSchema: %{
         type: "object",
         properties: %{
@@ -64,10 +66,27 @@ defmodule Factory.PlanTools do
               type: "object",
               properties: %{
                 title: %{type: "string", description: "Imperative, under 80 characters."},
+                objective: %{
+                  type: "string",
+                  description: "One or two sentences: what is true when it's done."
+                },
                 details: %{
                   type: "array",
                   items: %{type: "string"},
-                  description: "Steps or notes, 1 to 6. Wrap code and paths in `backticks`."
+                  description:
+                    "The approach: steps in order, naming the files and functions each changes, " <>
+                      "1 to 8. Wrap code and paths in `backticks`."
+                },
+                verify: %{
+                  type: "array",
+                  items: %{type: "string"},
+                  description:
+                    "1 to 4 checks that prove it's done: a command and what it must show, a " <>
+                      "test that must pass, or what to look at."
+                },
+                model: %{
+                  type: "string",
+                  description: "The model to build it with, from the ones the prompt lists."
                 },
                 requirements: %{
                   type: "array",
@@ -92,7 +111,10 @@ defmodule Factory.PlanTools do
         properties: %{
           number: %{type: "integer"},
           title: %{type: "string"},
-          details: %{type: "array", items: %{type: "string"}},
+          objective: %{type: "string"},
+          details: %{type: "array", items: %{type: "string"}, description: "The steps."},
+          verify: %{type: "array", items: %{type: "string"}, description: "The checks."},
+          model: %{type: "string"},
           requirements: %{type: "array", items: %{type: "string"}}
         },
         required: ["number"]
@@ -538,15 +560,20 @@ defmodule Factory.PlanTools do
 
     case is_integer(number) && number >= 1 && Enum.at(blocks, number - 1) do
       block when is_map(block) ->
-        title = if text(args["title"]) == "", do: block.title, else: text(args["title"])
-        details = if is_list(args["details"]), do: lines(args["details"]), else: block.details
+        # Only what's given changes; the rest, maybe the person's edits, stays.
+        changes =
+          %{
+            title: text(args["title"]) != "" && text(args["title"]),
+            objective: is_binary(args["objective"]) && text(args["objective"]),
+            details: is_list(args["details"]) && lines(args["details"]),
+            verify: is_list(args["verify"]) && lines(args["verify"]) |> Enum.take(6),
+            model: args["model"] in Factory.Kiro.models() && args["model"],
+            requirements:
+              is_list(args["requirements"]) && lines(args["requirements"]) |> Enum.take(8)
+          }
+          |> Map.reject(fn {_, v} -> v == false end)
 
-        requirements =
-          if is_list(args["requirements"]),
-            do: lines(args["requirements"]) |> Enum.take(8),
-            else: block.requirements
-
-        block = Spec.edit_block(block, title, details, requirements)
+        block = Spec.edit_block(block, changes)
         blocks = List.replace_at(blocks, number - 1, block)
         write(spec, %{tasks: Spec.render_blocks(preamble, blocks)}, "Changed task #{number}.")
 
