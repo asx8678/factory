@@ -22,12 +22,15 @@
 
   let type = $derived(data.action?.type)
   let missing = $derived(data.missing ?? [])
+  // No arrows while the workflow has agents: not in the flow, so runs skip it.
+  let loose = $derived(data.loose === true)
 </script>
 
 <div
   class={[
-    "group w-48 rounded-xl border bg-surface text-base-content shadow-sm transition-[box-shadow,border-color] hover:shadow-md",
+    "group w-48 rounded-xl border bg-surface text-base-content shadow-sm transition-[box-shadow,border-color,opacity] hover:shadow-md",
     selected ? "border-warning ring-2 ring-warning/25" : "border-warning/45 hover:border-warning/75",
+    loose && !selected && "border-dashed opacity-70 hover:opacity-100",
   ]}
 >
   {#each [Position.Top, Position.Right, Position.Bottom, Position.Left] as side}
@@ -53,6 +56,11 @@
     {/if}
   </div>
 
+  {#if loose}
+    <div class="flex items-center gap-1 border-t border-base-content/10 px-2 py-1 text-[10px] text-base-content/60" title="Draw an arrow into it from the step it should follow">
+      <span class="hero-link-slash-micro size-3"></span> Not connected: runs skip it
+    </div>
+  {/if}
   {#if missing.length}
     <div class="border-t border-base-content/10 px-2 py-1 text-[10px] text-warning">Needs setup: {missing.join(", ")}</div>
   {/if}

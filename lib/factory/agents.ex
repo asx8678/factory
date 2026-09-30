@@ -215,12 +215,21 @@ defmodule Factory.Agents do
   @doc "A workflow's graph in the shape the Svelte Flow canvas expects."
   def graph(workflow_id, selected_id \\ nil) do
     agents = list_agents(workflow_id)
+    links = list_links(workflow_id)
+    agents? = Enum.any?(agents, &(&1.kind != "action"))
+    wired = MapSet.new(Enum.flat_map(links, &[&1.source_id, &1.target_id]))
 
     %{
       selected: selected_id && to_string(selected_id),
-      nodes: Enum.map(agents, &canvas_node/1),
+      nodes:
+        for a <- agents do
+          # An action with no arrows, beside agents, isn't in the flow: runs skip it
+          # (`Factory.Engine`), and its card says so.
+          loose = a.kind == "action" and agents? and not MapSet.member?(wired, a.id)
+          Map.put(canvas_node(a), :loose, loose)
+        end,
       edges:
-        for l <- list_links(workflow_id) do
+        for l <- links do
           %{
             id: "l#{l.id}",
             source: to_string(l.source_id),
@@ -263,8 +272,17 @@ defmodule Factory.Agents do
   def put_node(%{nodes: nodes} = graph, %Agent{} = agent) do
     id = to_string(agent.id)
 
+    # Activity doesn't change the arrows, so the card keeps whether it's loose.
     if Enum.any?(nodes, &(&1.id == id)),
-      do: %{graph | nodes: Enum.map(nodes, &if(&1.id == id, do: canvas_node(agent), else: &1))},
+      do: %{
+        graph
+        | nodes:
+            Enum.map(nodes, fn node ->
+              if node.id == id,
+                do: Map.put(canvas_node(agent), :loose, Map.get(node, :loose, false)),
+                else: node
+            end)
+      },
       else: :unchanged
   end
 
