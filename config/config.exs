@@ -73,6 +73,9 @@ config :logger, :default_formatter,
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason
 
+# Log files can be attached in the chat (troubleshooting keeps them as evidence).
+config :mime, :types, %{"text/x-log" => ["log"]}
+
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.
 import_config "#{config_env()}.exs"

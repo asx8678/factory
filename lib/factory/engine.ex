@@ -278,6 +278,69 @@ defmodule Factory.Engine do
     # Pausing or cancelling takes effect between steps.
     run = Runs.get_run(run.id)
 
+    cond do
+      run.status != "running" ->
+        nil
+
+      why = skip_reason(run, step) ->
+        skip(run, steps, step, rest, why)
+
+      true ->
+        run_step(run, steps, step, rest)
+    end
+  end
+
+  # In troubleshooting, a step with nothing to do is skipped rather than run only to say
+  # so: the Code Investigator with no repository, and the Evidence Analyst in a quick
+  # check of an error with nothing attached. They're found by name, as the workflow
+  # comes (`Factory.Runs.Types`).
+  defp skip_reason(run, %{agent: %{}} = step) do
+    if incident?(run) do
+      cond do
+        step.name == "Code Investigator" and project_dir(run) == nil ->
+          "there's no repository to search"
+
+        step.name == "Evidence Analyst" and quick_check?(run) and Factory.Evidence.list(run) == [] ->
+          "a quick check of one error, with nothing attached to read"
+
+        true ->
+          nil
+      end
+    end
+  end
+
+  defp skip_reason(_run, _step), do: nil
+
+  defp incident?(run) do
+    case Workflows.for_run(run) do
+      nil -> false
+      workflow -> Workflows.kind(workflow) == "incident"
+    end
+  end
+
+  # The Triage Lead's plan says the track: "**Track:** Quick check …".
+  defp quick_check?(run), do: (run.spec || "") =~ ~r/track:\**\s*quick check/i
+
+  # A skipped step hands on what was handed to it.
+  defp skip(run, steps, step, rest, why) do
+    passed =
+      step.after
+      |> Enum.map(&run.progress["outputs"][&1])
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join("\n\n")
+
+    progress =
+      run.progress
+      |> Map.update!("done", &(&1 ++ [step.id]))
+      |> Map.update!("outputs", &Map.put(&1, step.id, passed))
+      |> Map.update("skipped", [step.id], &Enum.uniq(&1 ++ [step.id]))
+
+    {:ok, run} = Runs.update_run(run, %{progress: progress})
+    Runs.post(run, "factory", "#{step.name} skipped: #{why}.", meta: meta(step))
+    walk(run, steps, rest)
+  end
+
+  defp run_step(run, steps, step, rest) do
     if run.status == "running" do
       # A verdict from an earlier pass of this step mustn't decide this one.
       progress =
@@ -828,6 +891,8 @@ defmodule Factory.Engine do
           "Your part: #{blank(step.does, "do what the job needs")}.",
         job(run, step, kind),
         kind == "incident" && Factory.Runs.Troubleshooting.mode_line(project_dir(run)),
+        # Where the attached files are, for the agents that may read them.
+        kind == "incident" && !Agent.web?(step.agent || %{}) && Factory.Evidence.describe(run),
         base_specs(run),
         run.spec && tag("<spec>", clean.(run.spec), "</spec>", 96 * 1024),
         clean_sources(sources(step), clean),
@@ -1031,8 +1096,10 @@ defmodule Factory.Engine do
         Runs.post(
           run,
           "factory",
-          "Done: all #{length(steps)} #{if length(steps) == 1, do: "step", else: "steps"} of the workflow ran." <>
-            tasks_note(run.tasks, steps) <> verified_note(run)
+          ran_note(steps, run.progress["skipped"] || []) <>
+            tasks_note(run.tasks, steps) <> verified_note(run),
+          # Troubleshooting ends with a report; Fix it starts a Fix a bug run on it.
+          actions: if(incident?(run), do: ["fix_it"], else: [])
         )
 
         {:ok, run}
@@ -1056,6 +1123,15 @@ defmodule Factory.Engine do
 
     {:error, reason}
   end
+
+  defp ran_note(steps, []),
+    do:
+      "Done: all #{length(steps)} #{if length(steps) == 1, do: "step", else: "steps"} of the workflow ran."
+
+  defp ran_note(steps, skipped),
+    do:
+      "Done: #{length(steps) - length(skipped)} of the workflow's #{length(steps)} steps ran; " <>
+        "#{length(skipped)} had nothing to do."
 
   # Tasks are done when an agent marked them (`Factory.RunTools`), not because the run ended.
   # In a workflow whose agents only read (a review, troubleshooting) they're checks to

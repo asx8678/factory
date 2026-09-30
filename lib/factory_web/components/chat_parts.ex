@@ -672,6 +672,14 @@ defmodule FactoryWeb.ChatParts do
       >
         <.icon name="hero-play-mini" class="size-4" /> Start run
       </button>
+      <button
+        :if={("fix_it" in @message.actions and @run) && @run.status == "done"}
+        id={"fix-it-#{@message.id}"}
+        phx-click="fix_it"
+        class="mt-3 flex items-center gap-1.5 rounded-full bg-primary px-4 py-1.5 text-sm font-medium text-primary-content transition-opacity hover:opacity-90"
+      >
+        <.icon name="hero-wrench-screwdriver-mini" class="size-4" /> Fix it
+      </button>
     </div>
     """
   end

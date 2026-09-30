@@ -174,15 +174,16 @@ defmodule Factory.Kiro.Permission do
   (`grep /api/ lib`) exists nowhere, so it doesn't count; a variable (`$HOME`) always
   does, as it can't be told where it leads.
   """
-  def reads_outside?(nil, _folder), do: false
+  def reads_outside?(command, folder, roots \\ [])
+  def reads_outside?(nil, _folder, _roots), do: false
 
-  def reads_outside?(command, folder) when is_binary(command) do
+  def reads_outside?(command, folder, roots) when is_binary(command) do
     folder = Path.expand(folder)
 
     command
     |> String.split(~r/[\s=:,]+/)
     |> Enum.map(&String.trim(&1, "\"'"))
-    |> Enum.any?(&outside?(&1, folder))
+    |> Enum.any?(&outside?(&1, folder, roots))
   end
 
   @doc """
@@ -217,14 +218,16 @@ defmodule Factory.Kiro.Permission do
   def paths_of(_call), do: []
 
   # The paths that lead outside `folder` (relative ones are inside it).
-  defp outside_paths(paths, folder) do
+  defp outside_paths(paths, folder, roots) do
     folder = Path.expand(folder)
-    Enum.reject(paths, &allowed?(Path.expand(&1, folder), folder))
+    Enum.reject(paths, &allowed?(Path.expand(&1, folder), folder, roots))
   end
 
-  # Inside the folder, or Kiro's own working files.
-  defp allowed?(path, folder) do
-    inside?(path, folder) or kiros_own?(path)
+  # Inside the folder or one of `roots` (a troubleshooting run's attached files), or
+  # Kiro's own working files.
+  defp allowed?(path, folder, roots) do
+    inside?(path, folder) or kiros_own?(path) or
+      Enum.any?(roots, &inside?(path, Path.expand(&1)))
   end
 
   # Where Kiro keeps what a tool gave it that was too big to hand over at once, to read
@@ -243,20 +246,22 @@ defmodule Factory.Kiro.Permission do
       review (`Factory.Repos.label/1`): that code is the pull request author's;
     * reads outside `folder`, with a command or with Kiro's own tools (`paths`).
 
-  The reason reads after the agent's name: "Reviewer wants to …".
+  `roots` are folders that count as inside too: a troubleshooting run's attached files
+  (`Factory.Evidence`), for the agents allowed to read them. The reason reads after the
+  agent's name: "Reviewer wants to …".
   """
-  def ask_first(kind, command, paths, folder)
+  def ask_first(kind, command, paths, folder, roots \\ [])
 
-  def ask_first("fetch", _command, _paths, _folder),
+  def ask_first("fetch", _command, _paths, _folder, _roots),
     do: "wants to fetch a web page. What it has read could go along with the request."
 
-  def ask_first("execute", command, _paths, folder) do
+  def ask_first("execute", command, _paths, folder, roots) do
     cond do
       Factory.Repos.label(folder) != nil and runs_project_code?(command) ->
         "wants to run `#{command}` in a pull request cloned for review. " <>
           "That runs the pull request's own code."
 
-      reads_outside?(command, folder) ->
+      reads_outside?(command, folder, roots) ->
         "wants to run `#{command}`, which reads outside the project folder."
 
       true ->
@@ -264,16 +269,16 @@ defmodule Factory.Kiro.Permission do
     end
   end
 
-  def ask_first(kind, _command, paths, folder) when kind in ["read", "search"] do
-    case outside_paths(paths, folder) do
+  def ask_first(kind, _command, paths, folder, roots) when kind in ["read", "search"] do
+    case outside_paths(paths, folder, roots) do
       [] -> nil
       outside -> "wants to read outside the project folder: #{Enum.join(outside, ", ")}."
     end
   end
 
-  def ask_first(_kind, _command, _paths, _folder), do: nil
+  def ask_first(_kind, _command, _paths, _folder, _roots), do: nil
 
-  defp outside?(word, folder) do
+  defp outside?(word, folder, roots) do
     cond do
       # `$HOME`, `${HOME}`; not a pattern's `foo$`.
       Regex.match?(~r/\$[A-Za-z_{]/, word) ->
@@ -282,7 +287,7 @@ defmodule Factory.Kiro.Permission do
       String.starts_with?(word, ["/", "~"]) or String.contains?(word, "..") ->
         # A glob reads what its folder holds.
         path = word |> String.replace(~r/[*?\[{].*$/, "") |> Path.expand(folder)
-        path != "" and not allowed?(path, folder) and File.exists?(path)
+        path != "" and not allowed?(path, folder, roots) and File.exists?(path)
 
       true ->
         false

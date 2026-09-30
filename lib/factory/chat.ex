@@ -51,11 +51,11 @@ defmodule Factory.Chat do
           say(run, reason)
 
         planner = planning?(run, agent, text) ->
-          run = if files != [], do: Factory.ChatPlanner.keep_files(run, files), else: run
+          run = keep(run, files, &Factory.ChatPlanner.keep_files/2)
           Factory.ChatPlanner.start(run, planner)
 
         true ->
-          run = if files != [], do: attach(run, files), else: run
+          run = keep(run, files, &attach/2)
 
           cond do
             text == "" -> :ok
@@ -105,6 +105,52 @@ defmodule Factory.Chat do
   def action(%Run{} = run, "start"), do: command(Runs.get_run(run.id), "/run")
 
   @doc """
+  Fix it, under a finished troubleshooting run: a new chat on the Fix a bug workflow,
+  in the same repository, asked to fix what the report found. With a repository its
+  planner starts on it; without one, the chat says to choose the project folder first.
+  Returns `{:ok, run}` with the new chat's run.
+  """
+  def fix_it(%Run{} = run) do
+    run = Runs.get_run(run.id)
+    report = report(run)
+    dir = String.trim(run.settings["project_dir"] || "")
+    bug = Workflows.standard("bug")
+
+    {:ok, fix} = Runs.create_run("Fix: " <> run.title)
+
+    {:ok, fix} =
+      Runs.update_run(fix, %{
+        settings: %{
+          "workflow_id" => bug.id,
+          "base_spec_ids" => bug.base_spec_ids,
+          "project_dir" => if(dir == "", do: nil, else: dir)
+        }
+      })
+
+    request = "Fix this, following the troubleshooting report below.\n\n" <> report
+
+    if dir == "" do
+      Runs.post(fix, "user", request)
+
+      say(
+        fix,
+        "Choose the project folder above, where the code to fix is, then send a message " <>
+          "(\"plan it\") and the planner plans the fix from the report."
+      )
+    else
+      handle(fix, request)
+    end
+
+    {:ok, Runs.get_run(fix.id)}
+  end
+
+  # The troubleshooting report: what the workflow's last step handed over.
+  defp report(run) do
+    last = run |> Engine.steps() |> Enum.reject(&(&1.kind == "action")) |> List.last()
+    (last && run.progress["outputs"][last.id]) || run.description || run.title
+  end
+
+  @doc """
   Gives a run exactly these spec files (`[{name, content}]`) and the tasks in them,
   and posts what was found. Used when a spec starts a run (`Factory.Specs.start_run/1`).
   """
@@ -115,6 +161,27 @@ defmodule Factory.Chat do
   end
 
   # Files dropped into the chat go into the run's spec, which the run then follows.
+  # Files dropped into a troubleshooting chat are evidence (logs, exports), kept whole
+  # for the agents to search (`Factory.Evidence`); elsewhere they go into the spec.
+  defp keep(run, [], _into_spec), do: run
+
+  defp keep(run, files, into_spec) do
+    workflow = Workflows.for_run(run)
+
+    if workflow && Workflows.kind(workflow) == "incident" do
+      names = Factory.Evidence.save(run, files)
+
+      say(
+        run,
+        "Kept #{Enum.join(names, ", ")} for the agents to search, whole, however big."
+      )
+
+      run
+    else
+      into_spec.(run, files)
+    end
+  end
+
   defp attach(run, files) do
     {:ok, _spec} = run |> Specs.for_run() |> Specs.add_files(files)
     report(Runs.get_run(run.id), files)

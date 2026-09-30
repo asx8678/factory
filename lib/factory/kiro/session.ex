@@ -636,15 +636,28 @@ defmodule Factory.Kiro.Session do
     # Some of what one that only reads may do goes to the person first
     # (`Kiro.Permission.ask_first/4`): a web page (unless the agent is set to search the
     # web, `Agent.web?/1`), a pull request's own code, a file outside the project.
+    # A troubleshooting run's attached files are there to read, except for an agent that
+    # searches the web.
+    roots =
+      if state.turn && not Agent.web?(state.turn.agent),
+        do: [Factory.Evidence.dir(state.turn.run_id)],
+        else: []
+
     ask =
       cond do
         looking? ->
-          Kiro.Permission.ask_first(kind, command, [], state.workdir)
+          Kiro.Permission.ask_first(kind, command, [], state.workdir, roots)
 
         state.turn != nil and Agent.read_only?(state.turn.agent) and
             ((kind == "fetch" and not Agent.web?(state.turn.agent)) or
                (wanted == "allow" and kind in ["read", "search"])) ->
-          Kiro.Permission.ask_first(kind, command, paths(params, state.turn), state.workdir)
+          Kiro.Permission.ask_first(
+            kind,
+            command,
+            paths(params, state.turn),
+            state.workdir,
+            roots
+          )
 
         true ->
           nil

@@ -50,10 +50,11 @@ defmodule FactoryWeb.ChatLive do
      |> assign(empty: true, live: [], spec_count: 0, show_plan: false)
      |> assign(plan_working: nil, plan_spec_hint: false)
      |> assign(form: to_form(%{"body" => ""}, as: :chat))
+     # Spec files; in troubleshooting, the logs and exports to search as well.
      |> allow_upload(:spec,
-       accept: ~w(.md .markdown .txt),
+       accept: ~w(.md .markdown .txt .log .json .csv),
        max_entries: 5,
-       max_file_size: 2_000_000
+       max_file_size: 20_000_000
      )}
   end
 
@@ -597,6 +598,14 @@ defmodule FactoryWeb.ChatLive do
      |> assign(folder_error: nil, clone_error: nil)
      |> derive()}
   end
+
+  # Fix it, under a finished troubleshooting run: on to a Fix a bug chat about it.
+  def handle_event("fix_it", _, %{assigns: %{run: %{status: "done"} = run}} = socket) do
+    {:ok, fix} = Chat.fix_it(run)
+    {:noreply, push_navigate(socket, to: ~p"/chat/#{fix.id}")}
+  end
+
+  def handle_event("fix_it", _, socket), do: {:noreply, socket}
 
   def handle_event("action", %{"action" => action}, socket) do
     Chat.action(Runs.get_run(socket.assigns.run.id), action)

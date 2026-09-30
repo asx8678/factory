@@ -12,8 +12,10 @@ defmodule Factory.Runs.Troubleshooting do
 
   The Triage Lead decides the track: a quick check (an error message or a short trace:
   what it means, the likely cause, the fix) or a full investigation (logs, metrics, a
-  failing pipeline, an outage over time). An agent whose part the track or the mode
-  leaves nothing to do says so in a line and passes the case file on.
+  failing pipeline, an outage over time). Factory skips the steps that have nothing to
+  do (`Factory.Engine`): the Code Investigator with no repository, and the Evidence
+  Analyst in a quick check with nothing attached. Another agent whose part leaves it
+  nothing to do says so in a line and passes the case file on.
 
   Two modes, stated in every agent's prompt (`mode_line/1`): no repository (only what
   the person pasted) or repository (the folder the agents work in is the code).
@@ -320,6 +322,8 @@ defmodule Factory.Runs.Troubleshooting do
       lands in, and whether a recommended option still exists.
     - The Error Researcher's findings (W…) the root cause now rests on: are the sources
       reliable and about this version? Don't redo research that's already well sourced.
+    - In a quick check, check only what no W… finding backs yet, with a few searches at
+      most. Search first and open only the pages that settle a claim.
 
     ## How to work
     - Search the web for each claim. Prefer the official documentation for the version

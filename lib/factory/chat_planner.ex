@@ -88,11 +88,20 @@ defmodule Factory.ChatPlanner do
         # Troubleshooting says which mode it's in: a repository, or none.
         mode_line =
           job == "incident" &&
-            Factory.Runs.Troubleshooting.mode_line(
-              case String.trim(run.settings["project_dir"] || "") do
-                "" -> nil
-                dir -> dir
-              end
+            Enum.join(
+              Enum.reject(
+                [
+                  Factory.Runs.Troubleshooting.mode_line(
+                    case String.trim(run.settings["project_dir"] || "") do
+                      "" -> nil
+                      dir -> dir
+                    end
+                  ),
+                  Factory.Evidence.describe(run)
+                ],
+                &is_nil/1
+              ),
+              "\n"
             )
 
         prompt_args = [
@@ -263,6 +272,8 @@ defmodule Factory.ChatPlanner do
              workdir: dir,
              model: prompt.model,
              allow: ["read", "search", "look"],
+             # A troubleshooting run's attached files are there to read.
+             roots: [Factory.Evidence.dir(run)],
              mcp_servers: [PlanTools.mcp_server(token)],
              reply: :last,
              on_tool: prompt.on_tool,

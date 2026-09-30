@@ -18,6 +18,8 @@ defmodule Factory.Kiro.Ask do
     * `:workdir` - the folder Kiro works in, default the Kiro workspace
     * `:allow` - tool kinds Kiro may use when it asks (ACP kinds: read, search, edit, execute, …),
       and "look" for commands that only look (`Factory.Kiro.Permission.looking?/1`)
+    * `:roots` - folders besides `:workdir` it may read without being refused, such as a
+      troubleshooting run's attached files (`Factory.Evidence`)
     * `:on_tool` - called with each ACP `tool_call` update as Kiro starts using a tool
     * `:mcp_servers` - MCP servers the session gets, as ACP `session/new` takes them; Kiro
       may call the tools of these without asking (its MCP permission requests carry no kind)
@@ -53,6 +55,7 @@ defmodule Factory.Kiro.Ask do
       port: port,
       log_mark: mark,
       workdir: workdir,
+      roots: opts[:roots] || [],
       deadline: deadline,
       allow: opts[:allow] || [],
       mcp: Enum.map(opts[:mcp_servers] || [], & &1.name),
@@ -206,11 +209,11 @@ defmodule Factory.Kiro.Ask do
     asks_first? =
       cond do
         kind == "execute" and kind not in conn.allow and looking? ->
-          Kiro.Permission.ask_first(kind, command, [], conn.workdir) != nil
+          Kiro.Permission.ask_first(kind, command, [], conn.workdir, conn.roots) != nil
 
         kind in ["read", "search"] and "execute" not in conn.allow ->
           paths = Kiro.Permission.paths_of(p["toolCall"])
-          Kiro.Permission.ask_first(kind, command, paths, conn.workdir) != nil
+          Kiro.Permission.ask_first(kind, command, paths, conn.workdir, conn.roots) != nil
 
         true ->
           false
