@@ -710,7 +710,7 @@ defmodule FactoryWeb.ChatLive do
   # The read-only workflow graph still reports what its canvas does (a layout, say);
   # anything else here is a mistake worth knowing about.
   def handle_event(event, params, socket) do
-    Logger.warning(
+    Logger.debug(
       "FactoryWeb.ChatLive got an event it doesn't handle: #{event} #{inspect(params)}"
     )
 

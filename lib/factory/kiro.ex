@@ -159,12 +159,12 @@ defmodule Factory.Kiro do
         receive do
           {^ref, result} ->
             Process.demonitor(monitor, [:flush])
-            result
+            worded(result, agent)
 
           {:DOWN, ^monitor, :process, ^pid, _reason} ->
             # A last answer may have been sent just before it stopped.
             receive do
-              {^ref, result} -> result
+              {^ref, result} -> worded(result, agent)
             after
               0 -> {:error, "#{agent.name}'s Kiro session stopped before it answered."}
             end
@@ -336,4 +336,8 @@ defmodule Factory.Kiro do
 
   defp blank_to_nil(nil), do: nil
   defp blank_to_nil(s), do: if(String.trim(s) == "", do: nil, else: String.trim(s))
+
+  # A cancelled job's answer, in words the run's chat and the agent's card can show.
+  defp worded({:error, :cancelled}, agent), do: {:error, "#{agent.name}'s step was cancelled."}
+  defp worded(result, _agent), do: result
 end

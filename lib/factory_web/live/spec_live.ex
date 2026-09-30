@@ -657,10 +657,19 @@ defmodule FactoryWeb.SpecLive do
   defp tasks_changed(socket, {:error, :locked}),
     do: {:noreply, put_flash(socket, :error, "Click Edit to change approved tasks.")}
 
+  # The tasks are saved; a draft run couldn't follow them.
+  defp tasks_changed(socket, {:error, reason}),
+    do:
+      {:noreply,
+       put_flash(socket, :error, "Saved, but a run couldn't follow the change: #{why(reason)}")}
+
   defp queue_changed(socket, {:ok, spec}, opts \\ []) do
     socket = put_spec(socket, spec)
     {:noreply, if(opts[:clear], do: assign(socket, selected: MapSet.new()), else: socket)}
   end
+
+  defp queue_changed(socket, {:error, reason}, _opts),
+    do: {:noreply, put_flash(socket, :error, why(reason))}
 
   # A task was added: it's last, so it opens (and shows highlighted) there.
   defp added(socket, {:ok, spec}) do
@@ -671,6 +680,8 @@ defmodule FactoryWeb.SpecLive do
 
   defp added(socket, {:error, :blank_title}),
     do: {:noreply, put_flash(socket, :error, "A task needs a title.")}
+
+  defp added(socket, {:error, reason}), do: tasks_changed(socket, {:error, reason})
 
   defp added(socket, error), do: tasks_changed(socket, error)
 
