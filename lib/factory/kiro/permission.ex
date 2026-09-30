@@ -37,6 +37,122 @@ defmodule Factory.Kiro.Permission do
       Map.get(@tool_kinds, get_in(params, ["_meta", "kiro", "toolId"]))
   end
 
+  @doc """
+  The shell command a permission request is for, when Kiro says: on the request, or on
+  the tool call it announced before (`known` maps tool call ids to commands).
+  """
+  def command(params, known \\ %{}) do
+    call = params["toolCall"] || %{}
+    command_of(call) || Map.get(known, call["toolCallId"])
+  end
+
+  @doc "The command in a tool call's input, if it has one."
+  def command_of(call) do
+    case call["rawInput"] do
+      %{"command" => c} when is_binary(c) -> c
+      %{"cmd" => c} when is_binary(c) -> c
+      _ -> nil
+    end
+  end
+
+  # Commands that only look, by their first word. git by what it's asked to do.
+  @looking ~w(ls cat head tail wc grep egrep fgrep rg ag tree pwd file stat du which echo
+              sort uniq cut diff basename dirname realpath readlink date env printenv)
+  @git ~w(status log diff show ls-files ls-tree grep blame rev-parse describe shortlog)
+  @gh %{
+    "pr" => ~w(view diff list checks status),
+    "issue" => ~w(view list status),
+    "repo" => ~w(view),
+    "run" => ~w(view list)
+  }
+  @tests [
+    ~w(mix test),
+    ~w(npm test),
+    ~w(npm run test),
+    ~w(pnpm test),
+    ~w(yarn test),
+    ~w(pytest),
+    ~w(python -m pytest),
+    ~w(python3 -m pytest),
+    ~w(go test),
+    ~w(cargo test),
+    # Checks: they build or lint, and change no source.
+    ~w(mix compile),
+    ~w(mix format --check-formatted),
+    ~w(mix credo),
+    ~w(cargo check),
+    ~w(go vet),
+    ~w(npx tsc --noEmit),
+    ~w(npm run lint),
+    ~w(npm run typecheck)
+  ]
+
+  @doc """
+  Whether a shell command only looks: it reads files or the project's history, lists or
+  searches, prints a version, runs the tests or a check that builds or lints without
+  changing source (`mix compile`, `cargo check`), or reads a pull request with `gh`. A
+  planner may run these while it plans, and so may an agent that only reads and checks.
+  Anything that could install, write, move, delete, commit or run other code isn't one,
+  and nor is an unknown command (nil). Commands may be chained or piped when every part
+  only looks; redirecting into a file and substitution (`$(…)`, backticks) never do.
+  """
+  def looking?(nil), do: false
+
+  def looking?(command) when is_binary(command) do
+    text = String.replace(command, ~r/\s*\d?>\s*&\d|\s*\d?>\s*\/dev\/null/, "")
+
+    not String.contains?(text, [">", "`", "$(", "<("]) and
+      text
+      |> String.split(~r/&&|\|\||;|\||\R/)
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+      |> then(&(&1 != [] and Enum.all?(&1, fn part -> looking_part?(part) end)))
+  end
+
+  defp looking_part?(part) do
+    # Leading VAR=value settings don't change what the command is.
+    words = part |> String.split() |> Enum.drop_while(&Regex.match?(~r/^[A-Z_][A-Z0-9_]*=/, &1))
+
+    # Writing what it shows into a file (`git diff --output=x`, `sort -o x`) isn't looking.
+    writes? =
+      Enum.any?(words, &String.starts_with?(&1, "--output")) or
+        (List.first(words) in ~w(sort tree) and "-o" in words)
+
+    not writes? and looking_words?(words)
+  end
+
+  defp looking_words?([]), do: false
+  defp looking_words?(["cd" | _]), do: true
+  defp looking_words?(["git", sub | _] = words), do: sub in @git or git_branch_list?(words)
+
+  # GitHub's CLI, reading only: never merge, close, comment, review or edit.
+  defp looking_words?(["gh", area, action | _]), do: action in Map.get(@gh, area, [])
+
+  defp looking_words?(["find" | rest]),
+    do: not Enum.any?(rest, &(&1 in ~w(-delete -exec -execdir -ok -fprint)))
+
+  defp looking_words?(["sed" | rest]),
+    do: not Enum.any?(rest, &String.starts_with?(&1, ["-i", "--in-place"]))
+
+  defp looking_words?([_tool, flag]) when flag in ~w(--version -v -V version), do: true
+
+  defp looking_words?([first | _] = words),
+    do: Path.basename(first) in @looking or Enum.any?(@tests, &List.starts_with?(words, &1))
+
+  # `git branch` only when it lists branches: options only, none that creates, renames,
+  # copies, deletes or moves one (a bare name would create it).
+  defp git_branch_list?(["git", "branch" | args]) do
+    changes =
+      ~w(-d -D -m -M -c -C -f -t -u --delete --move --copy --force --track --set-upstream-to --unset-upstream --edit-description)
+
+    Enum.all?(args, fn arg ->
+      String.starts_with?(arg, "-") and
+        not Enum.any?(changes, &(arg == &1 or String.starts_with?(arg, &1 <> "=")))
+    end)
+  end
+
+  defp git_branch_list?(_words), do: false
+
   # ACP permits cancellation when none of the offered options matches the decision.
   def outcome(options, decision) do
     case Enum.find(options, &String.starts_with?(&1["kind"] || "", decision)) do

@@ -13,7 +13,18 @@ defmodule Factory.Specs.Planner do
 
   # The one shape a task has wherever Kiro writes one: suggestions, a run's plan, a chat
   # plan without tools, an improved or drafted task, and `Factory.PlanTools.add_tasks`.
-  @task_json ~s|{"title": "<imperative, under 80 characters>", "objective": "<one or two sentences: what is true when it's done>", "details": ["<a step of the approach, in order, naming the files and functions it changes; 1 to 8 items; code and paths in backticks>"], "verify": ["<a check that proves it's done: a command and what it must show, a test that must pass, or what to look at; 1 to 4 items>"], "model": "<the model to build it with, from the list>", "requirements": ["<requirement number, e.g. 1.2>"]}|
+  @task_json ~s|{"title": "<imperative, under 80 characters>", "objective": "<one or two sentences: what is true when it's done>", "details": ["<a step of the approach, in order, naming the files and functions it changes; 1 to 8 items; code and paths in backticks>"], "verify": ["<a check that proves it's done: a command and what it must show, a test that must pass, or what to look at; 1 to 4 items>"], "agent": "<who builds it, from the list>", "model": "<the model to build it with, from the list>", "requirements": ["<requirement number, e.g. 1.2>"]}|
+
+  @doc """
+  What Kiro may do in the project while it plans: read anything, and run commands that
+  only look (`Factory.Kiro.Permission.looking?/1`), never change anything.
+  """
+  def looking_rule do
+    "Don't change any files. You may run commands that only look: `git status` and " <>
+      "`git log`, listing and searching files, a tool's version, or the project's tests " <>
+      "when they run quickly. Factory refuses anything that installs, writes, moves, " <>
+      "deletes or commits."
+  end
 
   @doc "The task shape Kiro is asked for, as JSON with placeholders."
   def task_json, do: @task_json
@@ -39,7 +50,11 @@ defmodule Factory.Specs.Planner do
             t["details"] |> List.wrap() |> Enum.filter(&is_binary/1) |> lines() |> Enum.take(12),
           "verify" =>
             t["verify"] |> List.wrap() |> Enum.filter(&is_binary/1) |> lines() |> Enum.take(6),
-          "model" => if(t["model"] in Factory.Kiro.models(), do: t["model"]),
+          "agent" =>
+            if(is_binary(t["agent"]) and String.trim(t["agent"]) != "",
+              do: String.trim(t["agent"])
+            ),
+          "model" => if(t["model"] in Factory.Kiro.task_models(), do: t["model"]),
           "requirements" =>
             t["requirements"] |> List.wrap() |> Enum.map(&to_string/1) |> lines() |> Enum.take(8)
         }
@@ -53,7 +68,7 @@ defmodule Factory.Specs.Planner do
   run's plan, an improved or a new task): what to do, a suggested way to do it, and
   how to check it was done right, with the model to build it on.
   """
-  def task_standard do
+  def task_standard(agents \\ []) do
     """
     Every task says what to do, a suggested way to do it, and how to check it was done \
     right, so the agent that builds it doesn't guess and a different model can verify it:
@@ -61,28 +76,44 @@ defmodule Factory.Specs.Planner do
     - objective: one or two sentences on what is true when it's done, in terms the \
     person would recognise: behaviour and outcomes, not code.
     - details, the approach: the steps in order, each naming the exact files and \
-    functions it changes and what changes in them, done the way the code works today.
+    functions it changes and what changes in them, done the way the code works today. \
+    Name files by their path in the project (`lib/app/csv.ex`), not on this computer.
     - verify: 1 to 4 checks that prove it's done correctly, each one something a \
     reviewer who didn't build it can run or see: a command and what it must show \
     (`mix test test/app/export_test.exs` passes), a test that must exist and pass, or \
     what to look at and where. "It works" isn't a check.
-    - model: the model to build it with: #{model_guide()}
+    #{agent_guide(agents)}- model: the model to build it with: #{model_guide()}
     - requirements: the requirement numbers it covers, when the spec numbers them.
     Keep each task one change that can be built and verified on its own, and put the \
     tests a change needs in its own task's steps and checks.
     """
   end
 
-  # The models a task may name, from what this Kiro offers, with when to pick each.
+  # Who a task may be given to: the workflow's agents that build (`Factory.Workflows.
+  # builders/1`), each with what it does. Nothing when there's nobody to choose from.
+  defp agent_guide([]), do: ""
+
+  defp agent_guide(agents) do
+    who =
+      Enum.map_join(agents, "; ", fn a ->
+        if a.does in [nil, ""], do: a.name, else: "#{a.name} (#{String.downcase(a.does)})"
+      end)
+
+    "- agent: which agent builds it, by name: #{who}. Give each task to the one whose " <>
+      "work it is, a task that's only tests to the one that tests.\n"
+  end
+
+  # The models a task may name, from what this Kiro offers (Sonnet never), with when to
+  # pick each. A coding agent builds on its own model, Auto unless set on its card.
   defp model_guide do
-    models = Factory.Kiro.models()
+    models = Factory.Kiro.task_models()
     strong = Factory.Kiro.strongest()
 
     light =
       models |> Enum.filter(&String.contains?(&1, "haiku")) |> Enum.sort(:desc) |> List.first()
 
     [
-      "auto" in models && "auto for most tasks",
+      "auto" in models && "auto for most tasks, and always for the ones the coding agent builds",
       strong != "auto" && "#{strong} for tricky, cross-cutting or risky ones",
       light && "#{light} for small, mechanical edits"
     ]
@@ -110,7 +141,7 @@ defmodule Factory.Specs.Planner do
     You are planning how to build the spec below in the project in the current folder.
 
     First look at the project: read the files you need to understand its structure, stack, \
-    conventions and the code this feature touches. Don't change anything and don't run commands.
+    conventions and the code this feature touches. #{looking_rule()}
 
     Then ask the 3 to 6 questions whose answers would most change how you build it: \
     choices about behaviour, scope, data or approach that the spec leaves open. \
@@ -125,7 +156,7 @@ defmodule Factory.Specs.Planner do
   end
 
   @doc "Prompt for turn 2: suggest tasks, using the project summary and the answers."
-  def tasks_prompt(files, project, answers) do
+  def tasks_prompt(files, project, answers, agents \\ []) do
     qa =
       case answers do
         [] ->
@@ -138,7 +169,7 @@ defmodule Factory.Specs.Planner do
     """
     <task-planning step="tasks">
     You are planning how to build the spec below in the project in the current folder. \
-    Don't change anything and don't run commands.
+    #{looking_rule()}
 
     What you found about the project on a first look:
     #{project}
@@ -157,7 +188,7 @@ defmodule Factory.Specs.Planner do
     and nothing goes further than the spec asks. Don't repeat tasks the spec's tasks \
     file already has.
 
-    #{String.trim(task_standard())}
+    #{String.trim(task_standard(agents))}
 
     Add them with the factory tool suggest_tasks, 2 to 5 at a time, in build order, then \
     end your turn with one short sentence. The person picks which to keep.
@@ -177,7 +208,7 @@ defmodule Factory.Specs.Planner do
   none, so it can be built without guessing). `asked` is what the person asked for in
   the chat that made the plan, when there is one.
   """
-  def improve_prompt(files, task, instruction, asked \\ "") do
+  def improve_prompt(files, task, instruction, asked \\ "", agents \\ []) do
     ask =
       case String.trim(instruction) do
         "" -> "Make it ready to build without guessing."
@@ -207,7 +238,7 @@ defmodule Factory.Specs.Planner do
     """
     <task-planning step="improve">
     You are improving one implementation task of the spec below, for the project in the \
-    current folder. Don't change anything and don't run commands.
+    current folder. #{looking_rule()}
 
     The task now:
     #{current}
@@ -227,7 +258,7 @@ defmodule Factory.Specs.Planner do
     wrong, and don't add work beyond what the task is for. Keep requirement numbers that \
     still apply. Wrap code, paths and commands in `backticks`.
 
-    #{String.trim(task_standard())}
+    #{String.trim(task_standard(agents))}
 
     #{json_shape()}
     </task-planning>
@@ -241,7 +272,7 @@ defmodule Factory.Specs.Planner do
   look at the project (only the few files the task touches), then writes the task
   so it fits the spec and the tasks already there.
   """
-  def draft_prompt(files, title, notes) do
+  def draft_prompt(files, title, notes, agents \\ []) do
     idea =
       [String.trim(title), String.trim(notes)]
       |> Enum.reject(&(&1 == ""))
@@ -250,8 +281,7 @@ defmodule Factory.Specs.Planner do
     """
     <task-planning step="draft">
     You are turning the person's rough idea into one new implementation task for the \
-    spec below, for the project in the current folder. Don't change anything and don't \
-    run commands.
+    spec below, for the project in the current folder. #{looking_rule()}
 
     The person's rough idea for the task:
     #{idea}
@@ -268,7 +298,7 @@ defmodule Factory.Specs.Planner do
     what's missing, and don't add work they didn't ask for. Use the spec's requirement \
     numbers it covers. Wrap code, paths and commands in `backticks`.
 
-    #{String.trim(task_standard())}
+    #{String.trim(task_standard(agents))}
 
     #{json_shape()}
     </task-planning>
@@ -300,6 +330,7 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
   """
   def run_prompt(type, files, opts) do
     write = Keyword.fetch!(opts, :write)
+    builders = Keyword.get(opts, :builders, [])
     given = for {part, _, _} <- @run_parts, part not in write, do: part
 
     keep =
@@ -312,7 +343,7 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
       if "tasks" in write,
         do:
           "As many tasks as the work needs and no more: usually 3 to 10, more for a big feature.\n\n" <>
-            String.trim(task_standard()),
+            String.trim(task_standard(builders)),
         else: ""
 
     asked = for {part, what, _} <- @run_parts, part in write, do: what
@@ -323,7 +354,7 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
     You are planning a job for a software factory: "#{type.label}". The spec files below \
     say what the person wants; the project is in the current folder. Look at the project \
     first: read the files you need to understand its stack, structure, conventions and the \
-    code this job touches. Don't change anything and don't run commands.
+    code this job touches. #{looking_rule()}
 
     Then write the parts of the spec that are missing. #{keep}
     #{Enum.join(asked, "\n")}
@@ -375,10 +406,10 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
   `chat_prompt/5` in two parts for a planner's own Kiro session: `{brief, ask}`, the
   spec files and the rest. The session sends the brief only when it hasn't yet.
   """
-  def chat_prompt_parts(name, requests, files, current, action \\ nil),
+  def chat_prompt_parts(name, requests, files, current, action \\ nil, job \\ nil, agents \\ []),
     do:
       {spec_text(files),
-       name |> chat_prompt(requests, [], current, action) |> String.trim_trailing()}
+       name |> chat_prompt(requests, [], current, action, job, agents) |> String.trim_trailing()}
 
   @doc """
   Prompt for planning in a chat: the planner reads the project, rethinks how the
@@ -392,8 +423,12 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
   nothing; `%{mode: :refine, thin: [line], findings: text | nil}` reworks the plan,
   acting on a scope check's `findings`. `thin` is what Factory's own rules found
   missing in tasks (`Factory.Specs.TaskCheck`), one line per task.
+
+  `job` is the kind of workflow the chat plans for (`Factory.Workflows.kind/1`): for
+  "review", the planner (the Scout) finds a pull request or branch and plans what to
+  check in it, not changes to make.
   """
-  def chat_prompt(name, requests, files, current, action \\ nil) do
+  def chat_prompt(name, requests, files, current, action \\ nil, job \\ nil, agents \\ []) do
     asked = requests |> Enum.with_index(1) |> Enum.map_join("\n\n", fn {r, i} -> "#{i}. #{r}" end)
 
     current =
@@ -405,12 +440,9 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
 
     """
     <task-planning step="#{step(mode)}">
-    You are #{name}, the planner in a software factory. The person is chatting with you \
-    about a change to the project in the current folder. Look at the project first: read \
-    the files you need to understand its stack, conventions and the code this touches. \
-    Don't change any files and don't run commands.
+    You are #{name}, the planner in a software factory. #{about(job)} #{looking_rule()}
 
-    #{String.trim(instructions(mode))}
+    #{String.trim(instructions(mode, job, agents))}
 
     The plan so far:
     #{current}
@@ -428,34 +460,114 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
     """
   end
 
+  defp about("review"),
+    do:
+      "The person wants a change to the project in the current folder reviewed: a pull " <>
+        "request, or a branch."
+
+  defp about(_job),
+    do: "The person is chatting with you about a change to the project in the current folder."
+
   defp step(nil), do: "chat"
   defp step(:scope), do: "scope-check"
   defp step(:refine), do: "refine"
 
-  defp instructions(nil) do
+  defp instructions(nil, "review", _agents) do
     """
-    Then write the plan with the factory tools:
-    - If the request isn't clear enough to plan without guessing (what should be built, \
-    where it goes in the code, how to tell it works), call ask_user with 1 to 5 short, \
-    specific questions and leave the plan as it is.
-    - With no plan yet, or when the person wants a different one, call create_plan with a \
-    summary and your approach, then add_tasks: the tasks in build order, 2 to 5 per \
-    call, as many as the work needs and no more.
-    - With a plan already, refine it with what the person said last: update_task, \
-    remove_tasks and add_tasks. Keep what still fits; the person may have edited tasks.
+    Plan the review the way a careful senior reviewer would, in this order:
 
-    #{String.trim(task_standard())}
+    1. Find the change. The latest message names it:
+       - A pull request link: `gh pr view <link>` for its title, description, base and \
+    branch, and `gh pr diff <link>` for the change. When gh isn't signed in, read the \
+    link with `.diff` added (public repositories), or find the pull request's branch \
+    here with `git branch -a`.
+       - A branch: `git log --oneline <base>..<branch>` and `git diff --stat \
+    <base>...<branch>`, then `git diff <base>...<branch>`, where the base is main or \
+    master.
+       - Uncommitted changes: `git status` and `git diff --stat`, then `git diff`.
+       - The latest commits on a branch: `git log --oneline -<n>` and `git diff \
+    <oldest>~1..<newest>`.
+       - Neither, or you can't find it: call ask_user, offering the branches with the \
+    latest work (`git branch --sort=-committerdate`) and asking for a link.
+    2. Work out what it's for: the description, the commit messages, any issue it names.
+    3. Read the changed code in context: the code around each change, what calls it, \
+    and the tests that cover it, and the project's own rules (README, AGENTS.md, \
+    CLAUDE.md).
+    4. Write the review plan with the factory tools: create_plan with a one-sentence \
+    summary of what the change does and the approach (base and branch, how many files, \
+    and where the risk is), then add_tasks, one task per area to check, riskiest \
+    first. You plan checks, not changes: nothing in the plan edits code.
+       - title: what to check, e.g. "Check the token refresh in lib/auth/session.ex".
+       - objective: what must hold for that part to be right.
+       - details: what to look at, file by file, and what could be wrong there.
+       - verify: how the reviewer confirms it: a test to run, a case to trace through \
+    the code, a command and what it must show.
+       - model: #{model_guide()}
+       Cover correctness, edge cases and errors, security (input, permissions, secrets), \
+    tests for the change, and fit with the project's conventions. A small change is one \
+    or two tasks.
+    5. Check it: call get_plan and read it as the reviewer who'll follow it.
 
-    When you're done, end with a short reply to the person, 2 to 4 sentences: how you'd \
-    do it and why, what you changed, or what you need to know. Don't list the tasks: \
-    Factory shows them.
-
-    Only if the factory tools aren't available, reply instead with only this JSON object:
-    {"clear": true | false, "reply": "<2 to 4 sentences>", "questions": [{"question": "<question>", "options": ["<option>"]}], "tasks": [#{@task_json}]}
+    End with a short reply to the person, 2 to 4 sentences: what the change is, how big, \
+    and where you'd look hardest. Don't list the tasks: Factory shows them.
     """
   end
 
-  defp instructions(:scope) do
+  defp instructions(mode, _job, agents), do: instructions(mode, agents)
+
+  defp instructions(nil, agents) do
+    """
+    Plan it the way a senior engineer would before anyone writes code, in this order:
+
+    1. Understand the ask. Work out what the person wants and why, what "done" looks \
+    like to them, and what they clearly expect but didn't say. The latest message \
+    decides what this turn is about.
+    2. Look before you plan; never plan from the request alone. Check:
+       - the project's own guidance: its README, and AGENTS.md, CLAUDE.md or steering \
+    files, for its conventions and rules;
+       - what's going on in it: `git status` and `git log --oneline -15`;
+       - what's already there: search for code that does this or something close, and \
+    read the code the change touches, what calls it, and the tests that cover it;
+       - how it's built and checked: its test command, and the tests for that part if \
+    they run quickly.
+    3. Decide whether it should be done. Don't plan it when it would break what works, \
+    repeat what the project already has, go against its design or rules, put data, \
+    security or secrets at risk, or cost far more than it's worth. Reply instead, in 3 \
+    to 6 sentences: say plainly that you wouldn't do it and why, pointing at what you \
+    found in the code, and what you'd do instead. When part of it is sound, plan that \
+    part and say what you left out. When it's already done, say where.
+    4. If it isn't clear enough to plan without guessing (what should be built, where \
+    it goes, how to tell it works), call ask_user with 1 to 5 short, specific \
+    questions, with options where that helps, and leave the plan as it is.
+    5. Choose the approach: of the ways that fit this codebase, the simplest that fully \
+    does the job. Know what could go wrong with it.
+    6. Write the plan with the factory tools:
+       - With no plan yet, or when the person wants a different one: create_plan with a \
+    one-sentence summary and the approach (the parts of the code that change and why, \
+    the risks, how it will be tested), then add_tasks, 2 to 5 per call, in build \
+    order. Size the plan to the work: a small change is one task, and what can't be \
+    built and checked apart stays one task.
+       - With a plan already: refine it with what the person said last, using \
+    update_task, remove_tasks and add_tasks. Keep what still fits; the person may have \
+    edited tasks.
+    7. Check it: call get_plan and read it as the agent who'll build it. Every task \
+    meets the task standard below and is given to the agent whose work it is, with the \
+    model it needs; together they do everything asked and nothing more, and their \
+    order works. Fix what doesn't.
+
+    #{String.trim(task_standard(agents))}
+
+    End with a short reply to the person, 2 to 4 sentences: what you found in the \
+    project, how you'd do it and why, and anything they should decide. Don't list the \
+    tasks: Factory shows them.
+
+    Only if the factory tools aren't available, reply instead with only this JSON \
+    object, with no tasks when you wouldn't do it and the reply saying why:
+    {"clear": true | false, "reply": "<2 to 6 sentences>", "questions": [{"question": "<question>", "options": ["<option>"]}], "tasks": [#{@task_json}]}
+    """
+  end
+
+  defp instructions(:scope, agents) do
     """
     The person pressed Scope: before anything is built, check the scope of work. Does \
     this plan do everything they asked, only what they asked, and can each task be built \
@@ -499,11 +611,11 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
     A line or two per point. Factory shows this report above the plan, and the person's \
     Refine button acts on it.
 
-    #{String.trim(task_standard())}
+    #{String.trim(task_standard(agents))}
     """
   end
 
-  defp instructions(:refine) do
+  defp instructions(:refine, agents) do
     """
     The person pressed Refine: rework the plan below so that it does everything they \
     asked and nothing more, and so that an agent can build every task without guessing. \
@@ -523,8 +635,8 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
 
     Then change the plan, as little as it takes:
     - Every task ends up meeting the task standard below: its objective, the approach \
-    as steps, its checks and its model. Fill in what an older task is missing without \
-    changing what it does.
+    as steps, its checks, the agent that builds it and its model. Fill in what an older \
+    task is missing without changing what it does.
     - One change per task, buildable and testable on its own, in build order. Tests go in \
     the task that needs them or the one right after.
     - Leave good tasks as they are. The person may have written or edited tasks: keep \
@@ -538,7 +650,7 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
     End with a short reply to the person, 2 to 4 sentences: what you changed and why, \
     and what you left for them to decide. Don't list the tasks: Factory shows them.
 
-    #{String.trim(task_standard())}
+    #{String.trim(task_standard(agents))}
 
     Only if the factory tools aren't available, reply instead with only this JSON object, \
     holding the whole reworked plan:
@@ -620,6 +732,7 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
              objective: if(t["objective"] == "", do: nil, else: t["objective"]),
              details: t["details"],
              verify: t["verify"],
+             agent: t["agent"],
              model: t["model"],
              requirements: t["requirements"],
              why: text(data["why"])
@@ -684,6 +797,7 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
         objective: task["objective"],
         details: clean(task["details"]),
         verify: clean(task["verify"]),
+        agent: task["agent"],
         model: task["model"],
         requirements: clean(task["requirements"])
       })

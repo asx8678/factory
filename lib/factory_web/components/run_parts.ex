@@ -8,8 +8,7 @@ defmodule FactoryWeb.RunParts do
   @type_icons %{
     "feature" => {"hero-sparkles", "hero-sparkles-micro"},
     "bug" => {"hero-bug-ant", "hero-bug-ant-micro"},
-    "issue" => {"hero-ticket", "hero-ticket-micro"},
-    "deps" => {"hero-arrow-path", "hero-arrow-path-micro"},
+    "review" => {"hero-magnifying-glass", "hero-magnifying-glass-micro"},
     "other" => {"hero-chat-bubble-left-ellipsis", "hero-chat-bubble-left-ellipsis-micro"}
   }
 

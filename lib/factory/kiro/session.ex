@@ -473,8 +473,18 @@ defmodule Factory.Kiro.Session do
           ),
         else: %{}
 
+    kind = Kiro.Permission.kind(params, known)
+
+    # A planner while it plans, and an agent that only reads and checks (a reviewer,
+    # a researcher), may run commands that only look: git log and diff, a search, the
+    # tests, a pull request's diff.
+    looking? =
+      kind == "execute" and state.turn != nil and
+        (state.turn.planning != nil or Agent.read_only?(state.turn.agent)) and
+        Kiro.Permission.looking?(Kiro.Permission.command(params, commands(state.turn)))
+
     wanted =
-      if Kiro.Permission.kind(params, known) in allowed or
+      if kind in allowed or looking? or
            (state.turn != nil and server == Factory.PlanTools.server_name()),
          do: "allow",
          else: "reject"
@@ -619,6 +629,7 @@ defmodule Factory.Kiro.Session do
           title: call["title"],
           tool: call["kind"],
           paths: call["locations"] && for(%{"path" => p} <- call["locations"], do: p),
+          command: Kiro.Permission.command_of(call),
           outcome: outcome(call["status"])
         }
         |> Map.reject(fn {_, v} -> is_nil(v) end)
@@ -638,6 +649,10 @@ defmodule Factory.Kiro.Session do
       %{turn | tools: tools}
     end)
   end
+
+  # The commands the turn's tool calls announced, by call id.
+  defp commands(turn),
+    do: for(t <- turn.tools, t.call_id && t[:command], into: %{}, do: {t.call_id, t.command})
 
   defp outcome("completed"), do: "ok"
   defp outcome("failed"), do: "failed"

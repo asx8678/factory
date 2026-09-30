@@ -103,7 +103,7 @@ defmodule FactoryWeb.SettingsLive do
               <section id="role-models" class="mb-10">
                 <h2 class="font-medium">Models by role</h2>
                 <p class="mt-0.5 text-sm text-base-content/55">
-                  Plan with the strongest model, build with what each task needs, and verify with a different, quicker one.
+                  Plan with the strongest model Factory uses, build on Auto, and verify with a different, quicker one.
                 </p>
                 <form
                   id="role-models-form"
@@ -122,7 +122,7 @@ defmodule FactoryWeb.SettingsLive do
                       class="h-8 w-56 shrink-0 rounded-md border border-base-300 bg-base-100 px-2 text-[13px] outline-none focus:border-base-content/30"
                     >
                       <option value="" selected={@planning in [nil, ""]}>
-                        Strongest offered ({Factory.Kiro.model_name(Factory.Kiro.strongest())})
+                        Factory's choice ({Factory.Kiro.model_name(Factory.Kiro.strongest())})
                       </option>
                       <option
                         :for={m <- @models}
@@ -137,7 +137,7 @@ defmodule FactoryWeb.SettingsLive do
                     <span class="min-w-0 flex-1">
                       <span class="block text-sm font-medium">Building</span>
                       <span class="block text-xs text-base-content/55">
-                        Each agent's own model, set on its card under Workflows. The planner suggests a model for each task, shown with the task.
+                        Coding agents build on their own model, Auto unless set on the card. Other agents use the model the plan gives each task. Factory never gives a task Sonnet.
                       </span>
                     </span>
                     <span class="w-56 shrink-0 px-2 text-[13px] text-base-content/60">
@@ -172,9 +172,7 @@ defmodule FactoryWeb.SettingsLive do
                   :if={!Enum.any?(@models, &String.contains?(&1["value"], "opus"))}
                   class="mt-2 text-xs text-base-content/55"
                 >
-                  This Kiro doesn't offer an Opus model or a thinking-effort setting, so planning uses {Factory.Kiro.model_name(
-                    Factory.Kiro.strongest()
-                  )}. Factory picks an Opus automatically once Kiro lists one.
+                  Factory doesn't pick Sonnet on its own, and this Kiro offers no Opus, so planning runs on Auto. Pick a model above to plan with it instead; Factory switches to an Opus once Kiro lists one.
                 </p>
               </section>
 

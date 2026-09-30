@@ -78,9 +78,17 @@ defmodule Factory.ChatPlanner do
 
         action = mode && %{mode: mode, thin: thin_tasks(spec), findings: findings}
 
+        # What the chat plans for: a review plans checks, not changes.
+        workflow = Factory.Workflows.for_run(run)
+        job = workflow && Factory.Workflows.kind(workflow)
+        # Who can build: each task is given to one of them, with its model.
+        agents = Factory.Workflows.builders(workflow)
+        prompt_args = [planner.name, requests, base ++ files, current, action, job, agents]
+
         prompt = %{
-          full: Planner.chat_prompt(planner.name, requests, base ++ files, current, action),
-          parts: Planner.chat_prompt_parts(planner.name, requests, base ++ files, current, action)
+          full: apply(Planner, :chat_prompt, prompt_args),
+          parts: apply(Planner, :chat_prompt_parts, prompt_args),
+          doing: doing(mode, job, requests, run.title)
         }
 
         run =
@@ -94,6 +102,43 @@ defmodule Factory.ChatPlanner do
         {:error, :not_draft}
       end
     end)
+  end
+
+  # What the planner is doing, in words for its card and the chat's progress line: for
+  # a review, what it's reviewing (the pull request, the branch…), never "planning".
+  defp doing(:scope, _job, _requests, title), do: "Checking the scope of “#{title}”"
+  defp doing(:refine, "review", _requests, title), do: "Reworking the review of “#{title}”"
+  defp doing(:refine, _job, _requests, title), do: "Refining “#{title}”"
+
+  defp doing(_mode, "review", requests, title),
+    do: Enum.find_value(Enum.reverse(requests), &review_target/1) || "Reviewing “#{title}”"
+
+  defp doing(_mode, _job, _requests, title), do: "Planning “#{title}”"
+
+  # What a review request names, as the chat's buttons write it or as typed.
+  defp review_target(text) do
+    cond do
+      m = Regex.run(~r{/pull/(\d+)}, text) ->
+        "Reviewing pull request ##{Enum.at(m, 1)}"
+
+      m = Regex.run(~r/\bpull request #(\d+)/i, text) ->
+        "Reviewing pull request ##{Enum.at(m, 1)}"
+
+      m = Regex.run(~r/\bbranch\s+`([^`]+)`/i, text) ->
+        "Reviewing the branch #{Enum.at(m, 1)}"
+
+      m = Regex.run(~r{\bbranch\s+([\w.]+[/-][\w./-]+)}i, text) ->
+        "Reviewing the branch #{Enum.at(m, 1)}"
+
+      text =~ ~r/uncommitted changes/i ->
+        "Reviewing the uncommitted changes"
+
+      m = Regex.run(~r/\blast (\d+) commits/i, text) ->
+        "Reviewing the last #{Enum.at(m, 1)} commits"
+
+      true ->
+        nil
+    end
   end
 
   # Each task Factory's rules find thin, by its number, with what it's missing: the same
@@ -111,8 +156,16 @@ defmodule Factory.ChatPlanner do
     generation = run.planner_generation
     prompt = Map.put(prompt, :model, planning_model(planner))
 
-    Agents.set_activity(planner.id, "running", "Planning “#{run.title}”")
-    show_progress(run.id, planner, "Reading the project…")
+    Agents.set_activity(planner.id, "running", prompt.doing)
+
+    show_progress(
+      run.id,
+      planner,
+      if(String.starts_with?(prompt.doing, "Planning"),
+        do: "Reading the project…",
+        else: prompt.doing <> "…"
+      )
+    )
 
     Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
       # On the planner's own Kiro session, which keeps the conversation between
@@ -146,7 +199,7 @@ defmodule Factory.ChatPlanner do
         reply: :last,
         post: false,
         stream: false,
-        activity: "Planning “#{run.title}”",
+        activity: prompt.doing,
         model: prompt.model,
         on_tool: &show_progress(run.id, planner, Planner.describe_tool(&1, dir)),
         planning: %{
@@ -172,7 +225,7 @@ defmodule Factory.ChatPlanner do
            Kiro.ask(prompt.full,
              workdir: dir,
              model: prompt.model,
-             allow: ["read", "search"],
+             allow: ["read", "search", "look"],
              mcp_servers: [PlanTools.mcp_server(token)],
              reply: :last,
              on_tool: &show_progress(run.id, planner, Planner.describe_tool(&1, dir)),
@@ -339,11 +392,21 @@ defmodule Factory.ChatPlanner do
   read from the run's spec. `planner` needs its `id` and `name`.
   """
   def show_progress(run_id, planner, activity) do
+    run = Runs.get_run(run_id)
+    review? = match?(%{}, run) and review?(run)
+
+    # The plan tools report `:writing` as the planner writes the plan.
+    activity =
+      case activity do
+        :writing -> if review?, do: "Listing what to check…", else: "Planning…"
+        text -> text
+      end
+
     tasks =
-      with %{spec_id: id} when is_integer(id) <- Runs.get_run(run_id),
+      with %{spec_id: id} when is_integer(id) <- run,
            %{} = spec <- Specs.get_spec(id),
            [_ | _] = tasks <- Specs.tasks(spec) do
-        "\n\n**Tasks so far**\n\n" <>
+        "\n\n**#{if review?, do: "Checks so far", else: "Tasks so far"}**\n\n" <>
           (tasks
            |> Enum.with_index(1)
            |> Enum.map_join("\n", fn {t, i} -> "#{i}. #{t.title}" end))
@@ -358,6 +421,13 @@ defmodule Factory.ChatPlanner do
       "run:#{run_id}",
       {:agent_stream, %{agent_id: planner.id, name: planner.name, text: text, activity: activity}}
     )
+  end
+
+  defp review?(run) do
+    case Factory.Workflows.for_run(run) do
+      nil -> false
+      workflow -> Factory.Workflows.kind(workflow) == "review"
+    end
   end
 
   defp blank(text, default), do: if(String.trim(text) == "", do: default, else: text)

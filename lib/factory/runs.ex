@@ -90,6 +90,22 @@ defmodule Factory.Runs do
     |> then(&(&1 && Repo.preload(&1, :tasks)))
   end
 
+  @doc """
+  The latest review of the repository in `dir` that nothing has been said in yet, to
+  open again rather than make another (a repository cloned to review twice).
+  """
+  def unused_review(dir) do
+    Repo.one(
+      from r in Run,
+        as: :run,
+        where: r.kind == "review" and r.status == "draft",
+        where: fragment("?->>'project_dir' = ?", r.settings, ^dir),
+        where: not exists(from m in Message, where: m.run_id == parent_as(:run).id),
+        order_by: [desc: r.id],
+        limit: 1
+    )
+  end
+
   @doc "Deletes empty runs not touched for `minutes`. Returns how many."
   def prune_empty(minutes \\ 60) do
     cutoff = DateTime.add(DateTime.utc_now(), -minutes * 60)

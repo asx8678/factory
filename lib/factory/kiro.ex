@@ -15,7 +15,7 @@ defmodule Factory.Kiro do
 
   @doc """
   The model Factory plans with: the one chosen in Settings, else the strongest this
-  Kiro offers (`strongest/0`).
+  Kiro offers that Factory picks on its own (`strongest/0`).
   """
   def planning_model, do: chosen("planning_model") || strongest()
 
@@ -33,15 +33,24 @@ defmodule Factory.Kiro do
   end
 
   @doc """
-  The strongest model this Kiro offers: the newest Claude Opus when there is one, else
-  Claude Sonnet 4.5, else "auto".
+  The strongest model Factory picks on its own: the newest Claude Opus when this Kiro
+  offers one, else "auto". Sonnet isn't among them (`avoided?/1`).
   """
   def strongest do
-    models = models()
-
-    models |> Enum.filter(&String.contains?(&1, "opus")) |> Enum.sort(:desc) |> List.first() ||
-      Enum.find(~w(claude-sonnet-4.5 claude-sonnet-4), &(&1 in models)) || "auto"
+    models() |> Enum.filter(&String.contains?(&1, "opus")) |> Enum.sort(:desc) |> List.first() ||
+      "auto"
   end
+
+  # Models Factory never picks on its own, for a plan or a task: Sonnet, the person's
+  # call. One chosen by hand, in Settings or on an agent's card, is still used.
+  @avoid ~w(sonnet)
+
+  @doc "Whether Factory leaves `model` alone unless someone chooses it by hand (Sonnet)."
+  def avoided?(model) when is_binary(model), do: Enum.any?(@avoid, &String.contains?(model, &1))
+  def avoided?(_model), do: false
+
+  @doc "The models a plan may give a task: the ones this Kiro offers, less `avoided?/1`."
+  def task_models, do: Enum.reject(models(), &avoided?/1)
 
   # A model chosen in Settings, while this Kiro still offers it.
   defp chosen(key) do

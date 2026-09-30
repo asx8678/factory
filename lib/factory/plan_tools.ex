@@ -84,6 +84,11 @@ defmodule Factory.PlanTools do
                     "1 to 4 checks that prove it's done: a command and what it must show, a " <>
                       "test that must pass, or what to look at."
                 },
+                agent: %{
+                  type: "string",
+                  description:
+                    "Which of the workflow's agents builds it, as the prompt lists them."
+                },
                 model: %{
                   type: "string",
                   description: "The model to build it with, from the ones the prompt lists."
@@ -114,6 +119,7 @@ defmodule Factory.PlanTools do
           objective: %{type: "string"},
           details: %{type: "array", items: %{type: "string"}, description: "The steps."},
           verify: %{type: "array", items: %{type: "string"}, description: "The checks."},
+          agent: %{type: "string", description: "Who builds it."},
           model: %{type: "string"},
           requirements: %{type: "array", items: %{type: "string"}}
         },
@@ -311,7 +317,7 @@ defmodule Factory.PlanTools do
           send(grant.pid, {:plan_tools, grant.generation, event})
 
           if event == :changed,
-            do: Factory.ChatPlanner.show_progress(grant.run_id, grant.planner, "Planning…")
+            do: Factory.ChatPlanner.show_progress(grant.run_id, grant.planner, :writing)
 
           {:ok, text}
 
@@ -421,7 +427,7 @@ defmodule Factory.PlanTools do
             send(planning.notify, {:plan_tools, planning.generation, event})
 
             if event == :changed,
-              do: Factory.ChatPlanner.show_progress(run_id, agent, "Planning…")
+              do: Factory.ChatPlanner.show_progress(run_id, agent, :writing)
           end
 
           {:ok, text}
@@ -440,12 +446,24 @@ defmodule Factory.PlanTools do
 
   # The questions as an MCP elicitation form: one field each, a choice when it has options.
   defp elicitation(questions) do
-    properties =
-      for {q, i} <- Enum.with_index(questions, 1), into: %{} do
+    # A question with options also takes an answer of your own (`answer_N_other`), for
+    # an option that asks for details or one that isn't there.
+    fields =
+      for {q, i} <- Enum.with_index(questions, 1) do
         field = %{type: "string", title: q["question"]}
-        field = if q["options"] != [], do: Map.put(field, :enum, q["options"]), else: field
-        {"answer_#{i}", field}
+
+        if q["options"] != [],
+          do: [
+            {"answer_#{i}", Map.put(field, :enum, q["options"])},
+            {"answer_#{i}_other",
+             %{type: "string", title: "Your own answer", description: "Optional"}}
+          ],
+          else: [{"answer_#{i}", field}]
       end
+      |> List.flatten()
+
+    properties = Map.new(fields)
+    required = for {name, _} <- fields, not String.ends_with?(name, "_other"), do: name
 
     %{
       message:
@@ -453,7 +471,7 @@ defmodule Factory.PlanTools do
           do: "A question before I go on:",
           else: "#{length(questions)} questions before I go on:"
         ),
-      schema: %{type: "object", properties: properties, required: Map.keys(properties)}
+      schema: %{type: "object", properties: properties, required: required}
     }
   end
 
@@ -461,7 +479,12 @@ defmodule Factory.PlanTools do
        when is_map(content) do
     answers =
       for {q, i} <- Enum.with_index(questions, 1),
-          answer = content["answer_#{i}"],
+          answer =
+            [content["answer_#{i}"], content["answer_#{i}_other"]]
+            |> Enum.map(&String.trim(to_string(&1 || "")))
+            |> Enum.reject(&(&1 == ""))
+            |> Enum.join(": "),
+          answer != "",
           do: "- #{q["question"]} #{answer}"
 
     {:ok, "The person answered:\n" <> Enum.join(answers, "\n") <> "\nCarry on with that."}
@@ -567,7 +590,8 @@ defmodule Factory.PlanTools do
             objective: is_binary(args["objective"]) && text(args["objective"]),
             details: is_list(args["details"]) && lines(args["details"]),
             verify: is_list(args["verify"]) && lines(args["verify"]) |> Enum.take(6),
-            model: args["model"] in Factory.Kiro.models() && args["model"],
+            agent: is_binary(args["agent"]) && text(args["agent"]),
+            model: is_binary(args["model"]) && task_model(args["model"]),
             requirements:
               is_list(args["requirements"]) && lines(args["requirements"]) |> Enum.take(8)
           }
@@ -690,6 +714,9 @@ defmodule Factory.PlanTools do
         line != "",
         do: line
   end
+
+  # A model the planner gave a task: one Factory may pick, else auto (never Sonnet).
+  defp task_model(model), do: if(model in Factory.Kiro.task_models(), do: model, else: "auto")
 
   defp text(s) when is_binary(s), do: String.trim(s)
   defp text(_), do: ""

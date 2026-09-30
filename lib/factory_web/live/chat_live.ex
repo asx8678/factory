@@ -26,6 +26,7 @@ defmodule FactoryWeb.ChatLive do
      |> assign(message_ids: [], earlier?: false, history?: false)
      |> assign(commands: Chat.commands())
      |> assign(workflows: Workflows.list(), browser: nil, folder_warn: false, to: nil)
+     |> assign(scout: nil, ideas: nil, cloning: nil, clone_error: nil)
      |> assign(pick: Workflows.picked())
      |> assign(base_ids: [])
      |> assign(
@@ -36,7 +37,8 @@ defmodule FactoryWeb.ChatLive do
        plan_improve: %{},
        plan_inline: nil,
        plan_checking: false,
-       plan_check: nil
+       plan_check: nil,
+       plan_before: nil
      )
      |> set_dir("")
      |> load_agents()
@@ -60,13 +62,15 @@ defmodule FactoryWeb.ChatLive do
          |> assign(run: nil, pick: Workflows.picked())
          |> assign(base_ids: [])
          |> load_plan()
-         |> set_dir("")
+         # A new chat works in the folder picked last, until another is picked.
+         |> set_dir(Factory.Prefs.project_dir())
          |> load_agents()
          |> assign(page_title: (focus && focus.name) || "Chat", run: nil, focus: focus, count: 0)
          |> assign(run_usage: %{turns: 0, credits: 0})
          |> assign(streaming: %{})
          |> assign(message_ids: [], earlier?: false, history?: false)
-         |> stream(:messages, [], reset: true, limit: -@message_limit)}
+         |> stream(:messages, [], reset: true, limit: -@message_limit)
+         |> scout()}
 
       id ->
         case Runs.get_run(id) do
@@ -87,7 +91,8 @@ defmodule FactoryWeb.ChatLive do
              |> load_agents()
              |> assign(page_title: run.title, run: run, focus: focus, streaming: %{})
              |> load_messages()
-             |> load_plan()}
+             |> load_plan()
+             |> scout()}
         end
     end
   end
@@ -135,8 +140,37 @@ defmodule FactoryWeb.ChatLive do
   defp default_to(agents),
     do: Enum.find(agents, &(&1.kind == "planner")) || List.first(agents) || :factory
 
-  # A run keeps its folder. One that has none yet waits for you to choose it.
-  defp keep_dir(socket, run), do: set_dir(socket, run.settings["project_dir"])
+  # A new chat looks at its folder in the background (Factory.Scout): for a review, what
+  # there is to review; otherwise what there is to pick up (unfinished work, notes in the
+  # code), for its suggestions.
+  defp scout(socket) do
+    review? = Workflows.kind(socket.assigns.workflow) == "review"
+    fresh? = socket.assigns[:count] in [nil, 0]
+    look? = connected?(socket) and fresh? and socket.assigns.dir_ok
+    dir = Path.expand(socket.assigns.dir || "")
+
+    cond do
+      not look? ->
+        assign(socket, scout: nil, ideas: nil)
+
+      review? ->
+        socket
+        |> assign(scout: :loading, ideas: nil)
+        |> start_async(:scout, fn -> {dir, Factory.Scout.scout(dir)} end)
+
+      true ->
+        socket
+        |> assign(scout: nil)
+        |> start_async(:ideas, fn -> {dir, Factory.Scout.ideas(dir)} end)
+    end
+  end
+
+  # A run keeps its folder. One still being planned that has none yet takes the folder
+  # picked last, like a new chat.
+  defp keep_dir(socket, run) do
+    dir = run.settings["project_dir"] || (settable?(run) && Factory.Prefs.project_dir())
+    set_dir(socket, dir || "")
+  end
 
   defp set_dir(socket, dir) do
     dir = String.trim(dir || "")
@@ -237,6 +271,9 @@ defmodule FactoryWeb.ChatLive do
   # Commands work anywhere; anything for the agents needs the folder they work in.
   def handle_event("send", %{"chat" => %{"body" => body}}, socket) do
     if socket.assigns.dir_ok or String.starts_with?(String.trim(body), "/") do
+      socket =
+        if String.starts_with?(String.trim(body), "/"), do: socket, else: remember_plan(socket)
+
       send_message(socket, body)
     else
       {:noreply,
@@ -273,7 +310,8 @@ defmodule FactoryWeb.ChatLive do
          |> assign(base_ids: workflow.base_spec_ids)
          |> save_setting("workflow_id", workflow.id)
          |> save_setting("base_spec_ids", workflow.base_spec_ids)
-         |> load_agents()}
+         |> load_agents()
+         |> scout()}
     end
   end
 
@@ -304,6 +342,89 @@ defmodule FactoryWeb.ChatLive do
   def handle_event("specs", _, socket),
     do: {:noreply, push_navigate(socket, to: spec_path(socket, []))}
 
+  # Review a PR: a pull request's link, or a branch the scout found, goes to the Scout
+  # as a message, as if it were typed.
+  def handle_event("review_pr", %{"url" => url}, socket) do
+    url = String.trim(url || "")
+
+    cond do
+      not socket.assigns.dir_ok ->
+        {:noreply,
+         socket
+         |> assign(folder_warn: true)
+         |> put_flash(:error, "Choose the project folder first: the review reads its code.")}
+
+      Regex.match?(~r{^https?://\S+/pull/\d+}, url) or Regex.match?(~r/^#?\d+$/, url) ->
+        send_message(socket, "Review the pull request #{url}.")
+
+      true ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Paste a pull request's link, like https://github.com/owner/repo/pull/12."
+         )}
+    end
+  end
+
+  # A repository's link: Factory clones it with SSH (or fetches it again) into its own
+  # folder, then the chat opens on it with its branches listed (Factory.Repos).
+  def handle_event("review_link", %{"link" => link}, socket) do
+    case Factory.Repos.parse(link) do
+      {:ok, repo} ->
+        {:noreply,
+         socket
+         |> assign(cloning: repo.label, clone_error: nil)
+         |> start_async(:clone, fn -> Factory.Repos.clone(link) end)}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, clone_error: reason)}
+    end
+  end
+
+  def handle_event("review_branch", %{"branch" => branch}, socket) do
+    with {:ok, %{branches: branches}} <- socket.assigns.scout,
+         %{} = b <- Enum.find(branches, &(&1.name == branch)) do
+      against = if b.base && b.base != branch, do: " against `#{b.base}`", else: ""
+
+      latest =
+        if b.ahead && b.ahead > 0,
+          do:
+            ": #{b.ahead} #{if b.ahead == 1, do: "commit", else: "commits"}, the latest “#{b.subject}”",
+          else: ""
+
+      what =
+        case Regex.run(~r/^pr-(\d+)$/, b.label) do
+          [_, n] -> "Review pull request ##{n}, fetched as the branch `#{branch}`"
+          _ -> "Review the branch `#{branch}`"
+        end
+
+      send_message(socket, "#{what}#{against}#{latest}.")
+    else
+      _ -> {:noreply, put_flash(socket, :error, "That branch isn't there any more. Scout again.")}
+    end
+  end
+
+  # The work in the folder itself: what isn't committed yet, or the latest commits.
+  def handle_event("review_local", %{"what" => what}, socket) do
+    case {what, socket.assigns.scout} do
+      {"changes", {:ok, scout}} ->
+        send_message(socket, "Review the uncommitted changes on `#{scout.current}`.")
+
+      {"recent", {:ok, %{recent: [_ | _] = commits} = scout}} ->
+        send_message(
+          socket,
+          "Review the last #{length(commits)} commits on `#{scout.current}`, " <>
+            "#{List.last(commits).sha} to #{hd(commits).sha}."
+        )
+
+      _ ->
+        {:noreply, put_flash(socket, :error, "Look at the branches again first.")}
+    end
+  end
+
+  def handle_event("scout_again", _, socket), do: {:noreply, scout(socket)}
+
   def handle_event("browse", _, socket) do
     browser = %{mode: "dir", hidden: false, listing: nil, error: nil}
     # This chat's folder, else the one picked last.
@@ -331,7 +452,8 @@ defmodule FactoryWeb.ChatLive do
      |> assign(browser: nil, folder_warn: false)
      |> tap(fn _ -> Factory.Prefs.remember_project_dir(path) end)
      |> set_dir(path)
-     |> save_setting("project_dir", Path.expand(path))}
+     |> save_setting("project_dir", Path.expand(path))
+     |> scout()}
   end
 
   def handle_event("action", %{"action" => action}, socket) do
@@ -352,11 +474,18 @@ defmodule FactoryWeb.ChatLive do
     message = socket.assigns.run && Repo.get(Message, id)
     agent = message && message.meta["agent_id"] && Agents.get_agent(message.meta["agent_id"])
     picked = params["answers"] || %{}
+    own = params["others"] || %{}
 
+    # The option picked, with what was written beside it: an answer of your own, or the
+    # details an option asks for.
     text =
       for {q, i} <- Enum.with_index((message && message.meta["questions"]) || []),
-          answer = picked["#{i}"],
-          is_binary(answer) do
+          answer =
+            [picked["#{i}"], own["#{i}"]]
+            |> Enum.map(&String.trim(to_string(&1 || "")))
+            |> Enum.reject(&(&1 == ""))
+            |> Enum.join(": "),
+          answer != "" do
         "#{q["question"]} #{answer}"
       end
       |> Enum.join("\n")
@@ -417,7 +546,7 @@ defmodule FactoryWeb.ChatLive do
          {:ok, changed} <- inline_change(task, part, value) do
       socket
       |> assign(plan_inline: nil)
-      |> plan_changed(Specs.edit_plan_task(plan_spec(socket), i, changed))
+      |> own_change(i, :edit, Specs.edit_plan_task(plan_spec(socket), i, changed))
     else
       _ -> {:noreply, assign(socket, plan_inline: nil)}
     end
@@ -426,14 +555,26 @@ defmodule FactoryWeb.ChatLive do
   def handle_event("plan_save", %{"i" => i, "task" => params}, socket) do
     socket
     |> assign(plan_editing: nil)
-    |> plan_changed(Specs.edit_plan_task(plan_spec(socket), String.to_integer(i), params))
+    |> own_change(
+      String.to_integer(i),
+      :edit,
+      Specs.edit_plan_task(plan_spec(socket), String.to_integer(i), params)
+    )
   end
 
   def handle_event("plan_remove", %{"i" => i}, socket) do
     socket
     |> assign(plan_editing: nil, plan_asking: nil)
-    |> plan_changed(Specs.remove_plan_task(plan_spec(socket), String.to_integer(i)))
+    |> own_change(
+      String.to_integer(i),
+      :remove,
+      Specs.remove_plan_task(plan_spec(socket), String.to_integer(i))
+    )
   end
+
+  # The gold marks on what the planner changed: cleared once they've been read.
+  def handle_event("plan_changes_clear", _, socket),
+    do: {:noreply, assign(socket, plan_before: nil)}
 
   def handle_event("plan_check_dismiss", _, socket),
     do: {:noreply, assign(socket, plan_check: nil)}
@@ -465,7 +606,7 @@ defmodule FactoryWeb.ChatLive do
     if run && planner && run.status == "draft" do
       findings = socket.assigns.plan_check && socket.assigns.plan_check.body
       Factory.ChatPlanner.start(run, planner, action: :refine, findings: findings)
-      {:noreply, assign(socket, plan_checking: false)}
+      {:noreply, socket |> remember_plan() |> assign(plan_checking: false)}
     else
       {:noreply, put_flash(socket, :error, "This run has no planner to review its plan.")}
     end
@@ -491,7 +632,7 @@ defmodule FactoryWeb.ChatLive do
 
       socket
       |> update(:plan_improve, &Map.delete(&1, title))
-      |> plan_changed(Specs.edit_plan_task(plan_spec(socket), i, params))
+      |> own_change(i, :edit, Specs.edit_plan_task(plan_spec(socket), i, params))
     else
       _ -> {:noreply, update(socket, :plan_improve, &Map.delete(&1, title))}
     end
@@ -597,7 +738,26 @@ defmodule FactoryWeb.ChatLive do
   # work on a task and every change to the plan show here.
   defp load_plan(socket) do
     run = socket.assigns.run
-    spec = run && run.spec_id && Specs.get_spec(run.spec_id)
+
+    {run, spec} =
+      cond do
+        run == nil ->
+          {nil, nil}
+
+        run.spec_id ->
+          {run, Specs.get_spec(run.spec_id)}
+
+        # A plan whose spec was deleted (on the Specs page) comes back from the chat's
+        # own copy of it, so its tasks aren't lost while the chat is being planned.
+        run.status == "draft" and run.tasks != [] ->
+          spec = Specs.for_run(run)
+          {Runs.get_run(run.id), spec}
+
+        true ->
+          {run, nil}
+      end
+
+    socket = assign(socket, run: run)
     old = socket.assigns.plan_sub
 
     if connected?(socket) and old != (spec && spec.id) do
@@ -607,6 +767,7 @@ defmodule FactoryWeb.ChatLive do
 
     assign(socket,
       plan_check: latest_check(run, socket.assigns[:planner]),
+      plan_before: if(old == (spec && spec.id), do: socket.assigns[:plan_before]),
       plan_spec: spec,
       plan_sub: spec && spec.id,
       plan_editing: nil,
@@ -659,6 +820,34 @@ defmodule FactoryWeb.ChatLive do
   defp plan_changed(socket, _error),
     do: {:noreply, put_flash(socket, :error, "That task changed meanwhile. Try again.")}
 
+  # The plan as it was before the planner reworks it (FactoryWeb.PlanDiff), so the
+  # panel can mark in gold what it changed. Only a plan that has tasks is kept.
+  defp remember_plan(socket) do
+    case plan_tasks(socket) do
+      [] -> socket
+      tasks -> assign(socket, plan_before: FactoryWeb.PlanDiff.snapshot(tasks))
+    end
+  end
+
+  # A change the person made to task `i`: saved, and taken into the snapshot, so it
+  # isn't marked as the planner's.
+  defp own_change(socket, i, how, {:ok, spec} = result) do
+    after_tasks = spec.tasks |> Kernel.||("") |> Factory.Spec.blocks() |> elem(1)
+
+    before =
+      FactoryWeb.PlanDiff.accept(
+        socket.assigns.plan_before,
+        plan_tasks(socket),
+        after_tasks,
+        i,
+        how
+      )
+
+    socket |> assign(plan_before: before) |> plan_changed(result)
+  end
+
+  defp own_change(socket, _i, _how, result), do: plan_changed(socket, result)
+
   defp ask_kiro(socket, i, instruction) do
     with %{} = spec <- plan_spec(socket),
          {:ok, title} <- Specs.improve_task(spec, i, instruction) do
@@ -682,7 +871,11 @@ defmodule FactoryWeb.ChatLive do
   defp planner_activity(assigns) do
     with %{id: id} <- assigns.planner,
          %{} = chunk <- assigns.streaming[id] do
-      chunk[:activity] || "Working on the plan…"
+      chunk[:activity] ||
+        if(Workflows.kind(assigns.workflow) == "review",
+          do: "Reviewing…",
+          else: "Working on the plan…"
+        )
     else
       _ -> nil
     end
@@ -770,6 +963,65 @@ defmodule FactoryWeb.ChatLive do
   # The run list changes with every progress write of every run; reload it once per
   # short while rather than once per write.
   # The run's spec (FactoryWeb.PlanPanel): the plan changed, or Kiro is working on a task.
+  # The scout's answer, for the folder the chat is still on.
+  def handle_async(:scout, {:ok, {dir, result}}, socket) do
+    if socket.assigns.dir_ok and Path.expand(socket.assigns.dir) == dir,
+      do: {:noreply, assign(socket, scout: result)},
+      else: {:noreply, socket}
+  end
+
+  def handle_async(:scout, {:exit, _reason}, socket),
+    do: {:noreply, assign(socket, scout: {:error, "Couldn't read the folder's branches."})}
+
+  # Cloned (or fetched): the chat becomes a review of that repository, kept as a run
+  # of its own with the clone as its folder, so it's there after a reload. The folder
+  # picked for new chats stays as it was.
+  def handle_async(:clone, {:ok, {:ok, cloned}}, socket) do
+    run =
+      case socket.assigns.run do
+        %{status: "draft"} = run -> run
+        _ -> Runs.unused_review(cloned.dir) || elem(Runs.create_run("Review #{cloned.label}"), 1)
+      end
+
+    {:ok, run} =
+      Runs.update_run(run, %{
+        title: "Review #{cloned.label}",
+        kind: "review",
+        settings:
+          Map.merge(run.settings || %{}, %{
+            "workflow_id" => socket.assigns.workflow.id,
+            "base_spec_ids" => socket.assigns.base_ids,
+            "project_dir" => cloned.dir,
+            "title" => "manual"
+          })
+      })
+
+    said =
+      if cloned.fresh,
+        do: "Cloned #{cloned.label}.",
+        else: "Fetched the latest of #{cloned.label}."
+
+    {:noreply,
+     socket
+     |> assign(cloning: nil, clone_error: nil)
+     |> put_flash(:info, said)
+     |> push_patch(to: ~p"/chat/#{run.id}")}
+  end
+
+  def handle_async(:clone, {:ok, {:error, reason}}, socket),
+    do: {:noreply, assign(socket, cloning: nil, clone_error: reason)}
+
+  def handle_async(:clone, {:exit, _reason}, socket),
+    do: {:noreply, assign(socket, cloning: nil, clone_error: "The clone stopped unexpectedly.")}
+
+  def handle_async(:ideas, {:ok, {dir, ideas}}, socket) do
+    if socket.assigns.dir_ok and Path.expand(socket.assigns.dir) == dir,
+      do: {:noreply, assign(socket, ideas: ideas)},
+      else: {:noreply, socket}
+  end
+
+  def handle_async(:ideas, {:exit, _reason}, socket), do: {:noreply, assign(socket, ideas: [])}
+
   def handle_info({:spec_updated, %{id: id} = spec}, %{assigns: %{plan_sub: id}} = socket),
     do: {:noreply, assign(socket, plan_spec: spec)}
 
@@ -1007,6 +1259,9 @@ defmodule FactoryWeb.ChatLive do
                 working={planner_activity(assigns)}
                 checking={@plan_checking}
                 check={@plan_check}
+                before={@plan_before}
+                job={Workflows.kind(@workflow)}
+                builders={for a <- @agents, not Factory.Agents.Agent.read_only?(a), do: a.name}
                 spec_hint={plan_spec_hint?(assigns)}
               />
             </div>
@@ -1041,6 +1296,10 @@ defmodule FactoryWeb.ChatLive do
               specs={spec_count(assigns)}
               chain={for st <- @steps, st.kind != "action", do: st.name}
               last_run={last_run(@runs, @run)}
+              scout={@scout}
+              ideas={@ideas}
+              cloning={@cloning}
+              clone_error={@clone_error}
             />
           </div>
 
@@ -1055,6 +1314,7 @@ defmodule FactoryWeb.ChatLive do
               to={@to}
               run={@run}
               planner={@planner}
+              job={Workflows.kind(@workflow)}
               glow={@empty and @dir_ok and @focus == nil}
             />
           </div>

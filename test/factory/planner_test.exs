@@ -29,6 +29,7 @@ defmodule Factory.Specs.PlannerTest do
              "objective" => "",
              "details" => ["In `lib/a.ex`.", "Test it."],
              "verify" => [],
+             "agent" => nil,
              "model" => nil,
              "requirements" => ["1.2", "2"]
            }

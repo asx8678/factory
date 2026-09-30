@@ -318,6 +318,11 @@ defmodule Factory.Engine do
 
         {:error, reason} ->
           fail(run, step, reason)
+
+        # Paused or cancelled between its tasks: the step stays undone, to go on from
+        # its open tasks when the run resumes.
+        :stopped ->
+          nil
       end
     end
   end
@@ -595,7 +600,17 @@ defmodule Factory.Engine do
     {:ok, out, nil}
   end
 
+  # An agent that builds, with open tasks the plan gives it: one task at a time, each on
+  # the model the plan names for it. Otherwise (no plan, nothing left for it, a pass
+  # sent back once everything is built) the whole step in one pass.
   defp do_step(run, steps, step) do
+    case marks_tasks?(run, step) && own_tasks(run, steps, step) do
+      [_ | _] = tasks -> build_each(run, steps, step, tasks)
+      _ -> one_pass(run, steps, step)
+    end
+  end
+
+  defp one_pass(run, steps, step) do
     set_activity(step.agent, "running", "Working on “#{run.title}”")
     Runs.post(run, "factory", "#{step.name} is on it#{handed_by(steps, step)}.", meta: meta(step))
     prompt = fit_prompt(run, steps, step)
@@ -634,6 +649,113 @@ defmodule Factory.Engine do
     end
   end
 
+  # Task by task: each on the agent's own session, so it keeps what it did before, on the
+  # model the plan names for the task (else the agent's). A task that isn't marked done
+  # is left for verification to catch; the run goes on to the next.
+  defp build_each(run, steps, step, tasks) do
+    count = length(tasks)
+    names = Enum.map_join(tasks, ", ", fn {task, _} -> number(task) end)
+
+    Runs.post(
+      run,
+      "factory",
+      "#{step.name} is on it#{handed_by(steps, step)}: #{if count == 1, do: "task #{names}", else: "tasks #{names}, one at a time"}.",
+      meta: meta(step)
+    )
+
+    result =
+      tasks
+      |> Enum.with_index(1)
+      |> Enum.reduce_while({[], nil}, fn {{task, block}, n}, {outs, _sent} ->
+        run = Runs.get_run(run.id)
+
+        if run.status != "running" do
+          {:halt, :stopped}
+        else
+          model = task_model(run, step, block)
+
+          activity =
+            if count == 1,
+              do: "Building task #{number(task)} of “#{run.title}”",
+              else: "Building task #{number(task)} (#{n} of #{count}) of “#{run.title}”"
+
+          set_activity(step.agent, "running", activity)
+          prompt = fit_prompt(run, steps, step, {task, block})
+
+          case Kiro.run_step(step.agent, run.id, prompt.ask,
+                 brief: {prompt.brief, "#{run.id}:" <> Factory.Context.sha256(prompt.brief)},
+                 source: "run_step",
+                 model: model,
+                 context: false,
+                 activity: activity,
+                 step: %{
+                   id: step.id,
+                   tasks: true,
+                   verdict: Map.get(step, :loops, []) != []
+                 }
+               ) do
+            {:ok, reply} -> {:cont, {[reply | outs], sent(prompt)}}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
+        end
+      end)
+
+    case result do
+      :stopped ->
+        set_activity(step.agent, "idle", nil)
+        :stopped
+
+      {:error, reason} ->
+        set_activity(step.agent, "error", reason)
+        {:error, reason}
+
+      {outs, sent} ->
+        set_activity(step.agent, "done", nil)
+        {:ok, outs |> Enum.reverse() |> Enum.join("\n\n"), sent}
+    end
+  end
+
+  # The open tasks this agent builds: the ones the plan gives it by name, and, when it's
+  # the first agent that builds, the ones it gives to nobody or to an agent this
+  # workflow doesn't have. With the task as the spec writes it (`Factory.Verifier`).
+  defp own_tasks(run, steps, step) do
+    builders =
+      for s <- steps, s.kind != "action", s.agent != nil, not Agent.read_only?(s.agent), do: s
+
+    names = MapSet.new(builders, &String.downcase(&1.name))
+    first? = match?([%{id: id} | _] when id == step.id, builders)
+    me = String.downcase(step.name)
+
+    for task <- Enum.sort_by(run.tasks, & &1.position),
+        task.status != "done",
+        block = Factory.Verifier.spec_task(run, task),
+        owner = block[:agent] && String.downcase(block.agent),
+        owner == me or (first? and (owner == nil or not MapSet.member?(names, owner))),
+        do: {task, block}
+  end
+
+  # The model for one task: a coding agent's own (Auto unless set on its card), for now;
+  # for the others, the plan's when Factory may pick it (`Kiro.task_models/0`, never
+  # Sonnet), else the agent's.
+  defp task_model(run, %{kind: "coder"} = step, _block), do: model(run, step)
+
+  defp task_model(run, step, block) do
+    m = block[:model]
+
+    if is_binary(m) and m != "auto" and m in Kiro.task_models(),
+      do: m,
+      else: model(run, step)
+  end
+
+  defp sent(prompt) do
+    %{
+      "tokens" => prompt.tokens,
+      "bytes" => prompt.bytes,
+      "sha256" => prompt.sha256,
+      "omitted_bytes" => prompt.omitted_bytes
+    }
+  end
+
   # Agents that change the project mark the run's tasks done as they finish them
   # (`Factory.RunTools`); ones that only read and check don't. A step with an arrow
   # back also has the verdict tool.
@@ -644,7 +766,7 @@ defmodule Factory.Engine do
 
   # The prompt's parts in order, fitted to the budget. Text the run or its agents wrote
   # (job, spec, hand-offs, sources) can be shortened; Factory's own lines can't.
-  defp fit_prompt(run, steps, step) do
+  defp fit_prompt(run, steps, step, focus \\ nil) do
     notes = Map.get(step, :notes, %{})
 
     # Each arrow in: what the agent before handed over, then what the arrow says.
@@ -701,14 +823,13 @@ defmodule Factory.Engine do
               16 * 1024
             )
           ],
+        focus && focus_text(focus),
         if(Agent.read_only?(step),
           do: "Don't change any files: read, check and report.",
           else: "Make the changes in the project folder."
         ) <>
           " When you're done, reply with a short summary of what you did and what the next agent needs to know.",
-        marks_tasks?(run, step) &&
-          "As you finish each task in the spec, built and checked, mark it done with the " <>
-            "factory tool complete_tasks, giving its number. get_tasks shows which are done.",
+        marks_tasks?(run, step) && complete_rule(focus),
         send_back_rule(steps, step)
       ]
       |> List.flatten()
@@ -722,6 +843,29 @@ defmodule Factory.Engine do
       ask: Enum.join(ask_parts, "\n\n")
     })
   end
+
+  # One task to build this turn, as the spec writes it.
+  defp focus_text({task, block}) do
+    lines = Map.get(block, :lines) || ["#{number(task)}. #{task.title}"]
+
+    tag(
+      ~s(<this-task number="#{number(task)}">),
+      "Build task #{number(task)} only, this turn: the other tasks are for later turns " <>
+        "or other agents. Follow its approach and meet its checks.\n\n" <> Enum.join(lines, "\n"),
+      "</this-task>",
+      16 * 1024
+    )
+  end
+
+  defp complete_rule(nil),
+    do:
+      "As you finish each task in the spec, built and checked, mark it done with the " <>
+        "factory tool complete_tasks, giving its number. get_tasks shows which are done."
+
+  defp complete_rule({task, _block}),
+    do:
+      "When task #{number(task)} is built and its checks pass, mark it done with the " <>
+        "factory tool complete_tasks, giving its number."
 
   # When some tasks are done already (a run run again for tasks added later), which
   # ones: the agents work on the rest.

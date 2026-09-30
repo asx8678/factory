@@ -821,6 +821,7 @@ defmodule FactoryWeb.SpecLive do
             editing={@editing}
             expanded={@expanded}
             filter={@filter}
+            builders={if @step == "tasks", do: Enum.map(Specs.builders(@spec), & &1.name), else: []}
             improve={@improve}
             selected={@selected}
           />

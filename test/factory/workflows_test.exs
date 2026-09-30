@@ -5,7 +5,9 @@ defmodule Factory.WorkflowsTest do
 
   test "the standard workflows match the jobs on the start screen" do
     workflows = Workflows.list()
-    assert Enum.map(Enum.filter(workflows, & &1.key), & &1.key) == ~w(feature bug issue deps)
+
+    assert Enum.map(Enum.filter(workflows, & &1.key), & &1.key) ==
+             ~w(feature bug review)
 
     bug = Workflows.standard("bug")
     assert bug.name == "Fix a bug"
