@@ -21,8 +21,21 @@ defmodule FactoryWeb.SettingsLive do
       models: Catalog.models() || [],
       modes: Catalog.modes() || [],
       checked_at: Catalog.checked_at(),
-      check_error: Catalog.error()
+      check_error: Catalog.error(),
+      planning: Factory.Prefs.get("planning_model"),
+      verifying: Factory.Prefs.get("verify_model")
     )
+  end
+
+  # Which model plans and which verifies; "" goes back to Factory's choice.
+  def handle_event("role_models", params, socket) do
+    for {key, field} <- [{"planning_model", "planning"}, {"verify_model", "verifying"}],
+        Map.has_key?(params, field) do
+      value = params[field]
+      Factory.Prefs.put(key, if(value in Factory.Kiro.models(), do: value))
+    end
+
+    {:noreply, catalog(socket)}
   end
 
   # Asks Kiro which models it has; the answer comes back as {:kiro_catalog, _}.
@@ -87,6 +100,84 @@ defmodule FactoryWeb.SettingsLive do
         <div class="max-w-xl">
           <%= case @tab do %>
             <% "models" -> %>
+              <section id="role-models" class="mb-10">
+                <h2 class="font-medium">Models by role</h2>
+                <p class="mt-0.5 text-sm text-base-content/55">
+                  Plan with the strongest model, build with what each task needs, and verify with a different, quicker one.
+                </p>
+                <form
+                  id="role-models-form"
+                  phx-change="role_models"
+                  class="mt-3 divide-y divide-base-300/70 rounded-xl border border-base-300/70"
+                >
+                  <label class="flex items-center gap-4 px-3.5 py-3">
+                    <span class="min-w-0 flex-1">
+                      <span class="block text-sm font-medium">Planning</span>
+                      <span class="block text-xs text-base-content/55">
+                        The chat's planner, Scope and Refine, and Suggest with AI and Improve on the Spec page.
+                      </span>
+                    </span>
+                    <select
+                      name="planning"
+                      class="h-8 w-56 shrink-0 rounded-md border border-base-300 bg-base-100 px-2 text-[13px] outline-none focus:border-base-content/30"
+                    >
+                      <option value="" selected={@planning in [nil, ""]}>
+                        Strongest offered ({Factory.Kiro.model_name(Factory.Kiro.strongest())})
+                      </option>
+                      <option
+                        :for={m <- @models}
+                        value={m["value"]}
+                        selected={@planning == m["value"]}
+                      >
+                        {m["name"]}
+                      </option>
+                    </select>
+                  </label>
+                  <div class="flex items-center gap-4 px-3.5 py-3">
+                    <span class="min-w-0 flex-1">
+                      <span class="block text-sm font-medium">Building</span>
+                      <span class="block text-xs text-base-content/55">
+                        Each agent's own model, set on its card under Workflows. The planner suggests a model for each task, shown with the task.
+                      </span>
+                    </span>
+                    <span class="w-56 shrink-0 px-2 text-[13px] text-base-content/60">
+                      Per agent, Auto unless set
+                    </span>
+                  </div>
+                  <label class="flex items-center gap-4 px-3.5 py-3">
+                    <span class="min-w-0 flex-1">
+                      <span class="block text-sm font-medium">Verifying</span>
+                      <span class="block text-xs text-base-content/55">
+                        Checks each finished task against its Verify list, running its commands, and sends it back when a check fails.
+                      </span>
+                    </span>
+                    <select
+                      name="verifying"
+                      class="h-8 w-56 shrink-0 rounded-md border border-base-300 bg-base-100 px-2 text-[13px] outline-none focus:border-base-content/30"
+                    >
+                      <option value="" selected={@verifying in [nil, ""]}>
+                        Quick and different ({Factory.Kiro.model_name(Factory.Kiro.quick())})
+                      </option>
+                      <option
+                        :for={m <- @models}
+                        value={m["value"]}
+                        selected={@verifying == m["value"]}
+                      >
+                        {m["name"]}
+                      </option>
+                    </select>
+                  </label>
+                </form>
+                <p
+                  :if={!Enum.any?(@models, &String.contains?(&1["value"], "opus"))}
+                  class="mt-2 text-xs text-base-content/55"
+                >
+                  This Kiro doesn't offer an Opus model or a thinking-effort setting, so planning uses {Factory.Kiro.model_name(
+                    Factory.Kiro.strongest()
+                  )}. Factory picks an Opus automatically once Kiro lists one.
+                </p>
+              </section>
+
               <section id="kiro-models" class="mb-8">
                 <div class="flex items-start justify-between gap-4">
                   <div>

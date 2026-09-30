@@ -109,6 +109,7 @@ defmodule Factory.ChatPlanner do
   defp start_request(run, planner, files, prompt, mode) do
     dir = run.settings["project_dir"] || Kiro.config(:workspace)
     generation = run.planner_generation
+    prompt = Map.put(prompt, :model, planning_model(planner))
 
     Agents.set_activity(planner.id, "running", "Planning “#{run.title}”")
     show_progress(run.id, planner, "Reading the project…")
@@ -146,6 +147,7 @@ defmodule Factory.ChatPlanner do
         post: false,
         stream: false,
         activity: "Planning “#{run.title}”",
+        model: prompt.model,
         on_tool: &show_progress(run.id, planner, Planner.describe_tool(&1, dir)),
         planning: %{
           generation: generation,
@@ -169,6 +171,7 @@ defmodule Factory.ChatPlanner do
     with {:ok, reply} <-
            Kiro.ask(prompt.full,
              workdir: dir,
+             model: prompt.model,
              allow: ["read", "search"],
              mcp_servers: [PlanTools.mcp_server(token)],
              reply: :last,
@@ -177,6 +180,13 @@ defmodule Factory.ChatPlanner do
            ) do
       read_result(reply, generation, mode == :scope)
     end
+  end
+
+  # Plans on the planning model (Settings), unless the planner's card names its own.
+  defp planning_model(planner) do
+    if planner.model in Kiro.models() and planner.model != "auto",
+      do: planner.model,
+      else: Kiro.planning_model()
   end
 
   # What the tools reported while Kiro worked (`Factory.PlanTools`). Without any tool

@@ -24,9 +24,11 @@ defmodule Factory.Kiro do
   Settings, else the newest Claude Haiku this Kiro offers, which is quick and cheap
   and isn't the model that built it.
   """
-  def verify_model do
-    chosen("verify_model") ||
-      models() |> Enum.filter(&String.contains?(&1, "haiku")) |> Enum.sort(:desc) |> List.first() ||
+  def verify_model, do: chosen("verify_model") || quick()
+
+  @doc "The newest Claude Haiku this Kiro offers, else \"auto\": verifying's default."
+  def quick do
+    models() |> Enum.filter(&String.contains?(&1, "haiku")) |> Enum.sort(:desc) |> List.first() ||
       "auto"
   end
 

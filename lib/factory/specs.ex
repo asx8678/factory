@@ -256,11 +256,13 @@ defmodule Factory.Specs do
 
       true ->
         {:ok, spec} = set_review(spec, %{"status" => "running"})
+        model = Factory.Kiro.planning_model()
 
         Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
           review =
             with {:ok, reply} <-
                    Factory.Kiro.ask(Review.prompt(files),
+                     model: model,
                      usage: %{source: "review", spec_id: spec.id}
                    ),
                  {:ok, review} <- Review.parse(reply) do
@@ -303,12 +305,14 @@ defmodule Factory.Specs do
           prompt = Planner.run_prompt(type, kiro_files(spec), write: write, agents: agents)
           {:ok, spec} = set_write(spec, %{"status" => "running", "writing" => write})
           dir = project_dir(spec)
+          model = Factory.Kiro.planning_model()
 
           Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
             result =
               with {:ok, reply} <-
                      Factory.Kiro.ask(prompt,
                        workdir: dir,
+                       model: model,
                        allow: ["read", "search"],
                        on_tool:
                          &broadcast(
@@ -537,6 +541,7 @@ defmodule Factory.Specs do
   defp run_plan(spec, source, prompt, parse, base, done, opts \\ []) do
     dir = spec.project_dir
     topic = "spec:#{spec.id}"
+    model = Factory.Kiro.planning_model()
 
     on_tool = fn update ->
       broadcast(topic, {:plan_activity, Planner.describe_tool(update, dir)})
@@ -549,6 +554,7 @@ defmodule Factory.Specs do
                  prompt,
                  [
                    workdir: dir,
+                   model: model,
                    allow: ["read", "search"],
                    on_tool: on_tool,
                    usage: %{source: source, spec_id: spec.id}
@@ -753,11 +759,14 @@ defmodule Factory.Specs do
           broadcast(topic, {:task_activity, task.title, Planner.describe_tool(update, dir)})
         end
 
+        model = Factory.Kiro.planning_model()
+
         Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
           result =
             with {:ok, reply} <-
                    Factory.Kiro.ask(prompt,
                      workdir: dir,
+                     model: model,
                      allow: ["read", "search"],
                      on_tool: on_tool,
                      usage: %{source: "improve_task", spec_id: spec.id}
@@ -788,11 +797,14 @@ defmodule Factory.Specs do
       broadcast(topic, {:draft_activity, ref, Planner.describe_tool(update, dir)})
     end
 
+    model = Factory.Kiro.planning_model()
+
     Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
       result =
         with {:ok, reply} <-
                Factory.Kiro.ask(prompt,
                  workdir: dir,
+                 model: model,
                  allow: ["read", "search"],
                  on_tool: on_tool,
                  usage: %{source: "draft_task", spec_id: spec.id}
