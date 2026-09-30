@@ -16,6 +16,7 @@ defmodule Factory.Application do
       {DynamicSupervisor, name: Factory.Kiro.Supervisor, strategy: :one_for_one},
       {Task.Supervisor, name: Factory.TaskSupervisor},
       # No Kiro session or review survives a restart: clear leftover context and statuses.
+      # And make the standard workflows now, so no page makes them while it's viewed.
       # Off in tests, where the sandbox owns the database.
       {Task,
        fn ->
@@ -23,6 +24,8 @@ defmodule Factory.Application do
            Factory.Agents.reset_sessions()
            Factory.Specs.reset_reviews()
            Factory.Engine.reset_runs()
+           Factory.Workflows.ensure_standard()
+           Factory.Workflows.current()
          end
 
          # The models Kiro offers: the last list at once, then a fresh check.

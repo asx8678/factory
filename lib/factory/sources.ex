@@ -463,7 +463,7 @@ defmodule Factory.Sources do
   # HTTP header through git's environment config, so it isn't on the command line
   # or saved to disk.
   defp git_env(%Source{kind: "azure_devops", config: c}) do
-    base = [{"GIT_TERMINAL_PROMPT", "0"}]
+    base = [{"GIT_TERMINAL_PROMPT", "0"}, {"SSH_ASKPASS_REQUIRE", "never"}]
 
     case blank_nil(c["pat_env"]) do
       nil ->
@@ -489,7 +489,8 @@ defmodule Factory.Sources do
     end
   end
 
-  defp git_env(_source), do: {:ok, [{"GIT_TERMINAL_PROMPT", "0"}]}
+  defp git_env(_source),
+    do: {:ok, [{"GIT_TERMINAL_PROMPT", "0"}, {"SSH_ASKPASS_REQUIRE", "never"}]}
 
   defp git_error(out) do
     out = String.trim(out)

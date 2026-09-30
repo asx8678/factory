@@ -566,8 +566,14 @@ defmodule Factory.Actions do
 
   # ssh in batch mode, so a key's passphrase or a host it doesn't know yet fails at once.
   # It adds to the ssh command git would use anyway (GIT_SSH_COMMAND, else
-  # core.sshCommand), so a key chosen there still counts; a GIT_SSH program is left be.
+  # core.sshCommand), so a key chosen there still counts; a GIT_SSH program is left be,
+  # but ssh started by one still mustn't ask for a password or passphrase
+  # (SSH_ASKPASS_REQUIRE=never: no prompt, it fails instead).
   defp ssh_env(folder) do
+    [{"SSH_ASKPASS_REQUIRE", "never"} | ssh_command_env(folder)]
+  end
+
+  defp ssh_command_env(folder) do
     cond do
       command = blank(System.get_env("GIT_SSH_COMMAND")) -> [{"GIT_SSH_COMMAND", batch(command)}]
       blank(System.get_env("GIT_SSH")) -> []

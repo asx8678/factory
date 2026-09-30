@@ -55,7 +55,10 @@ defmodule FactoryWeb.SpecPageParts do
         :if={@status == "done" and @write["why"] not in [nil, ""]}
         class="mt-1 text-base-content/65"
       >
-        Wrote the {parts(@write["wrote"])}. {@write["why"]}
+        <%!-- Parts written meanwhile are kept, so there may be nothing left to write. --%>
+        {if @write["wrote"] == [],
+          do: "You'd written every part meanwhile, so nothing was changed.",
+          else: "Wrote the #{parts(@write["wrote"])}."} {@write["why"]}
       </p>
 
       <div :if={@offer}>

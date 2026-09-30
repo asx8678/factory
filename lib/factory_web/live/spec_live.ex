@@ -764,10 +764,19 @@ defmodule FactoryWeb.SpecLive do
   # Every change to the spec, and to the step shown, comes through here, so what the
   # page shows from it is worked out once per change rather than on every render: the
   # step's text and state, its task list, and on Tasks the agents a task can be given
-  # to (which takes a few queries).
+  # to (which takes a few queries, so it's worked out once per visit: a workflow's
+  # agents seldom change while its spec is open).
   defp put_spec(socket, spec) do
     step = socket.assigns.step
     tasks? = step == "tasks"
+
+    socket =
+      if tasks? and socket.assigns[:builder_names] == nil,
+        do:
+          assign(socket,
+            builder_names: Enum.map(Specs.builders(spec, socket.assigns[:home_run]), & &1.name)
+          ),
+        else: socket
 
     assign(socket,
       spec: spec,
@@ -777,7 +786,7 @@ defmodule FactoryWeb.SpecLive do
       approved: Spec.approved?(spec, step),
       ready: Spec.current_step(spec) == "ready",
       task_list: if(tasks?, do: Specs.task_list(spec), else: []),
-      builders: if(tasks?, do: Enum.map(Specs.builders(spec), & &1.name), else: [])
+      builders: if(tasks?, do: socket.assigns.builder_names, else: [])
     )
   end
 

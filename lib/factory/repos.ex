@@ -150,9 +150,19 @@ defmodule Factory.Repos do
       File.dir?(Path.join(dir, ".git")) ->
         case git(dir, ~w(remote get-url origin), deadline) do
           {:ok, url} when is_binary(url) ->
-            if same?(url, repo.url),
-              do: refetch(repo, dir, deadline),
-              else: {:error, "#{dir} already holds another repository, so Factory left it alone."}
+            cond do
+              not same?(url, repo.url) ->
+                {:error, "#{dir} already holds another repository, so Factory left it alone."}
+
+              # A clone stopped partway, before clones were made beside it and moved
+              # into place (`fresh_clone/3`): nothing checked out, so it starts again.
+              not checked_out?(dir, deadline) ->
+                File.rm_rf!(dir)
+                clone_or_fetch(repo, dir, deadline)
+
+              true ->
+                refetch(repo, dir, deadline)
+            end
 
           _ ->
             {:error, "#{dir} already holds another repository, so Factory left it alone."}
@@ -210,6 +220,17 @@ defmodule Factory.Repos do
     end
   end
 
+  # Whether the clone has a commit checked out. When git can't say (it took too long,
+  # or isn't there), it's taken as yes, so a good clone is never removed for that.
+  defp checked_out?(dir, deadline) do
+    case git(dir, ~w(rev-parse --verify --quiet HEAD), deadline) do
+      {:ok, _} -> true
+      {:error, :timeout} -> true
+      {:error, "git isn't installed."} -> true
+      {:error, _} -> false
+    end
+  end
+
   defp refetch(repo, dir, deadline) do
     with {:ok, _} <- git(dir, ~w(fetch --all --prune --quiet), deadline),
          {:ok, pr_branch} <- fetch_pr(repo, dir, deadline) do
@@ -249,6 +270,7 @@ defmodule Factory.Repos do
 
     env = [
       {"GIT_TERMINAL_PROMPT", "0"},
+      {"SSH_ASKPASS_REQUIRE", "never"},
       {"GIT_SSH_COMMAND",
        "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15"}
     ]

@@ -53,14 +53,19 @@ defmodule Factory.Runs do
           calls: count(e.id)
         }
 
+    # A line per run: not its description, spec or progress, which can be large (a
+    # troubleshooting run's description is the logs pasted into it).
+    tasks = from t in Task, order_by: t.position, select: struct(t, [:id, :run_id, :status])
+    spec = from s in Factory.Specs.Spec, select: struct(s, [:id, :name])
+
     Repo.all(
       from r in Run,
         left_join: t in subquery(totals),
         on: t.run_id == r.id,
         order_by: [desc: r.updated_at, desc: r.id],
-        preload: [:tasks, :spec_doc],
+        preload: [tasks: ^tasks, spec_doc: ^spec],
         select:
-          {r,
+          {struct(r, [:id, :kind, :title, :status, :spec_id, :inserted_at, :updated_at]),
            %{
              credits: coalesce(t.credits, 0.0),
              tokens: coalesce(t.tokens, 0),

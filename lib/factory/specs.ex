@@ -19,11 +19,21 @@ defmodule Factory.Specs do
 
   @doc "Run specs: each one run's own spec, newest first."
   def list_specs do
+    # Each spec's runs, for the latest one's status and tasks: not their descriptions or
+    # specs, which can be large.
+    tasks = from t in Runs.Task, select: struct(t, [:id, :run_id, :status])
+
+    runs =
+      from r in Runs.Run,
+        order_by: [desc: r.id],
+        select: struct(r, [:id, :spec_id, :status]),
+        preload: [tasks: ^tasks]
+
     Repo.all(
       from s in SpecDoc,
         where: s.kind == "run",
         order_by: [desc: s.updated_at, desc: s.id],
-        preload: [runs: :tasks]
+        preload: [runs: ^runs]
     )
   end
 
@@ -760,7 +770,8 @@ defmodule Factory.Specs do
   """
   def builders(spec), do: builders(spec, home_run(spec))
 
-  defp builders(_spec, run) do
+  @doc "`builders/1` for a spec whose home run (`home_run/1`) is already known."
+  def builders(_spec, run) do
     workflow =
       case run do
         nil -> Factory.Workflows.current()
