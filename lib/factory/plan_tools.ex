@@ -440,12 +440,24 @@ defmodule Factory.PlanTools do
 
   # The questions as an MCP elicitation form: one field each, a choice when it has options.
   defp elicitation(questions) do
-    properties =
-      for {q, i} <- Enum.with_index(questions, 1), into: %{} do
+    # A question with options also takes an answer of your own (`answer_N_other`), for
+    # an option that asks for details or one that isn't there.
+    fields =
+      for {q, i} <- Enum.with_index(questions, 1) do
         field = %{type: "string", title: q["question"]}
-        field = if q["options"] != [], do: Map.put(field, :enum, q["options"]), else: field
-        {"answer_#{i}", field}
+
+        if q["options"] != [],
+          do: [
+            {"answer_#{i}", Map.put(field, :enum, q["options"])},
+            {"answer_#{i}_other",
+             %{type: "string", title: "Your own answer", description: "Optional"}}
+          ],
+          else: [{"answer_#{i}", field}]
       end
+      |> List.flatten()
+
+    properties = Map.new(fields)
+    required = for {name, _} <- fields, not String.ends_with?(name, "_other"), do: name
 
     %{
       message:
@@ -453,7 +465,7 @@ defmodule Factory.PlanTools do
           do: "A question before I go on:",
           else: "#{length(questions)} questions before I go on:"
         ),
-      schema: %{type: "object", properties: properties, required: Map.keys(properties)}
+      schema: %{type: "object", properties: properties, required: required}
     }
   end
 
@@ -461,7 +473,12 @@ defmodule Factory.PlanTools do
        when is_map(content) do
     answers =
       for {q, i} <- Enum.with_index(questions, 1),
-          answer = content["answer_#{i}"],
+          answer =
+            [content["answer_#{i}"], content["answer_#{i}_other"]]
+            |> Enum.map(&String.trim(to_string(&1 || "")))
+            |> Enum.reject(&(&1 == ""))
+            |> Enum.join(": "),
+          answer != "",
           do: "- #{q["question"]} #{answer}"
 
     {:ok, "The person answered:\n" <> Enum.join(answers, "\n") <> "\nCarry on with that."}

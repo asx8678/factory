@@ -361,11 +361,18 @@ defmodule FactoryWeb.ChatLive do
     message = socket.assigns.run && Repo.get(Message, id)
     agent = message && message.meta["agent_id"] && Agents.get_agent(message.meta["agent_id"])
     picked = params["answers"] || %{}
+    own = params["others"] || %{}
 
+    # The option picked, with what was written beside it: an answer of your own, or the
+    # details an option asks for.
     text =
       for {q, i} <- Enum.with_index((message && message.meta["questions"]) || []),
-          answer = picked["#{i}"],
-          is_binary(answer) do
+          answer =
+            [picked["#{i}"], own["#{i}"]]
+            |> Enum.map(&String.trim(to_string(&1 || "")))
+            |> Enum.reject(&(&1 == ""))
+            |> Enum.join(": "),
+          answer != "" do
         "#{q["question"]} #{answer}"
       end
       |> Enum.join("\n")

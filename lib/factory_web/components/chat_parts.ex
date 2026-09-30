@@ -594,9 +594,14 @@ defmodule FactoryWeb.ChatParts do
     e = assigns.message.meta["elicitation"]
     schema = e["schema"] || %{}
     required = schema["required"] || []
+    props = schema["properties"] || %{}
 
+    # A planner's question with options comes with an answer of your own beside it
+    # (`answer_N_other`, `Factory.PlanTools`): shown under its options, not on its own.
     fields =
-      for {name, prop} <- schema["properties"] || %{} do
+      for {name, prop} <- props, not own_answer_field?(name, props) do
+        other = if Map.has_key?(props, name <> "_other"), do: name <> "_other"
+
         %{
           name: name,
           label: prop["title"] || prop["description"] || humanize(name),
@@ -605,9 +610,11 @@ defmodule FactoryWeb.ChatParts do
           options: prop["enum"],
           labels: prop["enumNames"] || prop["enum"],
           default: prop["default"],
-          required: name in required
+          required: name in required,
+          other: other
         }
       end
+      |> Enum.sort_by(&natural(&1.name))
 
     assigns = assign(assigns, e: e, fields: fields)
 
@@ -616,78 +623,63 @@ defmodule FactoryWeb.ChatParts do
       :if={@e["status"] == "open"}
       id={@id}
       phx-submit="elicit_answer"
-      class="mt-3 space-y-3 rounded-xl border border-primary/30 bg-primary/5 p-3"
+      class="task-card-active mt-3 rounded-xl border"
     >
       <input type="hidden" name="key" value={@e["key"]} />
       <input type="hidden" name="agent_id" value={@message.meta["agent_id"]} />
-      <p class="text-xs font-medium text-primary">
-        <.icon name="hero-hand-raised-mini" class="size-4" /> {@message.author} is waiting for your answer
-      </p>
-      <fieldset :for={f <- @fields}>
-        <legend class="mb-1.5 text-sm">{f.label}</legend>
-        <p :if={f.hint} class="-mt-1 mb-1.5 text-xs text-base-content/55">{f.hint}</p>
-        <%= cond do %>
-          <% f.options -> %>
-            <div class="flex flex-wrap gap-1.5">
-              <label
-                :for={{option, label} <- Enum.zip(f.options, f.labels)}
-                class="cursor-pointer rounded-full border border-base-content/15 px-3 py-1 text-[13px] transition-colors hover:border-primary/50 has-[input:checked]:border-primary has-[input:checked]:bg-primary/12 has-[input:checked]:text-primary"
-              >
-                <input
-                  type="radio"
-                  name={"fields[#{f.name}]"}
-                  value={option}
-                  checked={option == (f.default || hd(f.options))}
-                  class="sr-only"
-                />
-                {label}
-              </label>
-            </div>
-          <% f.type == "boolean" -> %>
-            <div class="flex gap-1.5">
-              <label
-                :for={{value, label} <- [{"true", "Yes"}, {"false", "No"}]}
-                class="cursor-pointer rounded-full border border-base-content/15 px-3 py-1 text-[13px] transition-colors hover:border-primary/50 has-[input:checked]:border-primary has-[input:checked]:bg-primary/12 has-[input:checked]:text-primary"
-              >
-                <input
-                  type="radio"
-                  name={"fields[#{f.name}]"}
-                  value={value}
-                  checked={value == to_string(f.default == true)}
-                  class="sr-only"
-                />
-                {label}
-              </label>
-            </div>
-          <% true -> %>
-            <input
-              type={if f.type in ["number", "integer"], do: "number", else: "text"}
-              name={"fields[#{f.name}]"}
-              value={f.default}
-              required={f.required}
-              class="w-full rounded-lg border border-base-content/15 bg-base-100 px-3 py-1.5 text-sm outline-none focus:border-primary"
-            />
-        <% end %>
-      </fieldset>
-      <div class="flex items-center gap-2 pt-1">
-        <button
-          type="submit"
-          name="action"
-          value="accept"
-          class="rounded-full bg-primary px-3.5 py-1.5 text-[13px] font-medium text-primary-content transition-opacity hover:opacity-90"
+      <.question_head
+        who={@message.author}
+        count={length(@fields)}
+        waiting
+      />
+      <ol class="divide-y divide-base-content/[0.07]">
+        <.question_row
+          :for={{f, n} <- Enum.with_index(@fields, 1)}
+          n={n}
+          question={f.label}
+          hint={f.hint}
         >
-          Send
-        </button>
+          <%= cond do %>
+            <% f.options -> %>
+              <.option_list
+                name={"fields[#{f.name}]"}
+                options={Enum.zip(f.options, f.labels)}
+                checked={f.default || hd(f.options)}
+              />
+              <.own_answer :if={f.other} name={"fields[#{f.other}]"} />
+            <% f.type == "boolean" -> %>
+              <.option_list
+                name={"fields[#{f.name}]"}
+                options={[{"true", "Yes"}, {"false", "No"}]}
+                checked={to_string(f.default == true)}
+                recommend={false}
+              />
+            <% true -> %>
+              <input
+                type={if f.type in ["number", "integer"], do: "number", else: "text"}
+                name={"fields[#{f.name}]"}
+                value={f.default}
+                required={f.required}
+                autocomplete="off"
+                class="h-8 w-full rounded-md border border-base-content/15 bg-base-100 px-2.5 text-[13px] outline-none focus:border-primary/50"
+              />
+          <% end %>
+        </.question_row>
+      </ol>
+      <.question_foot note="It waits for your answers, then carries on.">
         <button
           type="submit"
           name="action"
           value="decline"
           formnovalidate
-          class="rounded-full px-3 py-1.5 text-[13px] text-base-content/60 transition-colors hover:bg-base-content/[0.06] hover:text-base-content"
+          class="btn btn-ghost btn-sm"
         >
           Decline
         </button>
-      </div>
+        <button type="submit" name="action" value="accept" class="btn btn-primary btn-sm">
+          Send answers
+        </button>
+      </.question_foot>
     </form>
     <p
       :if={@e["status"] != "open"}
@@ -711,7 +703,17 @@ defmodule FactoryWeb.ChatParts do
   defp answer_text(answer, schema) when is_map(answer) do
     props = (schema || %{})["properties"] || %{}
 
-    Enum.map_join(answer, "; ", fn {k, v} ->
+    answer
+    |> Enum.reject(fn {k, _} -> own_answer_field?(k, props) end)
+    |> Enum.sort_by(&natural(elem(&1, 0)))
+    |> Enum.map_join("; ", fn {k, v} ->
+      # The option picked, with the answer of your own written beside it.
+      v =
+        [v, answer[k <> "_other"]]
+        |> Enum.map(&String.trim(to_string(&1 || "")))
+        |> Enum.reject(&(&1 == ""))
+        |> Enum.join(": ")
+
       "#{get_in(props, [k, "title"]) || humanize(k)} #{v}"
     end)
   end
@@ -730,50 +732,160 @@ defmodule FactoryWeb.ChatParts do
   attr :id, :string, required: true
   attr :message, :map, required: true
 
-  # The planner's questions as choices: pick one option per question, then send them
-  # all as one message to the planner. Typing an answer in the box works too.
+  # The planner's questions as choices: pick one option per question, or write your
+  # own, then send them all as one message to the planner.
   def question_form(assigns) do
     assigns =
       assign(assigns,
-        questions: Enum.with_index(assigns.message.meta["questions"] || [])
+        questions:
+          for(
+            {q, i} <- Enum.with_index(assigns.message.meta["questions"] || []),
+            q["options"] not in [nil, []],
+            do: {q, i}
+          )
       )
 
     ~H"""
-    <form
-      id={@id}
-      phx-submit="answer"
-      class="mt-3 space-y-3 rounded-xl border border-base-content/10 bg-base-200/40 p-3"
-    >
+    <form id={@id} phx-submit="answer" class="task-card-active mt-3 rounded-xl border">
       <input type="hidden" name="message_id" value={@message.id} />
-      <fieldset :for={{q, i} <- @questions} :if={q["options"] not in [nil, []]}>
-        <legend class="mb-1.5 text-sm">{i + 1}. {q["question"]}</legend>
-        <div class="flex flex-wrap gap-1.5">
-          <label
-            :for={{option, j} <- Enum.with_index(q["options"])}
-            class="cursor-pointer rounded-full border border-base-content/15 px-3 py-1 text-[13px] transition-colors hover:border-primary/50 has-[input:checked]:border-primary has-[input:checked]:bg-primary/12 has-[input:checked]:text-primary"
-          >
-            <input
-              type="radio"
-              name={"answers[#{i}]"}
-              value={option}
-              checked={j == 0}
-              class="sr-only"
-            />
-            {option}{if j == 0, do: " (recommended)"}
-          </label>
-        </div>
-      </fieldset>
-      <div class="flex items-center gap-3 pt-1">
-        <button
-          type="submit"
-          class="rounded-full bg-primary px-3.5 py-1.5 text-[13px] font-medium text-primary-content transition-opacity hover:opacity-90"
-        >
-          Send answers
-        </button>
-        <span class="text-xs text-base-content/50">Or type your own answer below.</span>
-      </div>
+      <.question_head who={@message.author} count={length(@questions)} />
+      <ol class="divide-y divide-base-content/[0.07]">
+        <.question_row :for={{q, i} <- @questions} n={i + 1} question={q["question"]}>
+          <.option_list
+            name={"answers[#{i}]"}
+            options={Enum.map(q["options"], &{&1, &1})}
+            checked={hd(q["options"])}
+          />
+          <.own_answer name={"others[#{i}]"} />
+        </.question_row>
+      </ol>
+      <.question_foot note="Your answers go to the planner as one message.">
+        <button type="submit" class="btn btn-primary btn-sm">Send answers</button>
+      </.question_foot>
     </form>
     """
+  end
+
+  attr :who, :string, required: true
+  attr :count, :integer, required: true
+  attr :waiting, :boolean, default: false
+
+  # A question card's header: who's asking, and whether they're waiting now.
+  defp question_head(assigns) do
+    ~H"""
+    <header class="flex items-center gap-2 border-b border-base-content/10 px-3.5 py-2.5">
+      <.icon name="hero-question-mark-circle-mini" class="size-4 shrink-0 text-primary" />
+      <h3 class="min-w-0 flex-1 truncate text-sm font-medium">
+        {@who} has {if @count == 1, do: "a question", else: "#{@count} questions"}
+      </h3>
+      <span :if={@waiting} class="flex shrink-0 items-center gap-1.5 text-xs text-primary">
+        <span class="size-1.5 animate-pulse rounded-full bg-primary"></span> Waiting for you
+      </span>
+    </header>
+    """
+  end
+
+  attr :n, :integer, required: true
+  attr :question, :string, required: true
+  attr :hint, :string, default: nil
+  slot :inner_block, required: true
+
+  # One question, numbered like a plan's tasks: its first sentence in bold, the rest
+  # under it, then how to answer.
+  defp question_row(assigns) do
+    {title, rest} =
+      case Regex.run(~r/\A(.+?\?)\s+(\S.*)\z/s, String.trim(assigns.question || "")) do
+        [_, title, rest] -> {title, rest}
+        _ -> {assigns.question, nil}
+      end
+
+    assigns = assign(assigns, title: title, rest: rest)
+
+    ~H"""
+    <li class="flex gap-2.5 px-3.5 py-3">
+      <span class="w-4 shrink-0 pt-px text-right text-xs tabular-nums text-base-content/40">
+        {@n}
+      </span>
+      <div class="min-w-0 flex-1">
+        <p class="text-sm font-medium leading-snug">{@title}</p>
+        <p :if={@rest} class="mt-0.5 text-[13px] leading-snug text-base-content/60">{@rest}</p>
+        <p :if={@hint} class="mt-0.5 text-xs text-base-content/50">{@hint}</p>
+        <div class="mt-2">{render_slot(@inner_block)}</div>
+      </div>
+    </li>
+    """
+  end
+
+  attr :name, :string, required: true
+  attr :options, :list, required: true, doc: "[{value, label}]"
+  attr :checked, :any, default: nil
+  attr :recommend, :boolean, default: true, doc: "whether the first option is the recommended one"
+
+  # A question's options, one per line; the first is the one the agent recommends.
+  defp option_list(assigns) do
+    ~H"""
+    <div class="space-y-1">
+      <label
+        :for={{{value, label}, j} <- Enum.with_index(@options)}
+        class="flex cursor-pointer items-start gap-2.5 rounded-lg border border-base-content/10 px-2.5 py-1.5 text-[13px] leading-snug transition-colors hover:border-base-content/25 has-[input:checked]:border-primary/50 has-[input:checked]:bg-primary/[0.07]"
+      >
+        <input
+          type="radio"
+          name={@name}
+          value={value}
+          checked={to_string(value) == to_string(@checked)}
+          class="radio radio-primary radio-xs mt-px shrink-0"
+        />
+        <span class="min-w-0 flex-1">{label}</span>
+        <span :if={@recommend and j == 0} class="shrink-0 text-[11px] text-base-content/45">
+          Recommended
+        </span>
+      </label>
+    </div>
+    """
+  end
+
+  attr :name, :string, required: true
+
+  # An answer of your own, or the details an option asks for ("please specify").
+  defp own_answer(assigns) do
+    ~H"""
+    <input
+      type="text"
+      name={@name}
+      autocomplete="off"
+      placeholder="Or write your own answer, or the details an option asks for"
+      class="mt-1.5 h-8 w-full rounded-md border border-base-content/15 bg-base-100 px-2.5 text-[13px] outline-none placeholder:text-base-content/35 focus:border-primary/50"
+    />
+    """
+  end
+
+  attr :note, :string, required: true
+  slot :inner_block, required: true
+
+  defp question_foot(assigns) do
+    ~H"""
+    <footer class="flex flex-wrap items-center gap-2 border-t border-base-content/10 px-3.5 py-2.5">
+      <span class="mr-auto text-xs text-base-content/55">{@note}</span>
+      {render_slot(@inner_block)}
+    </footer>
+    """
+  end
+
+  # A field that holds the answer of your own to another field's options.
+  defp own_answer_field?(name, props) do
+    String.ends_with?(name, "_other") and
+      Map.has_key?(props, String.trim_trailing(name, "_other"))
+  end
+
+  # Field names in reading order: answer_2 before answer_10.
+  defp natural(name) do
+    for part <- Regex.split(~r/(\d+)/, name, include_captures: true, trim: true) do
+      case Integer.parse(part) do
+        {n, ""} -> {0, n}
+        _ -> {1, part}
+      end
+    end
   end
 
   attr :id, :string, required: true
