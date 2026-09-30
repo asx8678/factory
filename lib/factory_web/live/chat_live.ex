@@ -379,11 +379,11 @@ defmodule FactoryWeb.ChatLive do
   end
 
   # The plan being made (FactoryWeb.PlanPanel): each task edited, removed, or handed to
-  # Kiro to dig deeper or change as asked.
+  # Kiro to refine with the code or change as asked; or the whole plan reviewed again.
 
-  @dig_deeper "Dig deeper: read the code this task touches and make it concrete. Name the " <>
-                "exact files and functions it changes, list the steps in order, and say how " <>
-                "to check it works. Keep it one small change."
+  @refine "Refine this task with the code: read the code it touches and make it concrete. " <>
+            "Name the exact files and functions it changes, list the steps in order, and say " <>
+            "how to check it's done. Keep it one small change."
 
   def handle_event("plan_edit", %{"i" => i}, socket),
     do: {:noreply, assign(socket, plan_editing: String.to_integer(i), plan_asking: nil)}
@@ -403,8 +403,21 @@ defmodule FactoryWeb.ChatLive do
     |> plan_changed(Specs.remove_plan_task(plan_spec(socket), String.to_integer(i)))
   end
 
-  def handle_event("plan_deeper", %{"i" => i}, socket),
-    do: {:noreply, ask_kiro(socket, String.to_integer(i), @dig_deeper)}
+  def handle_event("plan_refine", %{"i" => i}, socket),
+    do: {:noreply, ask_kiro(socket, String.to_integer(i), @refine)}
+
+  # The planner looks at the code and the whole plan again; its reply shows in the chat.
+  def handle_event("plan_review", _, socket) do
+    run = socket.assigns.run && Runs.get_run(socket.assigns.run.id)
+    planner = socket.assigns.planner
+
+    if run && planner && run.status == "draft" do
+      Chat.handle(run, review_request(plan_tasks(socket)), [], to: planner)
+      {:noreply, socket}
+    else
+      {:noreply, put_flash(socket, :error, "This run has no planner to review its plan.")}
+    end
+  end
 
   def handle_event("plan_ask_open", %{"i" => ""}, socket),
     do: {:noreply, assign(socket, plan_asking: nil)}
@@ -499,6 +512,20 @@ defmodule FactoryWeb.ChatLive do
          {_, v} -> v
        end}
     end)
+  end
+
+  # What the planner is asked when the plan is reviewed, naming the thin tasks.
+  defp review_request(tasks) do
+    thin =
+      for {t, i} <- Enum.with_index(tasks, 1), Factory.Specs.TaskCheck.thin?(t) do
+        "#{i} (#{Enum.join(Factory.Specs.TaskCheck.issues(t), ", ")})"
+      end
+
+    "Look at the code again and improve this plan. Make every task concrete: the files " <>
+      "and functions it changes, the steps in order, and how to check it's done. Split " <>
+      "tasks that are too big, merge ones that are too small, add any missing tests, and " <>
+      "keep what I've edited." <>
+      if(thin == [], do: "", else: " These need more context: #{Enum.join(thin, "; ")}.")
   end
 
   # The run's spec, where its plan lives; followed while the chat is open, so Kiro's

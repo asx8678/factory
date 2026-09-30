@@ -6,10 +6,15 @@ defmodule FactoryWeb.PlanPanel do
   asked; Kiro's version is shown beside the task until it's used or discarded. The
   panel ends with the choice to implement the plan.
 
+  A task too thin to build without guessing (`Factory.Specs.TaskCheck`) is marked with
+  what it's missing and the way to refine it. Review plan has the planner look at the
+  code and the whole plan again, and improve it.
+
   Events (to the chat LiveView): `plan_edit`, `plan_edit_cancel`, `plan_save`,
-  `plan_remove`, `plan_deeper`, `plan_ask_open`, `plan_ask`, `plan_use`,
-  `plan_discard`; `action` with "start" to implement.
+  `plan_remove`, `plan_refine`, `plan_ask_open`, `plan_ask`, `plan_use`,
+  `plan_discard`, `plan_review`; `action` with "start" to implement.
   """
+  alias Factory.Specs.TaskCheck
   use FactoryWeb, :html
   alias FactoryWeb.TaskList
 
@@ -21,6 +26,9 @@ defmodule FactoryWeb.PlanPanel do
   attr :spec_hint, :boolean, default: false
 
   def panel(assigns) do
+    thin = for {t, i} <- Enum.with_index(assigns.tasks, 1), TaskCheck.thin?(t), do: i
+    assigns = assign(assigns, thin: thin)
+
     ~H"""
     <section
       id="chat-plan"
@@ -35,6 +43,23 @@ defmodule FactoryWeb.PlanPanel do
         <span class="shrink-0 text-xs tabular-nums text-base-content/50">
           {length(@tasks)} {if length(@tasks) == 1, do: "task", else: "tasks"}
         </span>
+        <span
+          :if={@thin != []}
+          id="chat-plan-thin"
+          class="flex shrink-0 items-center gap-1 text-xs text-warning"
+        >
+          <.icon name="hero-exclamation-triangle-micro" class="size-3.5" />
+          {length(@thin)} {if length(@thin) == 1, do: "needs", else: "need"} more context
+        </span>
+        <button
+          id="chat-plan-review"
+          type="button"
+          phx-click="plan_review"
+          title="Kiro looks at the code and the whole plan again, then improves it: concrete tasks, the right size, the tests it needs"
+          class="flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-xs font-medium text-primary hover:bg-primary/10"
+        >
+          <.icon name="hero-sparkles-micro" class="size-3.5" /> Review plan
+        </button>
         <button
           id="chat-plan-spec"
           type="button"
@@ -75,6 +100,15 @@ defmodule FactoryWeb.PlanPanel do
               </ul>
               <p :if={task.requirements != []} class="mt-1 text-xs text-base-content/45">
                 Requirements {Enum.join(task.requirements, ", ")}
+              </p>
+              <p
+                :if={(i + 1) in @thin and @improve[task.title] == nil}
+                id={"chat-plan-thin-#{i}"}
+                title="Refine with code, or edit it, so an agent can build it without guessing"
+                class="mt-1.5 flex items-center gap-1.5 text-xs text-warning"
+              >
+                <.icon name="hero-exclamation-triangle-micro" class="size-3.5" />
+                Needs more context: {Enum.join(TaskCheck.issues(task), ", ")}
               </p>
               <.ask_form :if={@asking == task.title} task={task} i={i} />
               <.kiro :if={@improve[task.title]} task={task} entry={@improve[task.title]} />
@@ -122,26 +156,26 @@ defmodule FactoryWeb.PlanPanel do
     ~H"""
     <div class="flex shrink-0 items-center gap-0.5 opacity-60 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
       <button
-        id={"chat-plan-deeper-#{@i}"}
+        id={"chat-plan-refine-#{@i}"}
         type="button"
-        phx-click="plan_deeper"
+        phx-click="plan_refine"
         phx-value-i={@i}
         disabled={@busy}
-        title="Kiro reads the code this task touches and makes it concrete: files, steps, how to check it"
+        title="Kiro reads the code this task touches and rewrites it: the exact files, the steps, how to check it"
         class="flex h-6 items-center gap-1 rounded-md px-1.5 text-xs text-primary hover:bg-primary/10 disabled:opacity-40"
       >
-        <.icon name="hero-sparkles-micro" class="size-3.5" /> Dig deeper
+        <.icon name="hero-code-bracket-micro" class="size-3.5" /> Refine with code
       </button>
       <button
+        id={"chat-plan-change-#{@i}"}
         type="button"
         phx-click="plan_ask_open"
         phx-value-i={@i}
         disabled={@busy}
-        title="Ask Kiro to change this task"
-        class="grid size-6 place-items-center rounded-md text-base-content/55 hover:bg-base-content/[0.06] hover:text-base-content disabled:opacity-40"
+        title="Tell Kiro how to change this task"
+        class="flex h-6 items-center gap-1 rounded-md px-1.5 text-xs text-base-content/60 hover:bg-base-content/[0.06] hover:text-base-content disabled:opacity-40"
       >
-        <.icon name="hero-chat-bubble-left-ellipsis-micro" class="size-3.5" />
-        <span class="sr-only">Ask Kiro</span>
+        <.icon name="hero-chat-bubble-left-ellipsis-micro" class="size-3.5" /> Change…
       </button>
       <button
         id={"chat-plan-edit-#{@i}"}
@@ -225,11 +259,11 @@ defmodule FactoryWeb.PlanPanel do
         name="instruction"
         required
         autofocus
-        placeholder="e.g. split out the migration, use Req, add a test for the empty case"
-        aria-label="What should Kiro change?"
+        placeholder="How should Kiro change it? e.g. use Req, add a test for the empty case"
+        aria-label="How should Kiro change this task?"
         class="h-7 min-w-0 flex-1 rounded-md border border-base-300 bg-base-100 px-2.5 text-[13px] outline-none focus:border-primary/50"
       />
-      <button class="btn btn-primary btn-xs">Ask Kiro</button>
+      <button class="btn btn-primary btn-xs">Change it</button>
       <button type="button" phx-click="plan_ask_open" phx-value-i="" class="btn btn-ghost btn-xs">
         Cancel
       </button>
