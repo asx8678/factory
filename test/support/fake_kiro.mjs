@@ -56,6 +56,13 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     // Hold a turn open while tests deliver timeout and late-response messages.
     if (text.endsWith("[test:wait]") || text.includes("[test:hold]"))
       return update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "waiting" } })
+    // Verifying a finished task: passes, unless the task says "[test:verify-fail]".
+    if (text.includes("<task-verification>")) {
+      const passed = !text.includes("[test:verify-fail]")
+      const reply = { passed, checks: [{ check: "It does what the task says", passed, evidence: "Read the code." }], fix: passed ? "" : "Make it do what the task says." }
+      update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: JSON.stringify(reply) } })
+      return out({ id: m.id, result: { stopReason: "end_turn" } })
+    }
     // Task planning: step 1 reads a file (asking permission, which Factory should allow for
     // reads) and asks questions; step 2 suggests tasks.
     if (text.includes('<task-planning step="questions">')) {

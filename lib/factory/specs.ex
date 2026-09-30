@@ -704,7 +704,9 @@ defmodule Factory.Specs do
   def task_list(%SpecDoc{} = spec) do
     {_, blocks} = Spec.blocks(spec.tasks)
     latest = List.first(spec.runs || [])
-    run_status = if latest, do: Map.new(latest.tasks, &{&1.title, &1.status}), else: %{}
+
+    run_status =
+      if latest, do: Map.new(latest.tasks, &{&1.title, run_status(latest, &1)}), else: %{}
 
     for block <- blocks do
       Map.merge(block, %{
@@ -712,6 +714,12 @@ defmodule Factory.Specs do
         run_status: run_status[block.title]
       })
     end
+  end
+
+  # A run task's status, "verified" once it's done and passed verification.
+  defp run_status(run, task) do
+    passed = get_in(run.progress || %{}, ["verification", "#{task.id}", "passed"])
+    if task.status == "done" and passed == true, do: "verified", else: task.status
   end
 
   @doc "Moves task `index` one place up (-1) or down (1)."

@@ -165,19 +165,20 @@ defmodule FactoryWeb.Layouts do
     "queued" => "Queued",
     "paused" => "Paused",
     "cancelled" => "Cancelled",
-    "pending" => "Pending"
+    "pending" => "Pending",
+    "verified" => "Verified"
   }
 
   def status_label(status), do: Map.get(@labels, status, "Idle")
 
   def status_text(s) when s in ["running", "queued"], do: "text-info"
-  def status_text("done"), do: "text-success"
+  def status_text(s) when s in ["done", "verified"], do: "text-success"
   def status_text(s) when s in ["waiting", "paused"], do: "text-warning"
   def status_text("error"), do: "text-error"
   def status_text(_), do: "text-base-content/50"
 
   def status_dot(s) when s in ["running", "queued"], do: "bg-info"
-  def status_dot("done"), do: "bg-success"
+  def status_dot(s) when s in ["done", "verified"], do: "bg-success"
   def status_dot(s) when s in ["waiting", "paused"], do: "bg-warning"
   def status_dot("error"), do: "bg-error"
   def status_dot(_), do: "bg-base-content/30"

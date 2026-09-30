@@ -140,6 +140,17 @@ defmodule Factory.Runs do
     Repo.preload(run, :tasks, force: true)
   end
 
+  @doc "Opens tasks again (by id), e.g. ones that failed verification."
+  def reopen_tasks(%Run{} = run, task_ids) do
+    now = DateTime.utc_now(:second)
+
+    Repo.update_all(from(t in Task, where: t.run_id == ^run.id and t.id in ^task_ids),
+      set: [status: "pending", updated_at: now]
+    )
+
+    Repo.preload(run, :tasks, force: true)
+  end
+
   @doc "Tells the run's pages its tasks changed (see `mark_tasks_done/2`)."
   def tasks_changed(%Run{} = run) do
     broadcast("run:#{run.id}", {:run_updated, run})

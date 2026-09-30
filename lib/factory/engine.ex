@@ -303,9 +303,17 @@ defmodule Factory.Engine do
 
           {:ok, run} = Runs.update_run(run, %{progress: progress})
 
-          case send_back(run, steps, step, output) do
-            {:again, run, again} -> walk(run, steps, again)
-            nil -> walk(run, steps, rest)
+          # The tasks it finished are checked on another model before the run goes on;
+          # ones that fail go back to this step.
+          case verify_tasks(run, step, output) do
+            {:again, run} ->
+              walk(run, steps, [step | rest])
+
+            {:ok, run} ->
+              case send_back(run, steps, step, output) do
+                {:again, run, again} -> walk(run, steps, again)
+                nil -> walk(run, steps, rest)
+              end
           end
 
         {:error, reason} ->
@@ -373,6 +381,162 @@ defmodule Factory.Engine do
   end
 
   defp send_back(_run, _steps, _step, _output), do: nil
+
+  # Verification: after a step that builds, each task it marked done is checked on a
+  # different model (`Factory.Verifier`), which reads the code and runs the task's
+  # checks. The results are kept in `progress["verification"]` by task id and told in
+  # the chat. Tasks that fail are opened again and the step goes again with what to
+  # fix, at most `max_rounds/0` times; after that they stay open and the run carries
+  # on. A task the verifier couldn't check (Kiro failed) stays done, and the chat says
+  # so. `config :factory, :verify_tasks, false` switches it off.
+
+  defp verify_tasks(run, step, output) do
+    results = run.progress["verification"] || %{}
+
+    todo =
+      if Application.get_env(:factory, :verify_tasks, true) and marks_tasks?(run, step),
+        do:
+          Enum.filter(
+            run.tasks,
+            &(&1.status == "done" and get_in(results, ["#{&1.id}", "passed"]) != true)
+          ),
+        else: []
+
+    if todo == [], do: {:ok, run}, else: verify_each(run, step, output, todo)
+  end
+
+  defp verify_each(run, step, output, todo) do
+    model = Kiro.verify_model()
+    dir = run.settings["project_dir"] || Kiro.config(:workspace)
+    name = Kiro.model_name(model)
+    count = if length(todo) == 1, do: "the task", else: "#{length(todo)} tasks"
+
+    set_activity(step.agent, "running", "Verifying “#{run.title}”")
+
+    Runs.post(run, "factory", "Verifying #{count} #{step.name} finished, with #{name}.",
+      meta: meta(step)
+    )
+
+    checked =
+      for task <- todo do
+        block = Factory.Verifier.spec_task(run, task)
+
+        result =
+          Factory.Verifier.verify(block, output, dir,
+            model: model,
+            usage: %{source: "verify_task", run_id: run.id, agent_id: step.agent && step.agent.id}
+          )
+
+        {task, result}
+      end
+
+    set_activity(step.agent, "done", nil)
+
+    record =
+      Map.new(checked, fn {task, result} -> {"#{task.id}", verification(result, model)} end)
+
+    run = Runs.get_run(run.id)
+    progress = Map.update(run.progress, "verification", record, &Map.merge(&1, record))
+    {:ok, run} = Runs.update_run(run, %{progress: progress})
+
+    for {task, result} <- checked, do: say_verified(run, step, task, result, name)
+
+    case for({task, {:ok, %{passed: false} = r}} <- checked, do: {task, r}) do
+      [] -> {:ok, run}
+      failed -> verify_failed(run, step, failed)
+    end
+  end
+
+  defp verification({:ok, r}, model),
+    do: %{"passed" => r.passed, "checks" => r.checks, "fix" => r.fix, "model" => model}
+
+  defp verification({:error, reason}, model),
+    do: %{"passed" => nil, "error" => reason, "model" => model}
+
+  defp say_verified(run, step, task, {:ok, r}, name) do
+    passed = Enum.count(r.checks, & &1["passed"])
+
+    head =
+      if r.passed,
+        do:
+          "Task #{number(task)} verified by #{name}: #{passed} of #{length(r.checks)} checks passed.",
+        else: "Task #{number(task)} failed verification by #{name}: #{r.fix}"
+
+    lines =
+      for c <- r.checks do
+        "- #{if c["passed"], do: "✓", else: "✗"} #{c["check"]}" <>
+          if(c["evidence"] != "", do: " — #{c["evidence"]}", else: "")
+      end
+
+    Runs.post(run, "factory", Enum.join([head | lines], "\n"), meta: meta(step))
+  end
+
+  defp say_verified(run, step, task, {:error, reason}, name) do
+    Runs.post(
+      run,
+      "factory",
+      "#{name} couldn't verify task #{number(task)}, so it stays done unchecked: #{reason}",
+      meta: meta(step)
+    )
+  end
+
+  defp verify_failed(run, step, failed) do
+    rounds = get_in(run.progress, ["verify_rounds", step.id]) || 0
+    max_rounds = max_rounds()
+    run = Runs.reopen_tasks(run, Enum.map(failed, fn {task, _} -> task.id end))
+    Runs.tasks_changed(run)
+    which = Enum.map_join(failed, ", ", fn {task, _} -> number(task) end)
+
+    if rounds < max_rounds do
+      fix =
+        Enum.map_join(failed, "\n\n", fn {task, r} ->
+          misses =
+            for c <- r.checks, !c["passed"] do
+              "- #{c["check"]}" <> if(c["evidence"] != "", do: ": #{c["evidence"]}", else: "")
+            end
+
+          Enum.join(
+            ["Task #{number(task)}, #{task.title}: #{r.fix}" | misses],
+            "\n"
+          )
+        end)
+
+      progress =
+        run.progress
+        |> Map.update!("done", &(&1 -- [step.id]))
+        |> put_in([Access.key("verify_rounds", %{}), step.id], rounds + 1)
+        |> put_in([Access.key("feedback", %{}), step.id], %{
+          "from" => "Verification",
+          "text" =>
+            fix <>
+              "\n\nFix these, check them yourself, and mark the tasks done again with complete_tasks."
+        })
+
+      {:ok, run} = Runs.update_run(run, %{progress: progress})
+
+      Runs.post(
+        run,
+        "factory",
+        "Task #{which} went back to #{step.name} to fix (pass #{rounds + 1} of #{max_rounds}).",
+        meta: meta(step)
+      )
+
+      {:again, run}
+    else
+      Runs.post(
+        run,
+        "factory",
+        "Task #{which} still fails its checks after #{max_rounds} more passes, so it's left open. Carrying on.",
+        meta: meta(step)
+      )
+
+      {:ok, run}
+    end
+  end
+
+  # A task's number as the spec gives it, else its place in the list.
+  defp number(%{ref: ref}) when is_binary(ref), do: ref
+  defp number(task), do: "#{task.position}"
 
   @doc ~s{"what to fix" when a reply's last line is "Send back: what to fix", else nil.}
   def verdict(output) do
@@ -669,7 +833,7 @@ defmodule Factory.Engine do
           run,
           "factory",
           "Done: all #{length(steps)} #{if length(steps) == 1, do: "step", else: "steps"} of the workflow ran." <>
-            tasks_note(run.tasks)
+            tasks_note(run.tasks) <> verified_note(run)
         )
 
         {:ok, run}
@@ -707,6 +871,19 @@ defmodule Factory.Engine do
 
       {done, all} ->
         " #{done} of #{all} tasks were marked done; check the others before you rely on them."
+    end
+  end
+
+  # How many of the done tasks passed verification (Factory.Verifier).
+  defp verified_note(run) do
+    results = run.progress["verification"] || %{}
+    done = Enum.filter(run.tasks, &(&1.status == "done"))
+    passed = Enum.count(done, &(get_in(results, ["#{&1.id}", "passed"]) == true))
+
+    cond do
+      done == [] or results == %{} -> ""
+      passed == length(done) -> " Every one passed verification."
+      true -> " #{passed} of #{length(done)} passed verification."
     end
   end
 
