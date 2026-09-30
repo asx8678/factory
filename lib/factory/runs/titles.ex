@@ -56,7 +56,10 @@ defmodule Factory.Runs.Titles do
   defp about(%Run{kind: nil} = run) do
     run.id
     |> Runs.list_messages()
-    |> Enum.filter(&(&1.role == "user" and not String.starts_with?(&1.body, "/")))
+    # What the person wrote: not commands, nor requests made with a button (a review).
+    |> Enum.filter(
+      &(&1.role == "user" and not String.starts_with?(&1.body, "/") and &1.meta["kind"] == nil)
+    )
     |> Enum.take(@chat_messages)
     |> Enum.map_join("\n\n", & &1.body)
     |> String.slice(0, 3000)

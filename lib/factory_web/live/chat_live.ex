@@ -33,7 +33,8 @@ defmodule FactoryWeb.ChatLive do
        plan_sub: nil,
        plan_editing: nil,
        plan_asking: nil,
-       plan_improve: %{}
+       plan_improve: %{},
+       plan_inline: nil
      )
      |> set_dir("")
      |> load_agents()
@@ -391,6 +392,37 @@ defmodule FactoryWeb.ChatLive do
   def handle_event("plan_edit_cancel", _, socket),
     do: {:noreply, assign(socket, plan_editing: nil)}
 
+  # Editing in place (double-click): a task's title, one of its steps, or a new step.
+  def handle_event("plan_inline", %{"i" => i, "part" => part}, socket)
+      when part == "title" or part == "new" or binary_part(part, 0, 5) == "step-" do
+    {:noreply,
+     assign(socket,
+       plan_inline: {String.to_integer("#{i}"), part},
+       plan_editing: nil,
+       plan_asking: nil
+     )}
+  end
+
+  def handle_event("plan_inline_cancel", _, socket),
+    do: {:noreply, assign(socket, plan_inline: nil)}
+
+  # Saved by Enter or by leaving the field; only the field that's open counts, so the
+  # blur after an Enter doesn't save twice.
+  def handle_event("plan_inline_save", %{"i" => i, "part" => part} = params, socket) do
+    i = String.to_integer("#{i}")
+    value = String.trim(params["value"] || "")
+
+    with {^i, ^part} <- socket.assigns.plan_inline,
+         %{} = task <- Enum.at(plan_tasks(socket), i),
+         {:ok, changed} <- inline_change(task, part, value) do
+      socket
+      |> assign(plan_inline: nil)
+      |> plan_changed(Specs.edit_plan_task(plan_spec(socket), i, changed))
+    else
+      _ -> {:noreply, assign(socket, plan_inline: nil)}
+    end
+  end
+
   def handle_event("plan_save", %{"i" => i, "task" => params}, socket) do
     socket
     |> assign(plan_editing: nil)
@@ -412,7 +444,11 @@ defmodule FactoryWeb.ChatLive do
     planner = socket.assigns.planner
 
     if run && planner && run.status == "draft" do
-      Chat.handle(run, review_request(plan_tasks(socket)), [], to: planner)
+      Chat.handle(run, review_request(plan_tasks(socket)), [],
+        to: planner,
+        meta: %{"kind" => "review"}
+      )
+
       {:noreply, socket}
     else
       {:noreply, put_flash(socket, :error, "This run has no planner to review its plan.")}
@@ -514,6 +550,42 @@ defmodule FactoryWeb.ChatLive do
     end)
   end
 
+  # A task with one line changed in place, as edit_plan_task/3 takes it; :same when
+  # nothing changed. An emptied step goes; an empty title or new step changes nothing.
+  defp inline_change(task, part, value) do
+    fields = fn title, details ->
+      {:ok,
+       %{
+         "title" => title,
+         "details" => Enum.join(details, "\n"),
+         "requirements" => Enum.join(task.requirements, ", ")
+       }}
+    end
+
+    case part do
+      "title" when value in ["", task.title] ->
+        :same
+
+      "title" ->
+        fields.(value, task.details)
+
+      "new" when value == "" ->
+        :same
+
+      "new" ->
+        fields.(task.title, task.details ++ [value])
+
+      "step-" <> j ->
+        j = String.to_integer(j)
+
+        cond do
+          Enum.at(task.details, j) == value -> :same
+          value == "" -> fields.(task.title, List.delete_at(task.details, j))
+          true -> fields.(task.title, List.replace_at(task.details, j, value))
+        end
+    end
+  end
+
   # What the planner is asked when the plan is reviewed, naming the thin tasks.
   defp review_request(tasks) do
     thin =
@@ -545,7 +617,8 @@ defmodule FactoryWeb.ChatLive do
       plan_sub: spec && spec.id,
       plan_editing: nil,
       plan_asking: nil,
-      plan_improve: %{}
+      plan_improve: %{},
+      plan_inline: nil
     )
   end
 
@@ -585,13 +658,22 @@ defmodule FactoryWeb.ChatLive do
   end
 
   # The plan panel shows while the run is being planned, in the All view, once there are
-  # tasks, and not while the planner is rewriting them.
+  # tasks. It stays while the planner reworks them, showing what it's doing.
   defp show_plan?(assigns) do
     run = assigns.run
 
     run != nil and run.status == "draft" and assigns.focus == nil and
-      assigns.plan_spec != nil and run.tasks != [] and
-      not (assigns.planner != nil and Map.has_key?(assigns.streaming, assigns.planner.id))
+      assigns.plan_spec != nil and run.tasks != []
+  end
+
+  # What the planner is doing right now, for the panel's header; nil when it's idle.
+  defp planner_activity(assigns) do
+    with %{id: id} <- assigns.planner,
+         %{} = chunk <- assigns.streaming[id] do
+      chunk[:activity] || "Working on the plan…"
+    else
+      _ -> nil
+    end
   end
 
   # No base specs and no requirements of its own: offer to add some.
@@ -802,10 +884,12 @@ defmodule FactoryWeb.ChatLive do
     assigns =
       assign(assigns,
         empty: assigns.count == 0 and assigns.streaming == %{},
+        # The planner's live bubble gives way to the plan panel, which shows its work.
         live:
           for(
             {id, s} <- assigns.streaming,
             assigns.focus == nil or assigns.focus.id == id,
+            not (show_plan?(assigns) and assigns.planner != nil and assigns.planner.id == id),
             do: s
           )
       )
@@ -896,6 +980,8 @@ defmodule FactoryWeb.ChatLive do
                 editing={@plan_editing}
                 asking={@plan_asking}
                 improve={@plan_improve}
+                inline={@plan_inline}
+                working={planner_activity(assigns)}
                 spec_hint={plan_spec_hint?(assigns)}
               />
             </div>

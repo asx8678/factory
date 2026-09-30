@@ -281,7 +281,7 @@ defmodule Factory.ChatPlanner do
     Phoenix.PubSub.broadcast(
       Factory.PubSub,
       "run:#{run_id}",
-      {:agent_stream, %{agent_id: planner.id, name: planner.name, text: text}}
+      {:agent_stream, %{agent_id: planner.id, name: planner.name, text: text, activity: activity}}
     )
   end
 

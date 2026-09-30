@@ -23,6 +23,12 @@ defmodule FactoryWeb.PlanPanel do
   attr :editing, :any, default: nil, doc: "index of the task being edited"
   attr :asking, :any, default: nil, doc: "title of the task Kiro is being asked about"
   attr :improve, :map, default: %{}, doc: "Kiro's work on tasks, by title"
+  attr :inline, :any, default: nil, doc: "{task index, part} being edited in place"
+
+  attr :working, :string,
+    default: nil,
+    doc: "what the planner is doing, while it reworks the plan"
+
   attr :spec_hint, :boolean, default: false
 
   def panel(assigns) do
@@ -32,7 +38,9 @@ defmodule FactoryWeb.PlanPanel do
     ~H"""
     <section
       id="chat-plan"
+      phx-hook=".PlanEdit"
       aria-labelledby="chat-plan-title"
+      aria-busy={to_string(@working != nil)}
       class="task-card-active rounded-xl border"
     >
       <header class="flex items-center gap-2 border-b border-base-content/10 px-3.5 py-2.5">
@@ -55,8 +63,9 @@ defmodule FactoryWeb.PlanPanel do
           id="chat-plan-review"
           type="button"
           phx-click="plan_review"
+          disabled={@working != nil}
           title="Kiro looks at the code and the whole plan again, then improves it: concrete tasks, the right size, the tests it needs"
-          class="flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-xs font-medium text-primary hover:bg-primary/10"
+          class="flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-xs font-medium text-primary hover:bg-primary/10 disabled:opacity-40"
         >
           <.icon name="hero-sparkles-micro" class="size-3.5" /> Review plan
         </button>
@@ -71,7 +80,20 @@ defmodule FactoryWeb.PlanPanel do
         </button>
       </header>
 
-      <ol class="divide-y divide-base-content/[0.07]">
+      <p
+        :if={@working}
+        id="chat-plan-working"
+        class="flex items-center gap-2 border-b border-base-content/10 bg-primary/[0.04] px-3.5 py-1.5 text-xs text-base-content/65"
+      >
+        <span class="loading loading-spinner loading-xs text-primary"></span>
+        <span class="shrink-0 font-medium text-base-content/80">Reworking the plan</span>
+        <span class="min-w-0 truncate">{@working}</span>
+      </p>
+
+      <ol class={[
+        "divide-y divide-base-content/[0.07] transition-opacity",
+        @working && "pointer-events-none opacity-70"
+      ]}>
         <li
           :for={{task, i} <- Enum.with_index(@tasks)}
           id={"chat-plan-task-#{i}"}
@@ -84,18 +106,65 @@ defmodule FactoryWeb.PlanPanel do
             </span>
             <div class="min-w-0 flex-1">
               <div class="flex items-start gap-2">
-                <p class="min-w-0 flex-1 text-sm font-medium leading-snug">
+                <.inline_field
+                  :if={@inline == {i, "title"}}
+                  i={i}
+                  part="title"
+                  value={task.title}
+                  class="flex-1 text-sm font-medium leading-snug"
+                />
+                <p
+                  :if={@inline != {i, "title"}}
+                  data-edit="title"
+                  data-i={i}
+                  title="Double-click to edit"
+                  class="min-w-0 flex-1 cursor-text text-sm font-medium leading-snug"
+                >
                   <TaskList.inline text={task.title} />
                 </p>
                 <.actions i={i} busy={@improve[task.title][:status] == :thinking} />
               </div>
-              <ul
-                :if={task.details != []}
-                class="mt-1 space-y-0.5 text-[13px] leading-snug text-base-content/65"
-              >
-                <li :for={d <- task.details} class="flex gap-1.5">
+              <ul class="mt-1 space-y-0.5 text-[13px] leading-snug text-base-content/65">
+                <li :for={{d, j} <- Enum.with_index(task.details)} class="flex gap-1.5">
                   <span class="text-base-content/30">–</span>
-                  <span class="min-w-0"><TaskList.inline text={d} /></span>
+                  <.inline_field
+                    :if={@inline == {i, "step-#{j}"}}
+                    i={i}
+                    part={"step-#{j}"}
+                    value={d}
+                    class="flex-1 text-[13px] leading-snug"
+                  />
+                  <span
+                    :if={@inline != {i, "step-#{j}"}}
+                    data-edit={"step-#{j}"}
+                    data-i={i}
+                    title="Double-click to edit; clear it to remove the step"
+                    class="min-w-0 cursor-text"
+                  >
+                    <TaskList.inline text={d} />
+                  </span>
+                </li>
+                <li :if={@inline == {i, "new"}} class="flex gap-1.5">
+                  <span class="text-base-content/30">–</span>
+                  <.inline_field
+                    i={i}
+                    part="new"
+                    value=""
+                    placeholder="A step or note: what to change, where, how to check it"
+                    class="flex-1 text-[13px] leading-snug"
+                  />
+                </li>
+                <li :if={@inline != {i, "new"}}>
+                  <button
+                    id={"chat-plan-add-step-#{i}"}
+                    type="button"
+                    phx-click="plan_inline"
+                    phx-value-i={i}
+                    phx-value-part="new"
+                    class="flex items-center gap-1 text-xs text-base-content/40 opacity-0 transition-opacity hover:text-base-content group-hover:opacity-100 focus:opacity-100"
+                  >
+                    <.icon name="hero-plus-micro" class="size-3" /> Add a step
+                  </button>
                 </li>
               </ul>
               <p :if={task.requirements != []} class="mt-1 text-xs text-base-content/45">
@@ -145,6 +214,67 @@ defmodule FactoryWeb.PlanPanel do
         </button>
       </footer>
     </section>
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".PlanEdit">
+      // Double-click a task's title or a step to edit it in place; the field it opens
+      // gets the focus, and Esc leaves it unchanged.
+      export default {
+        mounted() {
+          this.el.addEventListener("dblclick", (e) => {
+            const target = e.target.closest("[data-edit]")
+            if (!target || this.el.getAttribute("aria-busy") === "true") return
+            window.getSelection()?.removeAllRanges()
+            this.pushEvent("plan_inline", { i: target.dataset.i, part: target.dataset.edit })
+          })
+          this.el.addEventListener("keydown", (e) => {
+            if (e.key === "Escape" && e.target.matches("[data-inline]")) {
+              e.preventDefault()
+              this.pushEvent("plan_inline_cancel", {})
+            }
+          })
+          this.focus()
+        },
+        updated() { this.focus() },
+        focus() {
+          const input = this.el.querySelector("[data-inline]")
+          if (input && document.activeElement !== input) {
+            input.focus()
+            input.setSelectionRange(input.value.length, input.value.length)
+          }
+        },
+      }
+    </script>
+    """
+  end
+
+  attr :i, :integer, required: true
+  attr :part, :string, required: true
+  attr :value, :string, required: true
+  attr :placeholder, :string, default: nil
+  attr :class, :string, default: nil
+
+  # A line edited where it is, looking as it did: Enter or leaving it saves, Esc cancels.
+  defp inline_field(assigns) do
+    ~H"""
+    <form
+      id={"chat-plan-inline-#{@i}-#{@part}"}
+      phx-submit="plan_inline_save"
+      class={["min-w-0", @class]}
+    >
+      <input type="hidden" name="i" value={@i} />
+      <input type="hidden" name="part" value={@part} />
+      <input
+        type="text"
+        name="value"
+        value={@value}
+        placeholder={@placeholder}
+        data-inline
+        phx-blur="plan_inline_save"
+        phx-value-i={@i}
+        phx-value-part={@part}
+        aria-label={if @part == "title", do: "Task title", else: "Step"}
+        class="-mx-1 w-full rounded bg-base-100/60 px-1 outline-none ring-1 ring-primary/40 placeholder:text-base-content/35 focus:ring-primary/70"
+      />
+    </form>
     """
   end
 
