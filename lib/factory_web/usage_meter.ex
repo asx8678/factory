@@ -44,16 +44,6 @@ defmodule FactoryWeb.UsageMeter do
     assign(socket, :usage_meter, Map.put(Usage.totals(scope), :scope, scope))
   end
 
-  @doc "Credits for people: 0.08, 1.24, 12.4."
-  def credits(n) when n >= 10, do: :erlang.float_to_binary(n / 1, decimals: 1)
-  def credits(n), do: :erlang.float_to_binary(n / 1, decimals: 2)
-
-  @doc "Tokens for people: 840, 12.4k, 310k, 1.2M."
-  def tokens(n) when n >= 1_000_000, do: "#{Float.round(n / 1_000_000, 1)}M"
-  def tokens(n) when n >= 100_000, do: "#{round(n / 1000)}k"
-  def tokens(n) when n >= 1000, do: "#{Float.round(n / 1000, 1)}k"
-  def tokens(n), do: to_string(n)
-
   @doc "What the header figure covers."
   def label({:run, _}), do: "This run"
   def label({:spec, _}), do: "This spec"

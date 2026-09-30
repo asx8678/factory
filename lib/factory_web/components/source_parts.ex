@@ -476,8 +476,9 @@ defmodule FactoryWeb.SourceParts do
 
   @doc """
   Picking a folder or file on this machine: `browser` is `%{mode:, hidden:, listing:, error:}`
-  with `listing` from `Factory.FileBrowser.list/2`. The page handles `browse_go`
-  (`path`), `browse_hidden`, `browse_cancel` and `browse_pick` (`path`).
+  with `listing` from `Factory.FileBrowser.list/2`, kept by `FactoryWeb.FolderBrowser`,
+  which takes `browse_go` (`path`), `browse_hidden` and `browse_cancel`. The page
+  takes `browse_pick` (`path`).
   """
   def browser(assigns) do
     ~H"""

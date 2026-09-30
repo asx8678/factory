@@ -6,7 +6,7 @@ defmodule FactoryWeb.UsageLive do
   """
   use FactoryWeb, :live_view
   alias Factory.Usage
-  alias FactoryWeb.UsageMeter, as: Fmt
+  alias FactoryWeb.Usage, as: Fmt
 
   def mount(_params, _session, socket) do
     {:ok, assign(socket, page_title: "Usage")}

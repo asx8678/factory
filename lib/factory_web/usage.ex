@@ -1,13 +1,16 @@
 defmodule FactoryWeb.Usage do
-  @moduledoc "Formats Kiro usage numbers (credits, tokens, context) for display."
+  @moduledoc "Formats Kiro usage numbers (credits, tokens, context) for display, everywhere they show."
 
+  @doc "Credits for people: 0.08, 1.24, 12.4."
   def credits(nil), do: "0"
   def credits(n) when n >= 10, do: :erlang.float_to_binary(n / 1, decimals: 1)
   def credits(n), do: :erlang.float_to_binary(n / 1, decimals: 2)
 
+  @doc "Tokens for people: 840, 12.4k, 19k, 310k, 1.2M; \"?\" when unknown."
   def tokens(nil), do: "?"
   def tokens(n) when n >= 999_500, do: "#{trim(n / 1_000_000)}M"
-  def tokens(n) when n >= 1000, do: "#{round(n / 1000)}k"
+  def tokens(n) when n >= 100_000, do: "#{round(n / 1000)}k"
+  def tokens(n) when n >= 1000, do: "#{trim(n / 1000)}k"
   def tokens(n), do: "#{n}"
 
   def pct(nil), do: "0%"

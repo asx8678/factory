@@ -18,9 +18,6 @@ defmodule Factory.Workflows do
 
   @standard ~w(feature bug review)
 
-  @doc "The run types that have a standard workflow."
-  def standard_keys, do: @standard
-
   @doc "Every workflow: the standard ones in start-screen order, then custom ones by name."
   def list do
     ensure_standard()
@@ -113,9 +110,13 @@ defmodule Factory.Workflows do
   def rename(%Workflow{} = w, name),
     do: w |> Workflow.changeset(%{name: name}) |> Repo.update() |> changed()
 
-  @doc "Deletes a custom workflow and its agents. Standard ones can only be restored."
+  @doc """
+  Deletes a custom workflow and its agents. Standard ones can only be restored. What
+  Factory made for its sources (clones, section files) goes once the deletion commits.
+  """
   def delete(%Workflow{key: key} = w) when key not in @standard do
     agents = Agents.list_agents(w.id)
+    sources = Sources.list(w.id)
 
     result =
       Repo.transact(fn ->
@@ -135,6 +136,7 @@ defmodule Factory.Workflows do
     case result do
       {:ok, _} ->
         for agent <- agents, do: Kiro.stop(agent.id)
+        for source <- sources, do: Sources.remove_files(source)
         changed(result)
 
       error ->
@@ -217,14 +219,19 @@ defmodule Factory.Workflows do
     end
   end
 
+  # "Name (copy)", then "Name (copy) 2"…, the name cut so each fits a workflow's 60
+  # characters with its suffix.
   defp copy_name(name) do
-    base = "#{String.slice(name, 0, 53)} (copy)"
     taken = Repo.all(from w in Workflow, select: w.name)
 
     Stream.iterate(1, &(&1 + 1))
-    |> Enum.find_value(fn
-      1 -> if base not in taken, do: base
-      n -> if "#{base} #{n}" not in taken, do: "#{base} #{n}"
+    |> Enum.find_value(fn n ->
+      suffix = if n == 1, do: " (copy)", else: " (copy) #{n}"
+
+      candidate =
+        String.trim_trailing(String.slice(name, 0, 60 - String.length(suffix))) <> suffix
+
+      if candidate not in taken, do: candidate
     end)
   end
 

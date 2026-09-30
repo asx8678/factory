@@ -10,6 +10,8 @@ defmodule Factory.Specs.Planner do
   The first turn's summary of the project is passed to the second, so Kiro doesn't
   start from nothing. Replies are JSON; the parsers keep only what they understand.
   """
+  import Factory.PromptText, only: [text: 1]
+  alias Factory.PromptText
 
   # The one shape a task has wherever Kiro writes one: suggestions, a run's plan, a chat
   # plan without tools, an improved or drafted task, and `Factory.PlanTools.add_tasks`.
@@ -741,12 +743,6 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
     end
   end
 
-  defp spec_text(files) do
-    Enum.map_join(files, "\n\n", fn {name, text} ->
-      ~s(<file name="#{name}">\n#{text}\n</file>)
-    end)
-  end
-
   @doc "Reads turn 1's reply: `{:ok, %{\"project\" => …, \"questions\" => […]}}`."
   def parse_questions(reply) do
     with {:ok, data} <- decode(reply) do
@@ -864,14 +860,11 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
   end
 
   defp decode(reply) do
-    with [json] <- Regex.run(~r/\{.*\}/s, reply),
-         {:ok, data} when is_map(data) <- JSON.decode(json) do
-      {:ok, data}
-    else
-      _ -> {:error, "Kiro's reply wasn't something Factory could read."}
+    case PromptText.json_object(reply) do
+      {:ok, data} -> {:ok, data}
+      :error -> {:error, "Kiro's reply wasn't something Factory could read."}
     end
   end
 
-  defp text(s) when is_binary(s), do: String.trim(s)
-  defp text(_), do: ""
+  defp spec_text(files), do: PromptText.files(files)
 end

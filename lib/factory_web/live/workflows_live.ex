@@ -9,6 +9,7 @@ defmodule FactoryWeb.WorkflowsLive do
   import FactoryWeb.WorkflowParts
   alias Factory.{Actions, Agents, FileBrowser, Kiro, Sources, Workflows}
   alias Factory.Agents.Agent
+  alias FactoryWeb.FolderBrowser
 
   # Model and mode are switched per message, and prompt edits are re-sent, so only these
   # need a fresh session: its folder, or which session the agent talks in.
@@ -144,17 +145,24 @@ defmodule FactoryWeb.WorkflowsLive do
 
   defp open_sources(socket, _params), do: socket
 
-  # A different workflow gets a fresh canvas (its element id changes with it).
+  # A different workflow gets a fresh canvas (its element id changes with it), and
+  # none of the last one's windows.
   defp open_workflow(socket, workflow) do
     if socket.assigns.workflow && socket.assigns.workflow.id == workflow.id do
       assign(socket, workflow: workflow)
     else
+      sources = Sources.list(workflow.id)
+
       assign(socket,
         workflow: workflow,
         workflows: Workflows.list(),
-        sources: Sources.list(workflow.id),
+        sources: sources,
         sources_view: nil,
-        graph: canvas_graph(workflow.id, nil, Sources.list(workflow.id)),
+        editing_source: nil,
+        browser: nil,
+        link_prompt: nil,
+        base_window: false,
+        graph: canvas_graph(workflow.id, nil, sources),
         page_title: workflow.name,
         selected: nil,
         naming: nil
@@ -231,6 +239,19 @@ defmodule FactoryWeb.WorkflowsLive do
         {:noreply, put_flash(socket, :error, "Couldn't add the action. Try again.")}
     end
   end
+
+  # The side panel's events with no card open (closed, or deleted in another tab
+  # meanwhile) change nothing.
+  def handle_event(event, _, %{assigns: %{selected: nil}} = socket)
+      when event in [
+             "save",
+             "save_context",
+             "stop_kiro",
+             "delete_agent",
+             "action_change",
+             "action_save"
+           ],
+      do: {:noreply, socket}
 
   def handle_event("action_change", %{"action" => params}, socket),
     do: {:noreply, assign(socket, action_draft: draft(socket.assigns.selected, params))}
@@ -480,19 +501,23 @@ defmodule FactoryWeb.WorkflowsLive do
   end
 
   def handle_event("source_edit", %{"id" => id}, socket) do
-    source = Sources.get(id)
-    form = source |> Sources.change() |> to_form(as: :source)
+    # Deleted meanwhile (in another tab): there's nothing to edit.
+    case Sources.get(id) do
+      nil ->
+        {:noreply, socket}
 
-    {:noreply,
-     assign(socket,
-       sources_view: :form,
-       source_return: if(socket.assigns.sources_view == :list, do: :list),
-       source_kind: source.kind,
-       source_form: form,
-       editing_source: source,
-       source_agents: Agents.list_agents(socket.assigns.workflow.id),
-       attached: MapSet.new(Sources.agent_ids(source))
-     )}
+      source ->
+        {:noreply,
+         assign(socket,
+           sources_view: :form,
+           source_return: if(socket.assigns.sources_view == :list, do: :list),
+           source_kind: source.kind,
+           source_form: source |> Sources.change() |> to_form(as: :source),
+           editing_source: source,
+           source_agents: Agents.list_agents(socket.assigns.workflow.id),
+           attached: MapSet.new(Sources.agent_ids(source))
+         )}
+    end
   end
 
   def handle_event("source_validate", %{"source" => params}, socket) do
@@ -583,19 +608,17 @@ defmodule FactoryWeb.WorkflowsLive do
   def handle_event("browse_open", %{"field" => field, "mode" => mode}, socket)
       when mode in ["dir", "file", "json", "any"] do
     current = form_params(socket.assigns.source_form)["config"][field]
-    browser = %{field: field, mode: mode, hidden: false, listing: nil, error: nil}
-    {:noreply, assign(socket, browser: browse(browser, FileBrowser.start_dir(current)))}
+    browser = FolderBrowser.open(FileBrowser.start_dir(current), %{field: field, mode: mode})
+    {:noreply, assign(socket, browser: browser)}
   end
 
-  def handle_event("browse_go", %{"path" => path}, socket),
-    do: {:noreply, update(socket, :browser, &browse(&1, path))}
+  def handle_event(event, params, socket)
+      when event in ["browse_go", "browse_hidden", "browse_cancel"],
+      do: FolderBrowser.handle_event(event, params, socket)
 
-  def handle_event("browse_hidden", _, socket) do
-    browser = %{socket.assigns.browser | hidden: !socket.assigns.browser.hidden}
-    {:noreply, assign(socket, browser: browse(browser, browser.listing && browser.listing.dir))}
-  end
-
-  def handle_event("browse_cancel", _, socket), do: {:noreply, assign(socket, browser: nil)}
+  # A pick after the browser closed (a late or double click) changes nothing.
+  def handle_event("browse_pick", _, %{assigns: %{browser: nil}} = socket),
+    do: {:noreply, socket}
 
   # The chosen path fills the field; a source without a name is named after it.
   def handle_event("browse_pick", %{"path" => path}, socket) do
@@ -727,22 +750,6 @@ defmodule FactoryWeb.WorkflowsLive do
 
   def handle_event("close", _, socket),
     do: {:noreply, push_patch(socket, to: ~p"/workflows/#{socket.assigns.workflow.id}")}
-
-  defp browse(browser, dir) do
-    case FileBrowser.list(dir || System.user_home!(),
-           files: browser.mode != "dir",
-           ext:
-             case browser.mode do
-               "json" -> [".json"]
-               "any" -> :any
-               _ -> nil
-             end,
-           hidden: browser.hidden
-         ) do
-      {:ok, listing} -> %{browser | listing: listing, error: nil}
-      {:error, reason} -> %{browser | error: reason}
-    end
-  end
 
   # What the source form holds now, typed or not.
   defp form_params(form) do

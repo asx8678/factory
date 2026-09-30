@@ -11,6 +11,8 @@ defmodule Factory.Scout do
 
   @branches 10
   @gh_timeout 6_000
+  # git only reads here, so it's quick; one that hangs (a lock, a huge repository) is stopped.
+  @git_timeout 20_000
 
   @doc """
   The folder's review candidates:
@@ -40,8 +42,9 @@ defmodule Factory.Scout do
           Map.merge(b, %{current: b.name == current, ahead: ahead, behind: behind, base: against})
         end
 
+      # gh itself is stopped at its deadline (`prs/1`); this only waits a little longer.
       {prs, note} =
-        case Task.yield(prs, @gh_timeout) || Task.shutdown(prs) do
+        case Task.yield(prs, @gh_timeout + 1_000) || Task.shutdown(prs) do
           {:ok, result} -> result
           nil -> {nil, "GitHub didn't answer in time."}
         end
@@ -64,7 +67,7 @@ defmodule Factory.Scout do
   defp repo(dir) do
     case git(dir, ~w(rev-parse --is-inside-work-tree)) do
       {:ok, _} = ok -> ok
-      {:error, "git isn't installed."} = error -> error
+      {:error, why} = error when why in ["git isn't installed.", "git took too long."] -> error
       {:error, _} -> {:error, "This folder isn't a git repository."}
     end
   end
@@ -306,8 +309,8 @@ defmodule Factory.Scout do
       gh ->
         args = ~w(pr list --state open --limit 8 --json number,title,headRefName,url,updatedAt)
 
-        case System.cmd(gh, args, cd: dir, stderr_to_stdout: true) do
-          {out, 0} ->
+        case Factory.OsProcess.run(gh, args, cd: dir, timeout: @gh_timeout) do
+          {:ok, out, 0} ->
             case JSON.decode(out) do
               {:ok, list} when is_list(list) ->
                 {for p <- list do
@@ -324,7 +327,13 @@ defmodule Factory.Scout do
                 {nil, "gh's answer wasn't readable."}
             end
 
-          {out, _} ->
+          {:error, :timeout} ->
+            {nil, "GitHub didn't answer in time."}
+
+          {:error, _} ->
+            {nil, "gh couldn't list pull requests."}
+
+          {:ok, out, _} ->
             cond do
               out =~ ~r/auth login|not logged/i ->
                 {nil, "Sign gh in (gh auth login) to list pull requests here."}
@@ -340,12 +349,12 @@ defmodule Factory.Scout do
   end
 
   defp git(dir, args) do
-    case System.cmd("git", ["-C", dir | args], stderr_to_stdout: true) do
-      {out, 0} -> {:ok, String.trim(out)}
-      {out, _} -> {:error, String.trim(out)}
+    case Factory.OsProcess.run("git", ["-C", dir | args], timeout: @git_timeout) do
+      {:ok, out, 0} -> {:ok, String.trim(out)}
+      {:ok, out, _} -> {:error, String.trim(out)}
+      {:error, :timeout} -> {:error, "git took too long."}
+      {:error, _} -> {:error, "git isn't installed."}
     end
-  rescue
-    _ -> {:error, "git isn't installed."}
   end
 
   defp time(nil), do: nil

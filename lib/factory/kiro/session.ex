@@ -13,11 +13,12 @@ defmodule Factory.Kiro.Session do
 
   Run steps come here too (`Factory.Kiro.run_step/4`): a job can name who waits for
   its reply and the run step it's for. Every session gets Factory's MCP server with a
-  token for the session, so the agent can use the run tools (`Factory.RunTools`)
-  while it answers a run step; MCP permission requests are allowed by server name.
+  token for the session (and its current kiro-cli), so the agent can use the run tools
+  (`Factory.RunTools`) while it answers a run step; MCP permission requests are allowed
+  by server name.
 
-  Text streams to the run's chat as it arrives; a turn ends when Kiro answers the
-  prompt request with a `stopReason`. Other RPCs have a 30-second deadline, configurable
+  Text streams to the run's chat as it arrives, at most every 100 ms; a turn ends when
+  Kiro answers the prompt request with a `stopReason`. Other RPCs have a 30-second deadline, configurable
   as `:rpc_timeout` in the `:kiro` settings; a timeout fails all waiting jobs.
 
   Permissions: when Kiro asks to use a tool, the answering agent's kind decides
@@ -36,6 +37,7 @@ defmodule Factory.Kiro.Session do
   require Logger
   alias Factory.{Agents, Kiro, Runs}
   alias Factory.Agents.Agent
+  alias Factory.Kiro.Wire
 
   @doc "`key` is `:shared` or an agent id; `workdir` is the folder Kiro works in."
   def start_link({key, workdir}),
@@ -44,15 +46,23 @@ defmodule Factory.Kiro.Session do
   # Registered with the folder it works in, so `Factory.Kiro` can tell which one.
   defp via(key, workdir), do: {:via, Registry, {Factory.Kiro.Registry, key, workdir}}
 
-  @doc "Whether the session is ready with nothing to answer."
-  def idle?(pid), do: GenServer.call(pid, :idle?)
+  # Calls to a session that has stopped (or doesn't answer in time) give an error, not
+  # an exit, so a page or a run asking at that moment carries on.
+
+  @doc "Whether the session is ready with nothing to answer. False once it has stopped."
+  def idle?(pid) do
+    GenServer.call(pid, :idle?)
+  catch
+    :exit, _ -> false
+  end
 
   @doc """
   Queues a message from `agent`; the reply is posted to the run. Options, for a run
   step (`Factory.Kiro.run_step/4`):
 
     * `:reply_to` - `{pid, ref}` that gets `{ref, {:ok, reply} | {:error, reason}}` when
-      the job ends, however it ends
+      the job ends, however it ends. If `pid` ends first, the job is dropped, or
+      cancelled in Kiro if it's being answered (as by `withdraw/2`)
     * `:source` - what the call is recorded as in `Factory.Usage` (default "agent_turn")
     * `:model` - the model for this job instead of the agent's
     * `:context` - false when the text already carries the agent's sources and prompt
@@ -72,32 +82,62 @@ defmodule Factory.Kiro.Session do
     * `:planning` - `%{generation:, notify:}` for a planner's draft turn: Factory's plan
       tools check the generation and tell `notify` what they did (`Factory.PlanTools`)
   """
-  def prompt(pid, agent, run_id, text, opts \\ []),
-    do: GenServer.call(pid, {:prompt, agent, run_id, text, opts})
+  def prompt(pid, agent, run_id, text, opts \\ []) do
+    GenServer.call(pid, {:prompt, agent, run_id, text, opts})
+  catch
+    :exit, _ -> {:error, "#{agent.name}'s Kiro session didn't take the message."}
+  end
+
+  @doc """
+  Withdraws the job whose `:reply_to` ref is `ref`, when its caller stops waiting for
+  it: dropped while it waits, cancelled in Kiro while it's being answered (the reply so
+  far still goes to the chat).
+  """
+  def withdraw(pid, ref), do: GenServer.cast(pid, {:withdraw, ref})
 
   @doc """
   The person's answer to a tool's question (MCP elicitation): `action` is "accept" (with
   `content`, the form's values), "decline" or "cancel". `{:error, :gone}` when the
   question is no longer open.
   """
-  def answer_elicitation(pid, key, action, content \\ %{}),
-    do: GenServer.call(pid, {:elicitation, key, action, content})
+  def answer_elicitation(pid, key, action, content \\ %{}) do
+    GenServer.call(pid, {:elicitation, key, action, content})
+  catch
+    :exit, _ -> {:error, :gone}
+  end
 
-  @doc "The run step the session is answering, for `Factory.RunTools`: `%{run_id:, step:}` or nil."
-  def current_step(pid), do: GenServer.call(pid, :current_step)
+  @doc """
+  The run step the session is answering, for `Factory.RunTools`: `%{run_id:, step:}` or
+  nil. `nonce` is the one in the session's token (`Factory.RunTools.grant_session/2`):
+  one given to an earlier kiro-cli, before a restart, gets nil. `:any` skips the check.
+  """
+  def current_step(pid, nonce \\ :any) do
+    GenServer.call(pid, {:current_step, nonce})
+  catch
+    :exit, _ -> nil
+  end
 
   @doc """
   What the session is answering, for Factory's tools: `%{run_id:, agent:, step:}` (step
-  nil for a chat message), or nil between turns.
+  nil for a chat message), or nil between turns. `nonce` as for `current_step/2`.
   """
-  def current_turn(pid), do: GenServer.call(pid, :current_turn)
+  def current_turn(pid, nonce \\ :any) do
+    GenServer.call(pid, {:current_turn, nonce})
+  catch
+    :exit, _ -> nil
+  end
 
   @doc """
   Compacts this session's conversation now (see the moduledoc). Not while it is
-  answering. `{:error, :no_gain}` when the result wouldn't be smaller. The note goes to
-  the chat `run_id`, else to the chat of the last turn.
+  answering. `{:error, :no_gain}` when the result wouldn't be smaller, `{:error, :gone}`
+  when the session has stopped. The note goes to the chat `run_id`, else to the chat of
+  the last turn.
   """
-  def compact(pid, run_id \\ nil), do: GenServer.call(pid, {:compact, run_id})
+  def compact(pid, run_id \\ nil) do
+    GenServer.call(pid, {:compact, run_id})
+  catch
+    :exit, _ -> {:error, :gone}
+  end
 
   @doc "Sends the agent's prompt again before its next message (after it was edited)."
   def forget(pid, agent_id), do: GenServer.cast(pid, {:forget, agent_id})
@@ -112,6 +152,8 @@ defmodule Factory.Kiro.Session do
     :turn,
     # a job whose model/mode is being switched before its prompt is sent
     :switching,
+    # new with each kiro-cli, in the token its MCP server gets (`mcp_servers/1`)
+    :nonce,
     buffer: "",
     next_id: 1,
     pending: %{},
@@ -155,11 +197,15 @@ defmodule Factory.Kiro.Session do
       :brief,
       :on_tool,
       :planning,
+      # the monitor on whoever waits for the reply (`:reply_to`)
+      :monitor,
       source: "agent_turn",
       context: true,
       reply: :all,
       post: true,
-      stream: true
+      stream: true,
+      # its caller stopped waiting while its model/mode was being switched
+      gone: false
     ]
   end
 
@@ -175,6 +221,11 @@ defmodule Factory.Kiro.Session do
       :step,
       :on_tool,
       :planning,
+      :monitor,
+      # the timer that streams the text so far to the chat, while one is due
+      :flush,
+      # why the turn was cancelled in Kiro (nobody waits for it any more)
+      :cancelled,
       source: "agent_turn",
       reply: :all,
       post: true,
@@ -193,34 +244,37 @@ defmodule Factory.Kiro.Session do
   @impl true
   def init({key, workdir}) do
     Process.flag(:trap_exit, true)
-    {:ok, %__MODULE__{key: key, workdir: workdir}, {:continue, :spawn}}
+    File.mkdir_p!(Kiro.config(:log_dir))
+    if workdir == Kiro.config(:workspace), do: File.mkdir_p!(workdir)
+
+    # Checked before the session exists, so whoever starts it hears why it can't
+    # (`{:error, reason}` from the supervisor) instead of losing its call.
+    cond do
+      not File.dir?(workdir) ->
+        {:stop, "The workspace folder #{workdir} doesn't exist."}
+
+      not File.exists?(Kiro.config(:cli)) ->
+        {:stop, "kiro-cli wasn't found at #{Kiro.config(:cli)}."}
+
+      true ->
+        {:ok, %__MODULE__{key: key, workdir: workdir}, {:continue, :spawn}}
+    end
   end
 
   @impl true
   def handle_continue(:spawn, state) do
-    File.mkdir_p!(Kiro.config(:log_dir))
-    if state.workdir == Kiro.config(:workspace), do: File.mkdir_p!(state.workdir)
-
-    cond do
-      not File.dir?(state.workdir) ->
-        fail(state, "The workspace folder #{state.workdir} doesn't exist.")
-
-      not File.exists?(Kiro.config(:cli)) ->
-        fail(state, "kiro-cli wasn't found at #{Kiro.config(:cli)}.")
-
-      true ->
-        # Cards show whether a session is running.
-        Agents.notify_changed()
-        {:noreply, open(state)}
-    end
+    # Cards show whether a session is running.
+    Agents.notify_changed()
+    {:noreply, open(state)}
   end
 
   # Starts kiro-cli and opens a Kiro session in it (answered in handle_message/2).
   defp open(state) do
     log_name = if state.key == :shared, do: "shared.log", else: "agent-#{state.key}.log"
     port = Kiro.open_port(state.workdir, log_name)
+    nonce = Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
     params = %{protocolVersion: 1, clientCapabilities: %{}}
-    request(%{state | port: port}, "initialize", params, :initialize)
+    request(%{state | port: port, nonce: nonce}, "initialize", params, :initialize)
   end
 
   @impl true
@@ -234,11 +288,19 @@ defmodule Factory.Kiro.Session do
         Agents.set_activity(agent.id, "waiting", "Waiting for its turn")
       end
 
+      # Whoever waits for the reply may give up or end first (see `give_up/2`).
+      monitor =
+        case opts[:reply_to] do
+          {pid, _ref} -> Process.monitor(pid)
+          nil -> nil
+        end
+
       job = %Job{
         agent: agent,
         run_id: run_id,
         text: text,
         reply_to: opts[:reply_to],
+        monitor: monitor,
         model: opts[:model],
         activity: opts[:activity],
         step: opts[:step],
@@ -256,17 +318,22 @@ defmodule Factory.Kiro.Session do
     end
   end
 
-  def handle_call(:current_step, _from, %{turn: %Turn{step: %{} = step} = turn} = state),
-    do: {:reply, %{run_id: turn.run_id, step: step}, state}
+  # A tool call from an earlier kiro-cli (its token has another nonce) gets nil: one it
+  # still had in flight when the session restarted can't act on the turn after.
+  def handle_call({:current_step, nonce}, _from, %{turn: %Turn{step: %{} = step} = turn} = state)
+      when nonce in [:any, state.nonce],
+      do: {:reply, %{run_id: turn.run_id, step: step}, state}
 
-  def handle_call(:current_step, _from, state), do: {:reply, nil, state}
+  def handle_call({:current_step, _nonce}, _from, state), do: {:reply, nil, state}
 
-  def handle_call(:current_turn, _from, %{turn: %Turn{} = turn} = state),
-    do:
-      {:reply,
-       %{run_id: turn.run_id, agent: turn.agent, step: turn.step, planning: turn.planning}, state}
+  def handle_call({:current_turn, nonce}, _from, %{turn: %Turn{} = turn} = state)
+      when nonce in [:any, state.nonce],
+      do:
+        {:reply,
+         %{run_id: turn.run_id, agent: turn.agent, step: turn.step, planning: turn.planning},
+         state}
 
-  def handle_call(:current_turn, _from, state), do: {:reply, nil, state}
+  def handle_call({:current_turn, _nonce}, _from, state), do: {:reply, nil, state}
 
   def handle_call({:elicitation, key, action, content}, _from, state) do
     case Map.pop(state.elicitations, key) do
@@ -320,21 +387,23 @@ defmodule Factory.Kiro.Session do
     {:noreply, %{state | primed: MapSet.delete(state.primed, agent_id), briefed: briefed}}
   end
 
+  def handle_cast({:withdraw, ref}, state),
+    do: {:noreply, give_up(state, &match?({_pid, ^ref}, &1.reply_to))}
+
   @impl true
-  def handle_info({port, {:data, {:noeol, part}}}, %{port: port} = state) do
-    {:noreply, %{state | buffer: state.buffer <> part}}
-  end
+  def handle_info({port, {:data, data}}, %{port: port} = state) do
+    case Wire.read(state.buffer, data) do
+      {:partial, buffer} ->
+        {:noreply, %{state | buffer: buffer}}
 
-  def handle_info({port, {:data, {:eol, part}}}, %{port: port} = state) do
-    line = state.buffer <> part
-    state = %{state | buffer: ""}
+      {:message, msg} ->
+        case handle_message(msg, %{state | buffer: ""}) do
+          {:fail, reason, state} -> fail(state, reason)
+          state -> {:noreply, state}
+        end
 
-    with {:ok, msg} <- JSON.decode(line),
-         {:fail, reason, state} <- handle_message(msg, state) do
-      fail(state, reason)
-    else
-      {:error, _not_json} -> {:noreply, state}
-      %__MODULE__{} = state -> {:noreply, state}
+      :invalid ->
+        {:noreply, %{state | buffer: ""}}
     end
   end
 
@@ -372,19 +441,36 @@ defmodule Factory.Kiro.Session do
     end
   end
 
+  # Whoever waited for a job's reply has ended.
+  def handle_info({:DOWN, monitor, :process, _pid, _reason}, state),
+    do: {:noreply, give_up(state, &(&1.monitor == monitor))}
+
+  # The turn's text so far goes to the chat; a timer left from an earlier turn does nothing.
+  def handle_info({:flush_stream, id}, %{turn: %Turn{request_id: id}} = state),
+    do: {:noreply, flush_stream(state)}
+
   def handle_info(_msg, state), do: {:noreply, state}
 
   @impl true
   def terminate(reason, state) do
-    close_elicitations(state)
-    cancel_requests(state)
+    # kiro-cli and all it started go first, whatever fails after (the database may be
+    # gone by now, e.g. in tests).
     close_port(state.port)
+    state = %{state | port: nil}
+    cancel_requests(state)
     Agents.notify_changed()
 
-    # Stopped on purpose (settings changed, Stop Kiro): agents go back to idle and lose
-    # the session's context; turns and credits stay. After a failure, keep "error".
+    # Stopped (Stop Kiro, settings changed) or crashed mid-turn: the turn ends with what
+    # it has and messages still waiting are answered, each noted in its chat. After
+    # fail/2 there's nothing left to answer.
+    waiting = for %Job{agent: agent} <- [state.switching | state.queue], do: agent.id
+    state = abandon(state, &"#{&1.name}'s Kiro session stopped before it answered.")
+    close_elicitations(state)
+
+    # Stopped on purpose: agents go back to idle and lose the session's context; turns
+    # and credits stay. After a failure, keep "error".
     if reason in [:shutdown] or match?({:shutdown, _}, reason) do
-      for id <- state.members, agent = Agents.get_agent(id) do
+      for id <- MapSet.union(state.members, MapSet.new(waiting)), agent = Agents.get_agent(id) do
         Agents.set_activity(id, "idle", nil)
         Agents.record_usage(id, Map.drop(agent.usage, ["context_pct", "context_tokens"]))
       end
@@ -437,7 +523,7 @@ defmodule Factory.Kiro.Session do
 
       {{:prompt, ^id}, %{"result" => result}}
       when state.turn != nil and state.turn.request_id == id ->
-        state |> finish_turn(nil, result["stopReason"]) |> next()
+        state |> finish_turn(state.turn.cancelled, result["stopReason"]) |> next()
 
       {nil, _} ->
         state
@@ -572,8 +658,7 @@ defmodule Factory.Kiro.Session do
             }
           end)
 
-        if state.turn && state.turn.stream, do: stream(state)
-        state
+        schedule_stream(state)
 
       %{"sessionUpdate" => "tool_call", "title" => title} ->
         if state.turn, do: Agents.set_activity(state.turn.agent.id, "running", "Using #{title}")
@@ -586,7 +671,8 @@ defmodule Factory.Kiro.Session do
       %{"sessionUpdate" => "tool_call_update"} ->
         track_tool(state, update)
 
-      %{"_meta" => %{"kiro" => %{"contextUsage" => %{"usagePercentage" => pct}} = kiro}} ->
+      %{"_meta" => %{"kiro" => %{"contextUsage" => %{"usagePercentage" => pct}} = kiro}}
+      when is_number(pct) ->
         %{state | context: read_context(state.context, pct, kiro["breakdown"])}
 
       %{"_meta" => %{"kiro" => %{"promptTurnSummaries" => summaries}}} ->
@@ -802,13 +888,8 @@ defmodule Factory.Kiro.Session do
   defp approx(n) when n >= 1000, do: "#{round(n / 1000)}k"
   defp approx(n), do: "#{n}"
 
-  defp close_port(nil), do: :ok
-
-  defp close_port(port) do
-    Port.close(port)
-  rescue
-    ArgumentError -> :ok
-  end
+  # kiro-cli, its MCP servers and any command it runs, so none outlives the session.
+  defp close_port(port), do: Wire.close(port)
 
   # Kiro only reports the smaller context with the next turn. Until then each agent shows
   # "Context compacted" and remembers the size it had, so the next reply can show both.
@@ -860,6 +941,14 @@ defmodule Factory.Kiro.Session do
     switch(%{state | queue: rest, switching: job}, wanted)
   end
 
+  # Nobody waits for this job any more (`give_up/2`): the model and mode are set, but the
+  # prompt isn't sent.
+  defp switch(%{switching: %Job{gone: true} = job} = state, []) do
+    state = %{state | switching: nil}
+    settle(state, job.agent.id)
+    next(state)
+  end
+
   defp switch(state, []) do
     job = state.switching
     send_prompt(%{state | switching: nil}, job)
@@ -873,7 +962,7 @@ defmodule Factory.Kiro.Session do
   # Kiro refused the model or mode for this job: tell its chat, drop the job, carry on.
   defp reject_switch(%{switching: %Job{} = job} = state, reason) do
     Agents.set_activity(job.agent.id, "error", reason)
-    answer(job.reply_to, {:error, reason})
+    answer(job, {:error, reason})
 
     if run = Runs.get_run(job.run_id) do
       Runs.post(run, "factory", "#{job.agent.name} couldn't start: #{reason}",
@@ -906,6 +995,7 @@ defmodule Factory.Kiro.Session do
       agent: agent,
       run_id: job.run_id,
       reply_to: job.reply_to,
+      monitor: job.monitor,
       step: job.step,
       on_tool: job.on_tool,
       planning: job.planning,
@@ -987,7 +1077,8 @@ defmodule Factory.Kiro.Session do
   defp finish_turn(%{turn: nil} = state, _error, _stop_reason), do: state
 
   defp finish_turn(%{turn: turn} = state, error, stop_reason) do
-    state = close_elicitations(state)
+    # The last text streamed before the reply is posted, so none is lost in between.
+    state = state |> flush_stream() |> close_elicitations()
     {request, pending} = Map.pop(state.pending, turn.request_id)
     if request, do: Process.cancel_timer(request.timer)
     state = %{state | pending: pending}
@@ -1040,7 +1131,7 @@ defmodule Factory.Kiro.Session do
     end
 
     answer(
-      turn.reply_to,
+      turn,
       cond do
         error -> {:error, error}
         # A turn that ends on a tool call has nothing after it; the caller decides.
@@ -1078,7 +1169,7 @@ defmodule Factory.Kiro.Session do
     round(Float.round(n / magnitude) * magnitude)
   end
 
-  defp context_fields(%{pct: pct} = context) do
+  defp context_fields(%{pct: pct} = context) when is_number(pct) do
     tokens = if context[:window], do: round(context.window * pct / 100)
 
     %{
@@ -1107,33 +1198,108 @@ defmodule Factory.Kiro.Session do
   defp update_turn(%{turn: nil} = state, _fun), do: state
   defp update_turn(state, fun), do: %{state | turn: fun.(state.turn)}
 
-  defp stream(%{turn: turn}) do
+  # Text streams to the chat at most every @stream_every ms: a chunk only makes a send
+  # due, so a long reply isn't sent (and drawn again) whole for each of its chunks. The
+  # timer names the turn, so one left over does nothing to the next.
+  @stream_every 100
+
+  defp schedule_stream(%{turn: %Turn{stream: true, flush: nil} = turn} = state) do
+    timer = Process.send_after(self(), {:flush_stream, turn.request_id}, @stream_every)
+    %{state | turn: %{turn | flush: timer}}
+  end
+
+  defp schedule_stream(state), do: state
+
+  # Sends the text so far if a send is due.
+  defp flush_stream(%{turn: %Turn{flush: nil}} = state), do: state
+
+  defp flush_stream(%{turn: %Turn{} = turn} = state) do
+    Process.cancel_timer(turn.flush)
+
     Phoenix.PubSub.broadcast(
       Factory.PubSub,
       "run:#{turn.run_id}",
       {:agent_stream, %{agent_id: turn.agent.id, name: turn.agent.name, text: turn.text}}
     )
+
+    %{state | turn: %{turn | flush: nil}}
   end
+
+  defp flush_stream(state), do: state
 
   # The Kiro process is gone or unusable: answer every waiting message and stop.
   defp fail(state, reason) do
     Logger.warning("Kiro session #{inspect(state.key)} failed: #{reason}")
-    state = finish_turn(state, reason)
+    {:stop, :normal, abandon(state, reason)}
+  end
 
+  # Ends the turn in progress with `reason` (or `reason.(agent)`), and answers every
+  # message still waiting: each is noted in its chat, and its agent shows the error.
+  defp abandon(state, reason) do
+    why = fn agent -> if is_function(reason, 1), do: reason.(agent), else: reason end
+    state = if state.turn, do: finish_turn(state, why.(state.turn.agent)), else: state
     waiting = if state.switching, do: [state.switching | state.queue], else: state.queue
 
-    for %Job{agent: agent, run_id: run_id} = job <- waiting do
-      Agents.set_activity(agent.id, "error", reason)
-      answer(job.reply_to, {:error, reason})
+    for %Job{agent: agent, run_id: run_id, gone: false} = job <- waiting do
+      Agents.set_activity(agent.id, "error", why.(agent))
+      answer(job, {:error, why.(agent)})
 
       if run = Runs.get_run(run_id) do
-        Runs.post(run, "factory", "#{agent.name} couldn't start: #{reason}",
+        Runs.post(run, "factory", "#{agent.name} couldn't start: #{why.(agent)}",
           meta: %{"agent_id" => agent.id}
         )
       end
     end
 
-    {:stop, :normal, %{state | queue: [], switching: nil}}
+    %{state | queue: [], switching: nil}
+  end
+
+  # Nobody waits for a job any more (`mine?` picks it): its caller gave up on it
+  # (`withdraw/2`) or ended. A job still queued is dropped. The turn in progress is
+  # cancelled in Kiro, which then ends it (its reply so far still goes to the chat);
+  # if it doesn't, the prompt deadline does.
+  defp give_up(state, mine?) do
+    cond do
+      state.turn && mine?.(state.turn) ->
+        notify(state, "session/cancel", %{sessionId: state.session_id})
+        Agents.set_activity(state.turn.agent.id, "running", "Stopping")
+
+        update_turn(state, fn turn ->
+          %{
+            forget_waiter(turn)
+            | cancelled: "Stopped: nothing was waiting for the reply any more."
+          }
+        end)
+
+      state.switching && mine?.(state.switching) ->
+        %{state | switching: %{forget_waiter(state.switching) | gone: true}}
+
+      true ->
+        {gone, queue} = Enum.split_with(state.queue, mine?)
+        state = %{state | queue: queue}
+
+        for job <- gone do
+          forget_waiter(job)
+          settle(state, job.agent.id)
+        end
+
+        state
+    end
+  end
+
+  defp forget_waiter(%{monitor: monitor} = waiter) do
+    if monitor, do: Process.demonitor(monitor, [:flush])
+    %{waiter | reply_to: nil, monitor: nil}
+  end
+
+  # An agent whose message was dropped goes back to idle, unless another is on its way.
+  defp settle(state, agent_id) do
+    busy? =
+      Enum.any?(state.queue, &(&1.agent.id == agent_id)) or
+        (state.turn != nil and state.turn.agent.id == agent_id) or
+        (state.switching != nil and state.switching.agent.id == agent_id)
+
+    unless busy?, do: Agents.set_activity(agent_id, "idle", nil)
   end
 
   # A job's tool callback (a planner's progress bubble) can't take the session down.
@@ -1160,13 +1326,18 @@ defmodule Factory.Kiro.Session do
     %{state | elicitations: %{}}
   end
 
-  # Whoever waits for a job (a run step) hears how it ended.
-  defp answer(nil, _result), do: :ok
-  defp answer({pid, ref}, result), do: send(pid, {ref, result})
+  # Whoever waits for a job or turn (a run step) hears how it ended.
+  defp answer(%{reply_to: nil}, _result), do: :ok
 
-  # Factory's run tools, with a token for this session (see `Factory.RunTools`).
+  defp answer(%{reply_to: {pid, ref}} = waiter, result) do
+    forget_waiter(waiter)
+    send(pid, {ref, result})
+  end
+
+  # Factory's run tools, with a token for this session and this kiro-cli (see
+  # `Factory.RunTools`).
   defp mcp_servers(state),
-    do: [Factory.RunTools.mcp_server(Factory.RunTools.grant_session(state.key))]
+    do: [Factory.RunTools.mcp_server(Factory.RunTools.grant_session(state.key, state.nonce))]
 
   # JSON-RPC out
 
@@ -1196,5 +1367,5 @@ defmodule Factory.Kiro.Session do
     do: send_json(state, %{jsonrpc: "2.0", id: id, error: %{code: code, message: message}})
 
   defp send_json(%{port: nil}, _msg), do: :ok
-  defp send_json(%{port: port}, msg), do: Port.command(port, [JSON.encode!(msg), "\n"])
+  defp send_json(%{port: port}, msg), do: Wire.send_json(port, msg)
 end

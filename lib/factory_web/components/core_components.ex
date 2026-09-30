@@ -504,4 +504,16 @@ defmodule FactoryWeb.CoreComponents do
   def translate_errors(errors, field) when is_list(errors) do
     for {^field, {msg, opts}} <- errors, do: translate_error({msg, opts})
   end
+
+  @doc """
+  Why a spec file (.md or .txt) wasn't taken, told from its upload's own limits
+  (`@uploads.name`): "larger than 2 MB", "up to 5 files at a time".
+  """
+  def upload_error(:too_large, upload),
+    do: "larger than #{div(upload.max_file_size, 1_000_000)} MB"
+
+  def upload_error(:not_accepted, _upload), do: "only .md and .txt files"
+  def upload_error(:too_many_files, %{max_entries: 1}), do: "one file at a time"
+  def upload_error(:too_many_files, upload), do: "up to #{upload.max_entries} files at a time"
+  def upload_error(err, _upload), do: to_string(err)
 end

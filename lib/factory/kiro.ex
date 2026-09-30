@@ -102,7 +102,9 @@ defmodule Factory.Kiro do
   `text` only when the session hasn't had it.
 
   The wait ends when the session answers, when it stops, or after the prompt timeout
-  twice over plus a minute (it may first finish another message).
+  twice over plus a minute (it may first finish another message). A step given up on
+  is withdrawn from the session (`Session.withdraw/2`), so Kiro doesn't go on with it;
+  the same happens if the calling process ends.
   """
   def run_step(agent, run_id, text, opts \\ []) do
     dir = workdir(Factory.Runs.get_run(run_id))
@@ -139,6 +141,7 @@ defmodule Factory.Kiro do
         after
           wait ->
             Process.demonitor(monitor, [:flush])
+            Session.withdraw(pid, ref)
             {:error, "#{agent.name} didn't answer within #{div(wait, 60_000)} minutes."}
         end
 
@@ -151,20 +154,18 @@ defmodule Factory.Kiro do
            "Try again when it's idle."}
 
       {:error, reason} ->
-        {:error, "Couldn't start Kiro for #{agent.name}: #{inspect(reason)}"}
+        {:error, "Couldn't start Kiro for #{agent.name}: #{reason_text(reason)}"}
     end
   end
 
-  @doc """
-  The agent's session, working in `dir`, started if needed. A session working in another
-  folder (a chat on another project) starts again in `dir` once it's idle; until then
-  `{:error, :busy}`.
-  """
-  def ensure_started(agent, dir) do
-    key = session_key(agent)
-    locked(key, fn -> ensure_session(key, dir) end)
-  end
+  # A session says why it couldn't start in words (`Factory.Kiro.Session`); anything else
+  # is shown as it is.
+  defp reason_text(reason) when is_binary(reason), do: reason
+  defp reason_text(reason), do: inspect(reason)
 
+  # The session for `key`, working in `dir`, started if needed. A session working in
+  # another folder (a chat on another project) starts again in `dir` once it's idle (or
+  # has stopped meanwhile); until then `{:error, :busy}`.
   defp ensure_session(key, dir) do
     case Registry.lookup(Factory.Kiro.Registry, key) do
       [] ->
@@ -174,7 +175,7 @@ defmodule Factory.Kiro do
         {:ok, pid}
 
       [{pid, _elsewhere}] ->
-        if Session.idle?(pid) do
+        if Session.idle?(pid) or not Process.alive?(pid) do
           stop_session(key)
           start(key, dir)
         else

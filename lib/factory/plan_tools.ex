@@ -13,8 +13,10 @@ defmodule Factory.PlanTools do
   The waiting process gets `{:plan_tools, generation, event}` for each call that worked:
   `:changed` after a write, `{:questions, [question]}` from `ask_user`.
   """
+  import Factory.PromptText, only: [text: 1]
   alias Factory.{Runs, Spec, Specs}
   alias Factory.Specs.Planner
+  alias Factory.Specs.Spec, as: SpecDoc
 
   @server "factory"
   @salt "factory plan tools"
@@ -235,6 +237,7 @@ defmodule Factory.PlanTools do
   end
 
   @reading_tools ~w(get_plan ask_user)
+  @writing_tools ~w(create_plan add_tasks update_task remove_tasks)
 
   # What a button's turn may not do: a scope check changes nothing, and Refine keeps the
   # plan it reworks, with the person's edits. nil when the call may go ahead.
@@ -534,10 +537,34 @@ defmodule Factory.PlanTools do
     {:ok, {:read, describe(Specs.for_run(run))}}
   end
 
-  defp apply_tool("create_plan", args, run) do
+  # While the run is planned, tasks approved on the Spec page are closed to the planner
+  # as they are to the chat's own edits (`Factory.Specs.edit_plan_task/4`). Once the run
+  # has started, its plan grows as before (`call_in_turn/5`).
+  defp apply_tool(name, args, run) when name in @writing_tools do
+    spec = Specs.for_run(run)
+
+    if run.status == "draft" and SpecDoc.approved?(spec, "tasks"),
+      do:
+        {:error,
+         "The tasks were approved on the Spec page, so the plan can't change until they're " <>
+           "reopened there. Say what you'd change in your reply and end your turn."},
+      else: write_tool(name, args, spec)
+  end
+
+  defp apply_tool("ask_user", args, _run) do
+    questions = questions(args)
+
+    if questions == [],
+      do: {:error, "Ask at least one question."},
+      else:
+        {:ok,
+         {{:questions, Enum.take(questions, 5)},
+          "They'll be shown when your turn ends. End it now with a short message."}}
+  end
+
+  defp write_tool("create_plan", args, spec) do
     summary = text(args["summary"])
     approach = text(args["approach"])
-    spec = Specs.for_run(run)
 
     if summary == "" do
       {:error, "Give the plan a summary."}
@@ -553,8 +580,7 @@ defmodule Factory.PlanTools do
     end
   end
 
-  defp apply_tool("add_tasks", args, run) do
-    spec = Specs.for_run(run)
+  defp write_tool("add_tasks", args, spec) do
     {preamble, blocks} = checklist(spec.tasks)
 
     new = for t <- Planner.tasks(args["tasks"]), do: task_block(t)
@@ -576,8 +602,7 @@ defmodule Factory.PlanTools do
     end
   end
 
-  defp apply_tool("update_task", args, run) do
-    spec = Specs.for_run(run)
+  defp write_tool("update_task", args, spec) do
     {preamble, blocks} = checklist(spec.tasks)
     number = args["number"]
 
@@ -597,17 +622,19 @@ defmodule Factory.PlanTools do
           }
           |> Map.reject(fn {_, v} -> v == false end)
 
-        block = Spec.edit_block(block, changes)
-        blocks = List.replace_at(blocks, number - 1, block)
-        write(spec, %{tasks: Spec.render_blocks(preamble, blocks)}, "Changed task #{number}.")
+        edited = Spec.edit_block(block, changes)
+        blocks = List.replace_at(blocks, number - 1, edited)
+
+        write(spec, %{tasks: Spec.render_blocks(preamble, blocks)}, "Changed task #{number}.", %{
+          block.title => edited.title
+        })
 
       _ ->
         {:error, "There's no task #{inspect(number)}. #{describe(spec)}"}
     end
   end
 
-  defp apply_tool("remove_tasks", args, run) do
-    spec = Specs.for_run(run)
+  defp write_tool("remove_tasks", args, spec) do
     {preamble, blocks} = checklist(spec.tasks)
     numbers = for n <- List.wrap(args["numbers"]), is_integer(n), do: n
 
@@ -621,17 +648,6 @@ defmodule Factory.PlanTools do
     end
   end
 
-  defp apply_tool("ask_user", args, _run) do
-    questions = questions(args)
-
-    if questions == [],
-      do: {:error, "Ask at least one question."},
-      else:
-        {:ok,
-         {{:questions, Enum.take(questions, 5)},
-          "They'll be shown when your turn ends. End it now with a short message."}}
-  end
-
   defp questions(args) do
     for q <- List.wrap(args["questions"]),
         is_map(q),
@@ -642,9 +658,13 @@ defmodule Factory.PlanTools do
     |> Enum.take(5)
   end
 
-  defp write(spec, attrs, done) do
-    case Specs.update_spec(spec, attrs) do
-      {:ok, spec} -> {:ok, {:changed, done <> " " <> describe(spec)}}
+  # The queue follows the tasks: a renamed one (`renames`, old title => new) keeps its
+  # place, and removed ones leave it (`Factory.Specs.follow_tasks/2`).
+  defp write(spec, attrs, done, renames \\ %{}) do
+    with {:ok, spec} <- Specs.update_spec(spec, attrs),
+         {:ok, spec} <- Specs.follow_tasks(spec, renames) do
+      {:ok, {:changed, done <> " " <> describe(spec)}}
+    else
       {:error, _} -> {:error, "Factory couldn't save that change."}
     end
   end
@@ -675,7 +695,8 @@ defmodule Factory.PlanTools do
   end
 
   # The tasks as checklist blocks. A plain numbered list (from an attached tasks.md) is
-  # turned into a checklist first, so tasks added to it are read back as tasks.
+  # turned into a checklist first, so tasks added to it are read back as tasks; every
+  # part of each task goes with it.
   defp checklist(markdown) do
     {preamble, blocks} = Spec.blocks(markdown || "")
 
@@ -687,7 +708,11 @@ defmodule Factory.PlanTools do
          task_block(
            Planner.task(%{
              "title" => b.title,
+             "objective" => b.objective,
              "details" => b.details,
+             "verify" => b.verify,
+             "agent" => b.agent,
+             "model" => b.model,
              "requirements" => b.requirements
            })
          )
@@ -717,9 +742,6 @@ defmodule Factory.PlanTools do
 
   # A model the planner gave a task: one Factory may pick, else auto (never Sonnet).
   defp task_model(model), do: if(model in Factory.Kiro.task_models(), do: model, else: "auto")
-
-  defp text(s) when is_binary(s), do: String.trim(s)
-  defp text(_), do: ""
 
   defp finish(text), do: String.trim(text) <> "\n"
 end

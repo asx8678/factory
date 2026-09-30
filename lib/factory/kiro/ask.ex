@@ -9,6 +9,7 @@ defmodule Factory.Kiro.Ask do
   around a project).
   """
   alias Factory.Kiro
+  alias Factory.Kiro.Wire
 
   @doc """
   Returns `{:ok, reply_text}` or `{:error, reason}`. Options:
@@ -69,7 +70,8 @@ defmodule Factory.Kiro.Ask do
           call(conn, 4, "session/prompt", %{sessionId: sid, prompt: [%{type: "text", text: text}]})
         end
       after
-        close(port)
+        # kiro-cli and everything it started, so nothing it ran outlives the question.
+        Wire.close(port)
       end
 
     {reply, acc} =
@@ -127,7 +129,7 @@ defmodule Factory.Kiro.Ask do
   # `{:error, reason, acc}`, where acc has what Kiro said while answering (a prompt's
   # reply streams in before its response) and the credits it reported.
   defp call(conn, id, method, params) do
-    send_json(conn.port, %{jsonrpc: "2.0", id: id, method: method, params: params})
+    Wire.send_json(conn.port, %{jsonrpc: "2.0", id: id, method: method, params: params})
 
     acc = %{
       text: "",
@@ -147,18 +149,18 @@ defmodule Factory.Kiro.Ask do
     timeout = max(conn.deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
-      {^port, {:data, {:noeol, part}}} ->
-        await(conn, id, buffer <> part, acc)
+      {^port, {:data, data}} ->
+        case Wire.read(buffer, data) do
+          {:partial, buffer} ->
+            await(conn, id, buffer, acc)
 
-      {^port, {:data, {:eol, part}}} ->
-        case JSON.decode(buffer <> part) do
-          {:ok, msg} ->
+          {:message, msg} ->
             case handle(conn, msg, id, acc) do
               {:cont, acc} -> await(conn, id, "", acc)
               done -> done
             end
 
-          {:error, _} ->
+          :invalid ->
             await(conn, id, "", acc)
         end
 
@@ -199,7 +201,7 @@ defmodule Factory.Kiro.Ask do
         do: "allow",
         else: "reject"
 
-    send_json(conn.port, %{
+    Wire.send_json(conn.port, %{
       jsonrpc: "2.0",
       id: rid,
       result: %{outcome: Kiro.Permission.outcome(options, wanted)}
@@ -211,12 +213,12 @@ defmodule Factory.Kiro.Ask do
   # A one-off question has nobody to ask mid-turn: a tool's question is cancelled, and
   # the tool carries on without it.
   defp handle(conn, %{"id" => rid, "method" => "_kiro/mcp/elicitation"}, _id, acc) do
-    send_json(conn.port, %{jsonrpc: "2.0", id: rid, result: %{action: "cancel"}})
+    Wire.send_json(conn.port, %{jsonrpc: "2.0", id: rid, result: %{action: "cancel"}})
     {:cont, acc}
   end
 
   defp handle(conn, %{"id" => rid, "method" => method}, _id, acc) do
-    send_json(conn.port, %{
+    Wire.send_json(conn.port, %{
       jsonrpc: "2.0",
       id: rid,
       error: %{code: -32601, message: "#{method} is not supported by Factory"}
@@ -294,12 +296,4 @@ defmodule Factory.Kiro.Ask do
   end
 
   defp handle(_conn, _msg, _id, acc), do: {:cont, acc}
-
-  defp send_json(port, msg), do: Port.command(port, [JSON.encode!(msg), "\n"])
-
-  defp close(port) do
-    Port.close(port)
-  rescue
-    ArgumentError -> :ok
-  end
 end

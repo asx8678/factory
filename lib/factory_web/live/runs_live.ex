@@ -9,7 +9,7 @@ defmodule FactoryWeb.RunsLive do
 
     {:ok,
      socket
-     |> assign(page_title: "Runs")
+     |> assign(page_title: "Runs", runs_reload: nil)
      |> stream_configure(:runs, dom_id: &"run-#{&1.id}")
      |> load()}
   end
@@ -26,10 +26,21 @@ defmodule FactoryWeb.RunsLive do
     )
   end
 
-  def handle_info({:runs_changed}, socket), do: {:noreply, load(socket)}
+  # The list changes with every progress write of every run, and the totals with every
+  # call to Kiro; reload it once per short while rather than once per change.
+  def handle_info({:runs_changed}, socket), do: {:noreply, reload_soon(socket)}
+
+  def handle_info(:reload_runs, socket),
+    do: {:noreply, socket |> assign(runs_reload: nil) |> load()}
 
   @doc "Totals follow new calls to Kiro (called by FactoryWeb.UsageMeter)."
-  def usage_recorded(_event, socket), do: load(socket)
+  def usage_recorded(_event, socket), do: reload_soon(socket)
+
+  defp reload_soon(socket) do
+    if socket.assigns.runs_reload,
+      do: socket,
+      else: assign(socket, runs_reload: Process.send_after(self(), :reload_runs, 250))
+  end
 
   def render(assigns) do
     ~H"""

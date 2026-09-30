@@ -11,6 +11,7 @@ defmodule Factory.Kiro.Catalog do
   """
   require Logger
   alias Factory.{Kiro, Prefs}
+  alias Factory.Kiro.Wire
 
   @key {__MODULE__, :catalog}
   @timeout 30_000
@@ -94,14 +95,14 @@ defmodule Factory.Kiro.Catalog do
         params: %{protocolVersion: 1, clientCapabilities: %{}}
       })
 
-      with {:ok, _} <- await(port, 1, ""),
+      with {:ok, _} <- await(port, 1),
            :ok <-
              send_json(port, %{
                id: 2,
                method: "session/new",
                params: %{cwd: workdir, mcpServers: []}
              }),
-           {:ok, result} <- await(port, 2, "") do
+           {:ok, result} <- await(port, 2) do
         options =
           for %{"id" => id, "options" => opts} <- List.wrap(result["configOptions"]),
               id in ["model", "mode"],
@@ -125,32 +126,38 @@ defmodule Factory.Kiro.Catalog do
     rescue
       e -> {:error, Exception.message(e)}
     after
-      if Port.info(port), do: Port.close(port)
+      Wire.close(port)
     end
   end
 
-  defp send_json(port, msg) do
-    Port.command(port, JSON.encode!(Map.put(msg, :jsonrpc, "2.0")) <> "\n")
-    :ok
-  end
+  defp send_json(port, msg), do: Wire.send_json(port, Map.put(msg, :jsonrpc, "2.0"))
 
-  # Waits for the reply to request `id`, gathering lines split by the port.
-  defp await(port, id, partial) do
+  # Waits for the reply to request `id`, at most @timeout in all however much else Kiro
+  # sends meanwhile.
+  defp await(port, id), do: await(port, id, "", System.monotonic_time(:millisecond) + @timeout)
+
+  defp await(port, id, buffer, deadline) do
     receive do
-      {^port, {:data, {:noeol, chunk}}} ->
-        await(port, id, partial <> chunk)
+      {^port, {:data, data}} ->
+        case Wire.read(buffer, data) do
+          {:partial, buffer} ->
+            await(port, id, buffer, deadline)
 
-      {^port, {:data, {:eol, chunk}}} ->
-        case JSON.decode(partial <> chunk) do
-          {:ok, %{"id" => ^id, "result" => result}} -> {:ok, result}
-          {:ok, %{"id" => ^id, "error" => error}} -> {:error, error["message"] || inspect(error)}
-          _ -> await(port, id, "")
+          {:message, %{"id" => ^id, "result" => result}} ->
+            {:ok, result}
+
+          {:message, %{"id" => ^id, "error" => error}} ->
+            {:error, error["message"] || inspect(error)}
+
+          _ ->
+            await(port, id, "", deadline)
         end
 
       {^port, {:exit_status, status}} ->
         {:error, "kiro-cli stopped (exit #{status}). Is it installed and signed in?"}
     after
-      @timeout -> {:error, "Kiro didn't answer within #{div(@timeout, 1000)} seconds."}
+      max(deadline - System.monotonic_time(:millisecond), 0) ->
+        {:error, "Kiro didn't answer within #{div(@timeout, 1000)} seconds."}
     end
   end
 end

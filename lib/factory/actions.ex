@@ -180,7 +180,7 @@ defmodule Factory.Actions do
             | "run" => run.title,
               "run_id" => to_string(run.id),
               "summary" => "Factory run “#{run.title}”.",
-              "folder" => run.settings["project_dir"] || base["folder"]
+              "folder" => Factory.Kiro.workdir(run)
           }
       end
 
@@ -484,37 +484,40 @@ defmodule Factory.Actions do
 
   # Doing it
 
+  @git_timeout 5 * 60_000
+
+  # git never asks for anything (a password, a passphrase, whether to trust a host): it
+  # fails instead, and one that overruns is stopped with ssh and anything else it started.
   defp perform({:cmd, folder, args, label}) do
-    case System.cmd("git", args,
-           cd: folder,
-           stderr_to_stdout: true,
-           env: [{"GIT_TERMINAL_PROMPT", "0"}]
-         ) do
-      {_, 0} ->
+    remote? = hd(args) in ~w(push fetch pull)
+    env = [{"GIT_TERMINAL_PROMPT", "0"} | if(remote?, do: ssh_env(folder), else: [])]
+
+    case Factory.OsProcess.run("git", args, cd: folder, env: env, timeout: @git_timeout) do
+      {:ok, _, 0} ->
         {:ok, label}
 
-      {out, _} ->
+      {:ok, out, _} ->
         if out =~ "nothing to commit",
           do: {:ok, "Nothing to commit"},
           else: {:error, "#{label} failed: #{tail(out)}"}
+
+      {:error, :timeout} ->
+        {:error,
+         "#{label} failed: git took over #{div(@git_timeout, 60_000)} minutes and was stopped."}
+
+      {:error, reason} ->
+        {:error, "#{label} failed: #{reason(reason)}"}
     end
-  rescue
-    e -> {:error, "#{label} failed: #{Exception.message(e)}"}
   end
 
+  # The shell and everything it started (the tests, say) are stopped at the deadline.
   defp perform({:sh, folder, command, env, shown}) do
-    task =
-      Task.async(fn ->
-        System.cmd("sh", ["-c", command], cd: folder, env: env, stderr_to_stdout: true)
-      end)
-
-    case Task.yield(task, 600_000) || Task.shutdown(task) do
-      {:ok, {out, 0}} -> {:ok, "Run `#{shown}` (must succeed): passed\n#{tail(out)}"}
-      {:ok, {out, code}} -> {:error, "`#{shown}` failed (exit #{code}):\n#{tail(out)}"}
-      nil -> {:error, "`#{shown}` took over 10 minutes and was stopped."}
+    case Factory.OsProcess.run("sh", ["-c", command], cd: folder, env: env, timeout: 600_000) do
+      {:ok, out, 0} -> {:ok, "Run `#{shown}` (must succeed): passed\n#{tail(out)}"}
+      {:ok, out, code} -> {:error, "`#{shown}` failed (exit #{code}):\n#{tail(out)}"}
+      {:error, :timeout} -> {:error, "`#{shown}` took over 10 minutes and was stopped."}
+      {:error, reason} -> {:error, "`#{shown}` failed: #{reason(reason)}"}
     end
-  rescue
-    e -> {:error, "`#{shown}` failed: #{Exception.message(e)}"}
   end
 
   defp perform({:http, method, url, headers, body, label}) do
@@ -560,6 +563,32 @@ defmodule Factory.Actions do
       {:error, reason} -> {:error, "#{label} failed: #{inspect(reason)}"}
     end
   end
+
+  # ssh in batch mode, so a key's passphrase or a host it doesn't know yet fails at once.
+  # It adds to the ssh command git would use anyway (GIT_SSH_COMMAND, else
+  # core.sshCommand), so a key chosen there still counts; a GIT_SSH program is left be.
+  defp ssh_env(folder) do
+    cond do
+      command = blank(System.get_env("GIT_SSH_COMMAND")) -> [{"GIT_SSH_COMMAND", batch(command)}]
+      blank(System.get_env("GIT_SSH")) -> []
+      true -> [{"GIT_SSH_COMMAND", batch(ssh_config(folder) || "ssh")}]
+    end
+  end
+
+  defp batch(ssh), do: ssh <> " -o BatchMode=yes -o ConnectTimeout=15"
+
+  defp ssh_config(folder) do
+    case Factory.OsProcess.run("git", ~w(config --get core.sshCommand),
+           cd: folder,
+           timeout: 10_000
+         ) do
+      {:ok, out, 0} -> blank(out)
+      _ -> nil
+    end
+  end
+
+  defp reason(reason) when is_binary(reason), do: reason
+  defp reason(reason), do: Exception.format_exit(reason)
 
   defp preview(""), do: ""
   defp preview(body) when is_binary(body), do: String.slice(body, 0, 400)

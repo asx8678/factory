@@ -368,14 +368,6 @@ defmodule FactoryWeb.SpecPageParts do
   def entry_errors(upload),
     do: for(entry <- upload.entries, err <- upload_errors(upload, entry), do: {entry, err})
 
-  def upload_error(:too_large), do: "larger than 2 MB"
-
-  def upload_error(:not_accepted), do: "only .md and .txt files"
-
-  def upload_error(:too_many_files), do: "one file at a time"
-
-  def upload_error(err), do: to_string(err)
-
   # An empty step's text box says what to write in it.
   def placeholder(step) do
     {question, explanation} = intro(step)
@@ -627,13 +619,13 @@ defmodule FactoryWeb.SpecPageParts do
       </p>
 
       <p :for={err <- upload_errors(@uploads.file)} class="mt-2 text-sm text-error">
-        {upload_error(err)}
+        {upload_error(err, @uploads.file)}
       </p>
       <p
         :for={{entry, err} <- entry_errors(@uploads.file)}
         class="mt-2 text-sm text-error"
       >
-        {entry.client_name}: {upload_error(err)}
+        {entry.client_name}: {upload_error(err, @uploads.file)}
         <button
           phx-click="cancel_upload"
           phx-value-ref={entry.ref}

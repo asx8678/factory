@@ -57,7 +57,7 @@ defmodule Factory.Kiro.Permission do
 
   # Commands that only look, by their first word. git by what it's asked to do.
   @looking ~w(ls cat head tail wc grep egrep fgrep rg ag tree pwd file stat du which echo
-              sort uniq cut diff basename dirname realpath readlink date env printenv)
+              sort uniq cut diff basename dirname realpath readlink date)
   @git ~w(status log diff show ls-files ls-tree grep blame rev-parse describe shortlog)
   @gh %{
     "pr" => ~w(view diff list checks status),
@@ -87,14 +87,44 @@ defmodule Factory.Kiro.Permission do
     ~w(npm run typecheck)
   ]
 
+  # Options that make a command above write a file or run another program, by command:
+  # {options, alone or as `--option=value`; letters that do it among short flags (`-uo`)}.
+  @unsafe %{
+    "find" => {~w(-delete -exec -execdir -ok -okdir -fprint -fprint0 -fprintf -fls), ""},
+    "sort" => {~w(--compress-program), "o"},
+    # -R writes a page into each folder.
+    "tree" => {[], "oR"},
+    "rg" => {~w(--pre --hostname-bin), ""},
+    "ag" => {~w(--pager), ""},
+    # Compiles a magic file, written beside it.
+    "file" => {~w(--compile), "C"},
+    "date" => {~w(--set), "s"},
+    # An external diff program, or `git grep -O` opening what it found in one.
+    "git" => {~w(--ext-diff --open-files-in-pager), "O"}
+  }
+
+  # Tools that answer `<tool> version` with their own; elsewhere it may run the
+  # project's code (`make version`).
+  @versions ~w(go cargo docker kubectl helm terraform)
+
+  # What `sed -n` may print: a line, the last, a /pattern/, or a range of them, then `p`.
+  @sed_print ~r{^(['"]?)(\d+|\$|/[^/]*/)(,(\d+|\$|/[^/]*/))?p\1$}
+
   @doc """
   Whether a shell command only looks: it reads files or the project's history, lists or
   searches, prints a version, runs the tests or a check that builds or lints without
   changing source (`mix compile`, `cargo check`), or reads a pull request with `gh`. A
   planner may run these while it plans, and so may an agent that only reads and checks.
   Anything that could install, write, move, delete, commit or run other code isn't one,
-  and nor is an unknown command (nil). Commands may be chained or piped when every part
-  only looks; redirecting into a file and substitution (`$(…)`, backticks) never do.
+  and nor is an unknown command (nil).
+
+  Commands may be chained, piped or put in the background (`&`) when every part only
+  looks. Never looking: redirecting into a file, substitution (`$(…)`, backticks),
+  settings before a command (`GIT_PAGER=… git log`, which can make it run a program), a
+  program named by its path (`./cat`), and the options that write a file or run a
+  program (`sort -o`, `find -fprint`, `rg --pre`, `git grep -O`, `--ext-diff`). `uniq`
+  looks only with at most one file name (a second is written), and `sed` only when it
+  prints lines (`sed -n '5,9p' file`).
   """
   def looking?(nil), do: false
 
@@ -103,23 +133,36 @@ defmodule Factory.Kiro.Permission do
 
     not String.contains?(text, [">", "`", "$(", "<("]) and
       text
-      |> String.split(~r/&&|\|\||;|\||\R/)
+      |> String.split(~r/&&|\|\||;|\||&|\R/)
       |> Enum.map(&String.trim/1)
       |> Enum.reject(&(&1 == ""))
       |> then(&(&1 != [] and Enum.all?(&1, fn part -> looking_part?(part) end)))
   end
 
   defp looking_part?(part) do
-    # Leading VAR=value settings don't change what the command is.
-    words = part |> String.split() |> Enum.drop_while(&Regex.match?(~r/^[A-Z_][A-Z0-9_]*=/, &1))
+    words = String.split(part)
 
-    # Writing what it shows into a file (`git diff --output=x`, `sort -o x`) isn't looking.
-    writes? =
-      Enum.any?(words, &String.starts_with?(&1, "--output")) or
-        (List.first(words) in ~w(sort tree) and "-o" in words)
+    # Settings before the command (GIT_EXTERNAL_DIFF, GIT_SSH_COMMAND…) can make it run
+    # another program.
+    sets? = Regex.match?(~r/^[A-Za-z_][A-Za-z0-9_]*=/, List.first(words, ""))
 
-    not writes? and looking_words?(words)
+    not sets? and not unsafe?(words) and looking_words?(words)
   end
+
+  # Writing what it shows into a file (`git diff --output=x`, `sort -o x`), or an option
+  # that runs another program.
+  defp unsafe?([command | args]) do
+    {options, letters} = Map.get(@unsafe, command, {[], ""})
+
+    Enum.any?(args, fn arg ->
+      String.starts_with?(arg, "--output") or
+        Enum.any?(options, &(arg == &1 or String.starts_with?(arg, &1 <> "="))) or
+        (letters != "" and Regex.match?(~r/^-[^-]/, arg) and
+           String.contains?(arg, String.graphemes(letters)))
+    end)
+  end
+
+  defp unsafe?([]), do: false
 
   defp looking_words?([]), do: false
   defp looking_words?(["cd" | _]), do: true
@@ -128,16 +171,36 @@ defmodule Factory.Kiro.Permission do
   # GitHub's CLI, reading only: never merge, close, comment, review or edit.
   defp looking_words?(["gh", area, action | _]), do: action in Map.get(@gh, area, [])
 
-  defp looking_words?(["find" | rest]),
-    do: not Enum.any?(rest, &(&1 in ~w(-delete -exec -execdir -ok -fprint)))
+  defp looking_words?(["find" | _]), do: true
 
-  defp looking_words?(["sed" | rest]),
-    do: not Enum.any?(rest, &String.starts_with?(&1, ["-i", "--in-place"]))
+  # sed only prints: `-n` (with -E or -r), one address or range and `p`, then files. Its
+  # other commands may write (-i, `w`, `s///w`) or run a program (`e`, `s///e`), and
+  # GNU sed reads options after the files too (`sed -n 1p file -i`).
+  defp looking_words?(["sed" | rest]) do
+    {flags, rest} = Enum.split_while(rest, &String.starts_with?(&1, "-"))
 
-  defp looking_words?([_tool, flag]) when flag in ~w(--version -v -V version), do: true
+    case rest do
+      [script | files] ->
+        flags != [] and Enum.all?(flags, &Regex.match?(~r/^-[nEr]+$/, &1)) and
+          Enum.any?(flags, &String.contains?(&1, "n")) and Regex.match?(@sed_print, script) and
+          not Enum.any?(files, &String.starts_with?(&1, "-"))
+
+      [] ->
+        false
+    end
+  end
+
+  # `uniq in out` writes out.
+  defp looking_words?(["uniq" | rest]),
+    do: Enum.count(rest, &(not String.starts_with?(&1, "-"))) < 2
+
+  defp looking_words?([tool, flag]) when flag in ~w(--version -v -V),
+    do: not String.contains?(tool, "/")
+
+  defp looking_words?([tool, "version"]) when tool in @versions, do: true
 
   defp looking_words?([first | _] = words),
-    do: Path.basename(first) in @looking or Enum.any?(@tests, &List.starts_with?(words, &1))
+    do: first in @looking or Enum.any?(@tests, &List.starts_with?(words, &1))
 
   # `git branch` only when it lists branches: options only, none that creates, renames,
   # copies, deletes or moves one (a bare name would create it).
@@ -153,9 +216,15 @@ defmodule Factory.Kiro.Permission do
 
   defp git_branch_list?(_words), do: false
 
-  # ACP permits cancellation when none of the offered options matches the decision.
+  # ACP permits cancellation when none of the offered options matches the decision. The
+  # one-time answer comes first: `allow_always` would trust the tool for the rest of the
+  # session, so it's taken only when nothing else says yes.
   def outcome(options, decision) do
-    case Enum.find(options, &String.starts_with?(&1["kind"] || "", decision)) do
+    option =
+      Enum.find(options, &(&1["kind"] == decision <> "_once")) ||
+        Enum.find(options, &String.starts_with?(&1["kind"] || "", decision))
+
+    case option do
       %{"optionId" => id} when is_binary(id) -> %{outcome: "selected", optionId: id}
       _ -> %{outcome: "cancelled"}
     end

@@ -79,10 +79,24 @@ defmodule Factory.Sources do
 
   @doc "Removes a source, and what Factory keeps for it (a repository's clone, a tree's sections)."
   def delete(%Source{} = source) do
-    if repo?(source), do: File.rm_rf(local_path(source))
-    if source.kind == "pageindex", do: File.rm_rf(sections_dir(source))
+    remove_files(source)
     source |> Repo.delete() |> after_change(fn _ -> :ok end)
   end
+
+  @doc """
+  Removes what Factory made for a source under its sources folder: a repository's
+  clone, a PageIndex tree's section files. Never the folder or file a source points to,
+  which is the person's own. For a source deleted some other way (its workflow's
+  deletion), once that has committed.
+  """
+  def remove_files(%Source{kind: kind} = source)
+      when kind in ["azure_devops", "git", "pageindex"] do
+    for dir <- own_dirs(source), do: File.rm_rf(dir)
+    :persistent_term.erase({__MODULE__, :pageindex, source.id})
+    :ok
+  end
+
+  def remove_files(%Source{}), do: :ok
 
   @doc """
   Copies a workflow's sources to another workflow (used when cloning), attached to
@@ -244,13 +258,43 @@ defmodule Factory.Sources do
 
   # Syncing repositories
 
-  @doc "Where a source is on this machine: a repository's clone, or the folder or file given."
-  def local_path(%Source{kind: kind} = s) when kind in ["azure_devops", "git"] do
+  @doc """
+  Where a source is on this machine: a repository's clone, or the folder or file given.
+  A clone's folder is named by the source's id, so renaming the source keeps it.
+  """
+  def local_path(%Source{kind: kind} = s) when kind in ["azure_devops", "git"], do: own_dir(s)
+
+  def local_path(%Source{config: config}), do: config["path"] && Path.expand(config["path"])
+
+  # The folder Factory keeps for a source under the sources folder: `<id>`. One made
+  # before that was named `<id>-<name as it was then>`, and is still used: the one for
+  # the name now if it's there, else any other.
+  defp own_dir(%Source{id: id} = s) do
+    dir = Path.join(sources_dir(), to_string(id))
+
+    case own_dirs(s) do
+      [] -> dir
+      dirs -> if dir in dirs, do: dir, else: Enum.find(dirs, hd(dirs), &(&1 == old_dir(s)))
+    end
+  end
+
+  defp old_dir(%Source{} = s) do
     slug = s.name |> String.downcase() |> String.replace(~r/[^a-z0-9]+/, "-") |> String.trim("-")
     Path.join(sources_dir(), "#{s.id}-#{slug}")
   end
 
-  def local_path(%Source{config: config}), do: config["path"] && Path.expand(config["path"])
+  # Every folder there that's this source's, in either naming.
+  defp own_dirs(%Source{id: id}) do
+    case File.ls(sources_dir()) do
+      {:ok, names} ->
+        for name <- Enum.sort(names),
+            name == "#{id}" or String.starts_with?(name, "#{id}-"),
+            do: Path.join(sources_dir(), name)
+
+      {:error, _} ->
+        []
+    end
+  end
 
   defp sources_dir do
     Application.get_env(:factory, :sources_dir) || Path.expand("tmp/sources")
@@ -523,7 +567,61 @@ defmodule Factory.Sources do
     "## Instructions \"#{s.name}\"\nFollow these in all your work:\n\n#{text(s)}"
   end
 
+  # A tree's part of the prompt is kept until its file, the source or its section files
+  # change, so a large tree isn't read and decoded again for every prompt. It lives in
+  # :persistent_term, cheap to read and only costly to change, which a tree seldom does.
   defp describe(%Source{kind: "pageindex"} = s) do
+    key = {__MODULE__, :pageindex, s.id}
+
+    case :persistent_term.get(key, nil) do
+      {stamp, text} ->
+        if stamp == tree_stamp(s), do: text, else: describe_tree(s, key)
+
+      nil ->
+        describe_tree(s, key)
+    end
+  end
+
+  defp describe(%Source{kind: "meta_index"} = s) do
+    root =
+      blank_nil(s.config["root"]) ||
+        (s.config["path"] && Path.dirname(Path.expand(s.config["path"])))
+
+    at = if s.config["path"], do: " at #{Path.expand(s.config["path"])}", else: ""
+    rel = if root, do: " Paths in it are relative to #{Path.expand(root)}.", else: ""
+
+    """
+    ## Meta index "#{s.name}"
+    This index#{at} maps where things are.#{rel} Read it first, then open only what the task needs.
+
+    <index>
+    #{text(s)}
+    </index>\
+    """
+  end
+
+  # Taken after the text is made, since making it may write the section files.
+  defp describe_tree(s, key) do
+    text = render_tree(s)
+    :persistent_term.put(key, {tree_stamp(s), text})
+    text
+  end
+
+  # What the text depends on: the source, and the tree file and section files as they
+  # are on disk.
+  defp tree_stamp(s) do
+    stat = fn path ->
+      case File.stat(path, time: :posix) do
+        {:ok, st} -> {st.mtime, st.size, st.inode}
+        {:error, _} -> nil
+      end
+    end
+
+    dir = sections_dir(s)
+    {s.name, s.config, dir, stat.(Path.expand(s.config["path"] || "")), stat.(dir)}
+  end
+
+  defp render_tree(%Source{} = s) do
     case PageIndex.load(s.config["path"]) do
       {:ok, tree} ->
         dir = if tree.text?, do: ensure_sections(s, tree)
@@ -555,24 +653,6 @@ defmodule Factory.Sources do
     end
   end
 
-  defp describe(%Source{kind: "meta_index"} = s) do
-    root =
-      blank_nil(s.config["root"]) ||
-        (s.config["path"] && Path.dirname(Path.expand(s.config["path"])))
-
-    at = if s.config["path"], do: " at #{Path.expand(s.config["path"])}", else: ""
-    rel = if root, do: " Paths in it are relative to #{Path.expand(root)}.", else: ""
-
-    """
-    ## Meta index "#{s.name}"
-    This index#{at} maps where things are.#{rel} Read it first, then open only what the task needs.
-
-    <index>
-    #{text(s)}
-    </index>\
-    """
-  end
-
   # A tree's sections as files, written again when the tree file changes.
   defp ensure_sections(source, tree) do
     dir = sections_dir(source)
@@ -588,10 +668,7 @@ defmodule Factory.Sources do
     dir
   end
 
-  defp sections_dir(%Source{} = s) do
-    slug = s.name |> String.downcase() |> String.replace(~r/[^a-z0-9]+/, "-") |> String.trim("-")
-    Path.join([sources_dir(), "#{s.id}-#{slug}", "sections"])
-  end
+  defp sections_dir(%Source{} = s), do: Path.join(own_dir(s), "sections")
 
   # A file's text, read now so edits to it count; else the text given. Over the limit
   # it's cut with a line saying how much was left out, like the rest of a prompt.

@@ -74,16 +74,33 @@ defmodule Factory.Specs do
 
   def for_run(%Factory.Runs.Run{} = run), do: new_for_run(run)
 
+  # Made under the run's lock, and only if the run still has none once it's held, so
+  # two tabs (or a tab and the planner) asking at once share one spec.
+  defp new_for_run(run) do
+    {:ok, {spec, made?}} =
+      Runs.with_locked_run(run.id, fn run ->
+        case run.spec_id && get_spec(run.spec_id) do
+          %SpecDoc{} = spec -> {:ok, {spec, false}}
+          nil -> with {:ok, spec} <- make_for_run(run), do: {:ok, {spec, true}}
+        end
+      end)
+
+    # Told again once it has committed: a page that read on the first telling may not
+    # have seen it yet.
+    if made?, do: preloaded({:ok, spec}), else: {:ok, spec}
+    spec
+  end
+
   # A run planned before it had a spec keeps its files in its spec text; the new spec
   # starts from them, so the run's tasks aren't lost.
-  defp new_for_run(run) do
+  defp make_for_run(run) do
     {:ok, spec} = create_spec(run.title)
     {:ok, spec} = set_project_dir(spec, run.settings["project_dir"])
-    {:ok, _run} = Factory.Runs.update_run(run, %{spec_id: spec.id})
+    {:ok, _run} = Runs.update_run(run, %{spec_id: spec.id})
 
     case run_files(run.spec) do
-      [] -> spec
-      files -> spec |> add_files(files) |> elem(1)
+      [] -> {:ok, spec}
+      files -> add_files(spec, files)
     end
   end
 
@@ -106,14 +123,14 @@ defmodule Factory.Specs do
 
   @doc """
   Adds files (`[{name, content}]`) to the spec, each in the step its name says
-  (`step_for/1`). A tasks file replaces the tasks; other text is added after what the
-  step has, unless it's there already.
+  (`step_for/1`). A tasks file with tasks in it replaces the tasks; other text is added
+  after what the step has, unless it's there already.
   """
   def add_files(%SpecDoc{} = spec, files) do
     changes =
       Enum.reduce(files, %{}, fn {name, text}, changes ->
-        step = String.to_existing_atom(step_for(name))
         text = String.trim(text)
+        step = add_step(name, text)
         now = Map.get(changes, step, Map.fetch!(spec, step) || "")
 
         cond do
@@ -124,6 +141,15 @@ defmodule Factory.Specs do
       end)
 
     if changes == %{}, do: {:ok, spec}, else: update_spec(spec, changes)
+  end
+
+  # A tasks file replaces the tasks only when it has some; one without reads like any
+  # other notes, in the overview.
+  defp add_step(name, text) do
+    case step_for(name) do
+      "tasks" -> if Spec.parse_tasks(text) == [], do: :overview, else: :tasks
+      step -> String.to_existing_atom(step)
+    end
   end
 
   @doc """
@@ -164,16 +190,21 @@ defmodule Factory.Specs do
     create_spec(name, steps)
   end
 
-  @doc "The step a file goes into, by its name. A typed description is the overview."
+  @doc """
+  The step a file goes into, by the whole words in its name (`user-tasks.md`, not
+  `multitasking.md`), requirements and design before tasks. A typed description is
+  the overview.
+  """
   def step_for(:description), do: "overview"
 
   def step_for(file) do
-    base = file |> Path.basename() |> String.downcase()
+    words =
+      file |> Path.basename() |> String.downcase() |> String.split(~r/[^a-z0-9]+/, trim: true)
 
     cond do
-      base =~ "design" -> "design"
-      base =~ "task" -> "tasks"
-      base =~ "requirement" -> "requirements"
+      Enum.any?(words, &(&1 in ~w(requirement requirements))) -> "requirements"
+      Enum.any?(words, &(&1 in ~w(design designs))) -> "design"
+      Enum.any?(words, &(&1 in ~w(task tasks))) -> "tasks"
       true -> "overview"
     end
   end
@@ -303,10 +334,10 @@ defmodule Factory.Specs do
             |> Enum.map_join(" → ", & &1.name)
 
           prompt =
-            Planner.run_prompt(type, kiro_files(spec),
+            Planner.run_prompt(type, kiro_files(spec, run),
               write: write,
               agents: agents,
-              builders: builders(spec)
+              builders: builders(spec, run)
             )
 
           {:ok, spec} = set_write(spec, %{"status" => "running", "writing" => write})
@@ -343,21 +374,35 @@ defmodule Factory.Specs do
   defp wrote(spec, _write, {:error, reason}),
     do: set_write(spec, %{"status" => "error", "error" => reason})
 
+  # Only what's still missing once Kiro is done is written: a part the person wrote (or
+  # approved) while it worked stays as they left it.
   defp wrote(spec, write, {:ok, plan}) do
-    changes =
-      for part <- write, into: %{} do
-        case part do
-          "requirements" -> {:requirements, plan.requirements}
-          "design" -> {:design, plan.design}
-          # After any text the person gave that has no tasks in it.
-          "tasks" -> {:tasks, join(spec.tasks, Planner.to_markdown(plan.tasks, 1) <> "\n")}
-        end
-      end
+    result =
+      locked(spec, fn spec ->
+        parts =
+          for part <- missing_parts(spec),
+              part in write and not SpecDoc.approved?(spec, part),
+              do: part
 
-    {:ok, spec} = update_spec(spec, changes)
-    {:ok, spec} = set_write(spec, %{"status" => "done", "wrote" => write, "why" => plan.why})
-    review(spec)
-    {:ok, spec}
+        changes =
+          for part <- parts, into: %{} do
+            case part do
+              "requirements" -> {:requirements, plan.requirements}
+              "design" -> {:design, plan.design}
+              # After any text the person gave that has no tasks in it.
+              "tasks" -> {:tasks, join(spec.tasks, Planner.to_markdown(plan.tasks, 1) <> "\n")}
+            end
+          end
+
+        written = if changes == %{}, do: {:ok, spec}, else: update_spec(spec, changes)
+        with {:ok, spec} <- written, do: {:ok, {spec, parts}}
+      end)
+
+    with {:ok, {spec, parts}} <- result do
+      {:ok, spec} = set_write(spec, %{"status" => "done", "wrote" => parts, "why" => plan.why})
+      review(spec)
+      {:ok, spec}
+    end
   end
 
   defp join(text, more) do
@@ -367,7 +412,24 @@ defmodule Factory.Specs do
     end
   end
 
-  defp set_write(spec, write), do: set_plan(spec, Map.put(spec.plan || %{}, "write", write))
+  # Only the plan's "write" key, set on the row itself: task suggestions kept beside it
+  # may have moved on since `spec` was read.
+  defp set_write(spec, write) do
+    from(s in SpecDoc,
+      where: s.id == ^spec.id,
+      update: [
+        set: [
+          plan:
+            fragment(
+              "jsonb_set(coalesce(?, '{}'::jsonb), '{write}', ?)",
+              s.plan,
+              type(^write, :map)
+            )
+        ]
+      ]
+    )
+    |> plan_updated(spec)
+  end
 
   @doc "Whether the spec was changed after its review."
   def changed_since_review?(%SpecDoc{review: %{"hash" => hash}} = spec), do: hash != hash(spec)
@@ -389,10 +451,23 @@ defmodule Factory.Specs do
       set: [review: stopped]
     )
 
-    Repo.update_all(
-      from(s in SpecDoc, where: fragment("?->>'status' in ('reading', 'writing')", s.plan)),
-      set: [plan: stopped]
+    # Stopped like a failure, so it can be tried again: what the plan had (the project
+    # Kiro read, the answers) stays, and "failed" says which step to try again.
+    from(s in SpecDoc,
+      where: fragment("?->>'status' in ('reading', 'writing')", s.plan),
+      update: [
+        set: [
+          plan:
+            fragment(
+              "(? - 'tasks') || jsonb_build_object('status', 'error', 'error', ?::text, 'failed', ?->>'status')",
+              s.plan,
+              ^stopped["error"],
+              s.plan
+            )
+        ]
+      ]
     )
+    |> Repo.update_all([])
 
     # Writing the missing parts keeps its progress under the plan's "write" key.
     from(s in SpecDoc,
@@ -423,11 +498,7 @@ defmodule Factory.Specs do
         {:error, :no_folder}
 
       true ->
-        {:ok, spec} =
-          spec
-          |> Ecto.Changeset.change(project_dir: dir, plan: %{"status" => "reading"})
-          |> Repo.update()
-          |> preloaded()
+        {:ok, spec} = set_plan(spec, %{"status" => "reading"}, project_dir: dir)
 
         prompt = Planner.questions_prompt(kiro_files(spec))
 
@@ -529,7 +600,10 @@ defmodule Factory.Specs do
   Adds chosen tasks to the spec's tasks step, after the tasks already there or
   instead of them (`:replace`). Numbering continues from the last task.
   """
-  def add_tasks(%SpecDoc{} = spec, tasks, mode \\ :append) do
+  def add_tasks(%SpecDoc{} = spec, tasks, mode \\ :append),
+    do: locked(spec, &append_tasks(&1, tasks, mode))
+
+  defp append_tasks(spec, tasks, mode) do
     existing = if mode == :replace, do: "", else: String.trim_trailing(spec.tasks || "")
 
     first =
@@ -580,8 +654,37 @@ defmodule Factory.Specs do
     end)
   end
 
-  defp set_plan(spec, plan) do
-    spec |> Ecto.Changeset.change(plan: plan) |> Repo.update() |> preloaded()
+  # The task suggestions' part of the plan, replaced whole. Writing the missing parts
+  # keeps its progress under "write" and runs on its own, so whatever that key holds
+  # now stays, read in the same statement. `also` sets other columns with it.
+  defp set_plan(spec, plan, also \\ []) do
+    from(s in SpecDoc,
+      where: s.id == ^spec.id,
+      update: [
+        set: [
+          plan:
+            fragment(
+              "?::jsonb || CASE WHEN ?->'write' IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('write', ?->'write') END",
+              type(^Map.delete(plan, "write"), :map),
+              s.plan,
+              s.plan
+            )
+        ]
+      ]
+    )
+    |> update(set: ^also)
+    |> plan_updated(spec)
+  end
+
+  defp plan_updated(query, spec) do
+    now = DateTime.utc_now(:second)
+
+    with {1, _} <- query |> update(set: [updated_at: ^now]) |> Repo.update_all([]),
+         %SpecDoc{} = spec <- Repo.get(SpecDoc, spec.id) do
+      preloaded({:ok, spec})
+    else
+      _ -> {:error, :not_found}
+    end
   end
 
   defp broadcast(topic, msg), do: Phoenix.PubSub.broadcast(Factory.PubSub, topic, msg)
@@ -624,9 +727,10 @@ defmodule Factory.Specs do
   What Kiro reads about a spec: its files, plus the data sources of the workflow its
   run uses (see `Factory.Sources`), as `data-sources.md`.
   """
-  def kiro_files(%SpecDoc{} = spec) do
-    run = home_run(spec)
+  def kiro_files(%SpecDoc{} = spec), do: kiro_files(spec, home_run(spec))
 
+  # With the spec's home run already at hand (`home_run/1`).
+  defp kiro_files(spec, run) do
     workflow_id =
       case run do
         %{settings: %{"workflow_id" => id}} -> id
@@ -654,14 +758,22 @@ defmodule Factory.Specs do
   The agents that build, in the workflow the spec's run uses (else the current one):
   the ones its tasks can be given to (`Factory.Workflows.builders/1`).
   """
-  def builders(spec) do
+  def builders(spec), do: builders(spec, home_run(spec))
+
+  defp builders(_spec, run) do
     workflow =
-      case home_run(spec) do
+      case run do
         nil -> Factory.Workflows.current()
         run -> Factory.Workflows.for_run(run) || Factory.Workflows.current()
       end
 
     Factory.Workflows.builders(workflow)
+  end
+
+  defp home_run_id(%SpecDoc{id: id}) do
+    Repo.one(
+      from r in Factory.Runs.Run, where: r.spec_id == ^id, order_by: r.id, limit: 1, select: r.id
+    )
   end
 
   @doc "The run this spec was written for: the first one it's linked to (`for_run/1`)."
@@ -683,40 +795,50 @@ defmodule Factory.Specs do
   @doc """
   Starts a new run from an approved spec: a chat with the spec attached. With a
   queue, the run gets only the queued tasks, in queue order, and the queue empties.
+  A queue none of whose tasks exist any more is emptied too, and nothing starts:
+  `{:error, :queue_gone}`, rather than a run of every task nobody asked for.
   """
   def start_run(%SpecDoc{} = spec) do
-    if SpecDoc.current_step(spec) == "ready" do
-      files =
-        case queued(spec) do
-          [] ->
-            files(spec)
+    cond do
+      SpecDoc.current_step(spec) != "ready" ->
+        {:error, :not_approved}
 
-          blocks ->
-            {preamble, _} = Spec.blocks(spec.tasks)
+      spec.queue != [] and queued(spec) == [] ->
+        set_queue(spec, [])
+        {:error, :queue_gone}
 
-            Enum.map(files(spec), fn
-              {"tasks.md", _} -> {"tasks.md", Spec.render_blocks(preamble, blocks)}
-              file -> file
-            end)
+      true ->
+        # A factory run made for this spec (see Factory.Launch) runs it the first time;
+        # after that, or for a spec made on its own, each start is a new run.
+        home = home_run(spec)
+
+        created =
+          if home && home.status == "draft" && home.tasks == [],
+            do: {:ok, home},
+            else: Runs.create_run(spec.name)
+
+        with {:ok, run} <- created,
+             {:ok, run} <- Runs.update_run(run, %{spec_id: spec.id}) do
+          Factory.Chat.attach_spec(run, run_files_for(spec))
+          if spec.queue != [], do: set_queue(spec, [])
+          {:ok, run}
         end
+    end
+  end
 
-      # A factory run made for this spec (see Factory.Launch) runs it the first time;
-      # after that, or for a spec made on its own, each start is a new run.
-      home = home_run(spec)
+  # The files a started run gets: with a queue, the tasks are only the queued ones.
+  defp run_files_for(spec) do
+    case queued(spec) do
+      [] ->
+        files(spec)
 
-      created =
-        if home && home.status == "draft" && home.tasks == [],
-          do: {:ok, home},
-          else: Runs.create_run(spec.name)
+      blocks ->
+        {preamble, _} = Spec.blocks(spec.tasks)
 
-      with {:ok, run} <- created,
-           {:ok, run} <- Runs.update_run(run, %{spec_id: spec.id}) do
-        Factory.Chat.attach_spec(run, files)
-        if spec.queue != [], do: set_queue(spec, [])
-        {:ok, run}
-      end
-    else
-      {:error, :not_approved}
+        Enum.map(files(spec), fn
+          {"tasks.md", _} -> {"tasks.md", Spec.render_blocks(preamble, blocks)}
+          file -> file
+        end)
     end
   end
 
@@ -746,26 +868,43 @@ defmodule Factory.Specs do
     if task.status == "done" and passed == true, do: "verified", else: task.status
   end
 
+  # Tasks are changed by their place in the list, read again under the lock (see
+  # `locked/2`). A caller that passes `expected`, the title the task had where the
+  # person saw it, gets `{:error, :stale}` when another task is in that place now.
+
   @doc "Moves task `index` one place up (-1) or down (1)."
-  def move_task(%SpecDoc{} = spec, index, by) when by in [-1, 1] do
+  def move_task(%SpecDoc{} = spec, index, by, expected \\ nil) when by in [-1, 1] do
     edit_tasks(spec, fn blocks ->
       target = index + by
 
-      if target < 0 or target >= length(blocks),
-        do: blocks,
-        else:
-          blocks
-          |> List.replace_at(index, Enum.at(blocks, target))
-          |> List.replace_at(target, Enum.at(blocks, index))
+      cond do
+        stale?(Enum.at(blocks, index), expected) ->
+          {:error, :stale}
+
+        target < 0 or target >= length(blocks) ->
+          {:ok, blocks}
+
+        true ->
+          {:ok,
+           blocks
+           |> List.replace_at(index, Enum.at(blocks, target))
+           |> List.replace_at(target, Enum.at(blocks, index))}
+      end
     end)
   end
 
-  @doc "Deletes the tasks at `indices` and renumbers the rest."
-  def delete_tasks(%SpecDoc{} = spec, indices) do
-    with {:ok, spec} <- edit_tasks(spec, &drop_indices(&1, indices)) do
-      titles = spec |> task_list() |> Enum.map(& &1.title)
-      set_queue(spec, Enum.filter(spec.queue, &(&1 in titles)))
-    end
+  @doc """
+  Deletes the tasks at `indices` and renumbers the rest. `expected` is their titles,
+  in the order of `indices`.
+  """
+  def delete_tasks(%SpecDoc{} = spec, indices, expected \\ nil) do
+    edit_tasks(spec, fn blocks ->
+      titles = Enum.map(indices, &(Enum.at(blocks, &1) || %{title: nil}).title)
+
+      if expected != nil and titles != expected,
+        do: {:error, :stale},
+        else: {:ok, drop_indices(blocks, indices)}
+    end)
   end
 
   @doc """
@@ -784,10 +923,17 @@ defmodule Factory.Specs do
       task ->
         dir = project_dir(spec)
         topic = "spec:#{spec.id}"
-        asked = (home_run(spec) || %{description: nil}).description
+        run = home_run(spec)
+        asked = (run || %{description: nil}).description
 
         prompt =
-          Planner.improve_prompt(kiro_files(spec), task, instruction, asked || "", builders(spec))
+          Planner.improve_prompt(
+            kiro_files(spec, run),
+            task,
+            instruction,
+            asked || "",
+            builders(spec, run)
+          )
 
         on_tool = fn update ->
           broadcast(topic, {:task_activity, task.title, Planner.describe_tool(update, dir)})
@@ -825,7 +971,8 @@ defmodule Factory.Specs do
   def draft_task(%SpecDoc{} = spec, title, notes, ref) do
     dir = project_dir(spec)
     topic = "spec:#{spec.id}"
-    prompt = Planner.draft_prompt(kiro_files(spec), title, notes, builders(spec))
+    run = home_run(spec)
+    prompt = Planner.draft_prompt(kiro_files(spec, run), title, notes, builders(spec, run))
 
     on_tool = fn update ->
       broadcast(topic, {:draft_activity, ref, Planner.describe_tool(update, dir)})
@@ -887,35 +1034,39 @@ defmodule Factory.Specs do
   Changes task `index`: its title, details (one per line) and requirements
   (comma separated). A renamed task keeps its place in the queue.
   """
-  def update_task(%SpecDoc{} = spec, index, %{} = params) do
+  def update_task(%SpecDoc{} = spec, index, %{} = params, expected \\ nil) do
     title = params |> Map.get("title", "") |> String.trim()
 
     changes =
       params |> Map.put_new("details", "") |> Map.put_new("requirements", "") |> task_changes()
 
-    old = spec |> task_list() |> Enum.at(index)
+    locked(spec, fn spec ->
+      {preamble, blocks} = Spec.blocks(spec.tasks)
+      old = Enum.at(blocks, index)
 
-    cond do
-      old == nil ->
-        {:error, :not_found}
+      cond do
+        old == nil -> {:error, :not_found}
+        stale?(old, expected) -> {:error, :stale}
+        title == "" -> {:error, :blank_title}
+        not SpecDoc.open?(spec, "tasks") -> {:error, :locked}
+        true -> edit_at(spec, preamble, blocks, index, changes)
+      end
+    end)
+  end
 
-      title == "" ->
-        {:error, :blank_title}
+  # Task `index` rewritten with `changes`; renamed, it keeps its place in the queue.
+  defp edit_at(spec, preamble, blocks, index, changes) do
+    old = Enum.at(blocks, index)
+    blocks = List.update_at(blocks, index, &Spec.edit_block(&1, changes))
 
-      true ->
-        with {:ok, spec} <-
-               rewrite_tasks(spec, fn blocks ->
-                 List.update_at(blocks, index, &Spec.edit_block(&1, changes))
-               end) do
-          new_title = spec |> task_list() |> Enum.at(index) |> Map.fetch!(:title)
-
-          if old.title != new_title and old.title in spec.queue,
-            do:
-              set_queue(spec, Enum.map(spec.queue, &if(&1 == old.title, do: new_title, else: &1))),
-            else: {:ok, spec}
-        end
+    with {:ok, spec} <- update_spec(spec, %{tasks: Spec.render_blocks(preamble, blocks)}) do
+      {_, now} = Spec.blocks(spec.tasks)
+      follow_tasks(spec, %{old.title => Enum.at(now, index).title})
     end
   end
+
+  defp stale?(_block, nil), do: false
+  defp stale?(block, expected), do: (block || %{title: nil}).title != expected
 
   defp clean_lines(lines),
     do: lines |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
@@ -963,16 +1114,37 @@ defmodule Factory.Specs do
     for {block, i} <- Enum.with_index(blocks), i not in indices, do: block
   end
 
+  # Moving and deleting: `fun` gets the tasks as they are now and returns `{:ok, blocks}`
+  # to write, or an error. Tasks that are gone leave the queue.
   defp edit_tasks(spec, fun) do
-    if SpecDoc.approved?(spec, "tasks"), do: {:error, :locked}, else: rewrite_tasks(spec, fun)
+    locked(spec, fn spec ->
+      {preamble, blocks} = Spec.blocks(spec.tasks)
+
+      if SpecDoc.approved?(spec, "tasks") or not SpecDoc.open?(spec, "tasks") do
+        {:error, :locked}
+      else
+        with {:ok, blocks} <- fun.(blocks),
+             {:ok, spec} <- update_spec(spec, %{tasks: Spec.render_blocks(preamble, blocks)}),
+             do: follow_tasks(spec)
+      end
+    end)
   end
 
-  defp rewrite_tasks(spec, fun) do
-    if SpecDoc.open?(spec, "tasks") do
-      {preamble, blocks} = Spec.blocks(spec.tasks)
-      update_spec(spec, %{tasks: Spec.render_blocks(preamble, fun.(blocks))})
-    else
-      {:error, :locked}
+  # Changes to the tasks by position read the spec again under the lock the chat's
+  # planner writes them under (its run's, see Factory.PlanTools), then the spec's own
+  # row, so a task the planner adds or removes meanwhile can't change which one an
+  # index means, and neither write loses the other. `fun` gets the spec as it is now.
+  defp locked(%SpecDoc{id: id} = spec, fun) do
+    in_lock = fn ->
+      case Repo.one(from s in SpecDoc, where: s.id == ^id, lock: "FOR UPDATE") do
+        nil -> {:error, :not_found}
+        now -> fun.(preload(now))
+      end
+    end
+
+    case home_run_id(spec) do
+      nil -> Repo.transact(in_lock)
+      run_id -> Runs.with_locked_run(run_id, fn _run -> in_lock.() end)
     end
   end
 
@@ -985,50 +1157,65 @@ defmodule Factory.Specs do
   line) and requirements (comma separated). `{:error, :locked}` once the tasks step is
   approved on the Spec page.
   """
-  def edit_plan_task(%SpecDoc{} = spec, index, %{} = params) do
+  def edit_plan_task(%SpecDoc{} = spec, index, %{} = params, expected \\ nil) do
     title = params |> Map.get("title", "") |> to_string() |> String.trim()
 
     changes =
       params |> Map.put_new("details", "") |> Map.put_new("requirements", "") |> task_changes()
 
-    {preamble, blocks} = Spec.blocks(spec.tasks)
+    locked(spec, fn spec ->
+      {preamble, blocks} = Spec.blocks(spec.tasks)
 
-    cond do
-      SpecDoc.approved?(spec, "tasks") ->
-        {:error, :locked}
-
-      title == "" ->
-        {:error, :blank_title}
-
-      Enum.at(blocks, index) == nil ->
-        {:error, :not_found}
-
-      true ->
-        blocks = List.update_at(blocks, index, &Spec.edit_block(&1, changes))
-        update_spec(spec, %{tasks: Spec.render_blocks(preamble, blocks)})
-    end
+      cond do
+        SpecDoc.approved?(spec, "tasks") -> {:error, :locked}
+        title == "" -> {:error, :blank_title}
+        Enum.at(blocks, index) == nil -> {:error, :not_found}
+        stale?(Enum.at(blocks, index), expected) -> {:error, :stale}
+        true -> edit_at(spec, preamble, blocks, index, changes)
+      end
+    end)
   end
 
-  @doc "Removes task `index` from a plan being made in the chat, like `edit_plan_task/3`."
-  def remove_plan_task(%SpecDoc{} = spec, index) do
-    {preamble, blocks} = Spec.blocks(spec.tasks)
+  @doc "Removes task `index` from a plan being made in the chat, like `edit_plan_task/4`."
+  def remove_plan_task(%SpecDoc{} = spec, index, expected \\ nil) do
+    locked(spec, fn spec ->
+      {preamble, blocks} = Spec.blocks(spec.tasks)
 
-    cond do
-      SpecDoc.approved?(spec, "tasks") ->
-        {:error, :locked}
+      cond do
+        SpecDoc.approved?(spec, "tasks") ->
+          {:error, :locked}
 
-      Enum.at(blocks, index) == nil ->
-        {:error, :not_found}
+        Enum.at(blocks, index) == nil ->
+          {:error, :not_found}
 
-      true ->
-        kept = List.delete_at(blocks, index)
-        tasks = if kept == [], do: "", else: Spec.render_blocks(preamble, kept)
+        stale?(Enum.at(blocks, index), expected) ->
+          {:error, :stale}
 
-        with {:ok, spec} <- update_spec(spec, %{tasks: tasks}) do
-          titles = Enum.map(kept, & &1.title)
-          set_queue(spec, Enum.filter(spec.queue, &(&1 in titles)))
-        end
-    end
+        true ->
+          kept = List.delete_at(blocks, index)
+          tasks = if kept == [], do: "", else: Spec.render_blocks(preamble, kept)
+          with {:ok, spec} <- update_spec(spec, %{tasks: tasks}), do: follow_tasks(spec)
+      end
+    end)
+  end
+
+  @doc """
+  Keeps the queue in step with the tasks after they change: a renamed task
+  (`renames`, old title => new) keeps its place, and one that's gone leaves the queue.
+  Every change to the tasks by position comes through here, wherever it's made (the
+  Spec page, the chat's plan, the planner's tools).
+  """
+  def follow_tasks(%SpecDoc{} = spec, renames \\ %{}) do
+    {_, blocks} = Spec.blocks(spec.tasks)
+    titles = MapSet.new(blocks, & &1.title)
+
+    queue =
+      spec.queue
+      |> Enum.map(&Map.get(renames, &1, &1))
+      |> Enum.filter(&MapSet.member?(titles, &1))
+      |> Enum.uniq()
+
+    if queue == spec.queue, do: {:ok, spec}, else: set_queue(spec, queue)
   end
 
   @doc "Adds tasks (by title) to the end of the queue; ones already queued stay put."

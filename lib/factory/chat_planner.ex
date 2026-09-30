@@ -16,9 +16,11 @@ defmodule Factory.ChatPlanner do
   (`{:agent_stream, …}` on `"run:ID"`). If Kiro can't reach the tools, the planner
   replies with the whole plan as JSON, which replaces the tasks as before.
   """
+  import Ecto.Query, only: [from: 2]
   alias Factory.{Agents, Kiro, PlanTools, Repo, Runs, Specs}
   alias Factory.Runs.Run
   alias Factory.Specs.{Planner, TaskCheck}
+  alias Factory.Specs.Spec, as: SpecDoc
 
   @doc """
   Whether a chat message is a plan review asked with the Review plan button, which
@@ -152,15 +154,20 @@ defmodule Factory.ChatPlanner do
   end
 
   defp start_request(run, planner, files, prompt, mode) do
-    dir = run.settings["project_dir"] || Kiro.config(:workspace)
+    dir = Kiro.workdir(run)
     generation = run.planner_generation
-    prompt = Map.put(prompt, :model, planning_model(planner))
+    # What the live bubble needs that holds for the whole pass, read once.
+    progress = progress(run)
+    show = &show_progress(run.id, planner, &1, progress)
+
+    prompt =
+      prompt
+      |> Map.put(:model, planning_model(planner))
+      |> Map.put(:on_tool, &show.(Planner.describe_tool(&1, dir)))
 
     Agents.set_activity(planner.id, "running", prompt.doing)
 
-    show_progress(
-      run.id,
-      planner,
+    show.(
       if(String.starts_with?(prompt.doing, "Planning"),
         do: "Reading the project…",
         else: prompt.doing <> "…"
@@ -171,7 +178,7 @@ defmodule Factory.ChatPlanner do
       # On the planner's own Kiro session, which keeps the conversation between
       # messages; a one-off session when that one is busy in another folder.
       result =
-        case plan_in_session(run, planner, prompt, generation, dir, mode) do
+        case plan_in_session(run, planner, prompt, generation, mode) do
           {:error, :busy} -> plan_once(run, planner, prompt, generation, dir, mode)
           result -> result
         end
@@ -183,7 +190,7 @@ defmodule Factory.ChatPlanner do
     :ok
   end
 
-  defp plan_in_session(run, planner, prompt, generation, dir, mode) do
+  defp plan_in_session(run, planner, prompt, generation, mode) do
     {brief, ask} = prompt.parts
 
     brief =
@@ -201,7 +208,7 @@ defmodule Factory.ChatPlanner do
         stream: false,
         activity: prompt.doing,
         model: prompt.model,
-        on_tool: &show_progress(run.id, planner, Planner.describe_tool(&1, dir)),
+        on_tool: prompt.on_tool,
         planning: %{
           generation: generation,
           notify: self(),
@@ -228,7 +235,7 @@ defmodule Factory.ChatPlanner do
              allow: ["read", "search", "look"],
              mcp_servers: [PlanTools.mcp_server(token)],
              reply: :last,
-             on_tool: &show_progress(run.id, planner, Planner.describe_tool(&1, dir)),
+             on_tool: prompt.on_tool,
              usage: %{source: "plan_chat", run_id: run.id, agent_id: planner.id}
            ) do
       read_result(reply, generation, mode == :scope)
@@ -331,23 +338,38 @@ defmodule Factory.ChatPlanner do
   end
 
   # The plan replaces the spec's tasks: the planner rethinks it from everything asked.
+  # Tasks approved on the Spec page stay as they are, as with the plan tools.
   defp finish(run, planner, files, {:ok, %{reply: reply, tasks: tasks}}) do
-    {:ok, _spec} =
-      Specs.update_spec(Specs.for_run(run), %{tasks: Planner.to_markdown(tasks, 1) <> "\n"})
+    spec = Specs.for_run(run)
 
-    run = Runs.get_run(run.id)
-    Agents.set_activity(planner.id, "idle", nil)
+    if SpecDoc.approved?(spec, "tasks") do
+      Agents.set_activity(planner.id, "idle", nil)
 
-    post(
-      run,
-      planner,
-      blank(reply, "Here's how I'd do it."),
-      %{
-        "tasks" => Enum.map(tasks, & &1["title"]),
-        "spec_hint" => files == []
-      },
-      ["start"]
-    )
+      post(
+        run,
+        planner,
+        blank(reply, "Here's how I'd do it.") <>
+          "\n\nThe tasks are approved on the Spec page, so I left them as they are. " <>
+          "Reopen them there to change them.",
+        %{}
+      )
+    else
+      {:ok, spec} = Specs.update_spec(spec, %{tasks: Planner.to_markdown(tasks, 1) <> "\n"})
+      {:ok, _spec} = Specs.follow_tasks(spec)
+      run = Runs.get_run(run.id)
+      Agents.set_activity(planner.id, "idle", nil)
+
+      post(
+        run,
+        planner,
+        blank(reply, "Here's how I'd do it."),
+        %{
+          "tasks" => Enum.map(tasks, & &1["title"]),
+          "spec_hint" => files == []
+        },
+        ["start"]
+      )
+    end
   end
 
   defp finish(run, planner, _files, {:error, reason}) do
@@ -391,10 +413,15 @@ defmodule Factory.ChatPlanner do
   Shows in the planner's live bubble what it's doing (`activity`) and the tasks so far,
   read from the run's spec. `planner` needs its `id` and `name`.
   """
-  def show_progress(run_id, planner, activity) do
-    run = Runs.get_run(run_id)
-    review? = match?(%{}, run) and review?(run)
+  def show_progress(run_id, planner, activity),
+    do: show_progress(run_id, planner, activity, progress(Repo.get(Run, run_id)))
 
+  # What the bubble needs that holds while the planner works: whether the run is a
+  # review, and the spec its tasks are in. A pass reads it once, not on every tool call.
+  defp progress(%Run{} = run), do: %{review?: review?(run), spec_id: run.spec_id}
+  defp progress(nil), do: %{review?: false, spec_id: nil}
+
+  defp show_progress(run_id, planner, activity, %{review?: review?, spec_id: spec_id}) do
     # The plan tools report `:writing` as the planner writes the plan.
     activity =
       case activity do
@@ -402,10 +429,12 @@ defmodule Factory.ChatPlanner do
         text -> text
       end
 
+    # Only the tasks' text: they change as the planner writes them.
     tasks =
-      with %{spec_id: id} when is_integer(id) <- run,
-           %{} = spec <- Specs.get_spec(id),
-           [_ | _] = tasks <- Specs.tasks(spec) do
+      with id when is_integer(id) <- spec_id,
+           text when is_binary(text) <-
+             Repo.one(from s in SpecDoc, where: s.id == ^id, select: s.tasks),
+           [_ | _] = tasks <- Factory.Spec.parse_tasks(text) do
         "\n\n**#{if review?, do: "Checks so far", else: "Tasks so far"}**\n\n" <>
           (tasks
            |> Enum.with_index(1)

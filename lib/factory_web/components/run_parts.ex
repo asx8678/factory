@@ -2,7 +2,7 @@ defmodule FactoryWeb.RunParts do
   @moduledoc "Pieces shared by the pages about runs: icons, the run type badge, usage and state."
   use FactoryWeb, :html
   alias Factory.Runs.Types
-  alias FactoryWeb.UsageMeter, as: Fmt
+  alias FactoryWeb.Usage, as: Fmt
 
   # Icon class names are written out in full so Tailwind's heroicons plugin sees them.
   @type_icons %{

@@ -10,12 +10,16 @@ defmodule FactoryWeb.SpecsLive do
 
   def mount(_params, _session, socket) do
     if connected?(socket), do: Specs.subscribe()
-    specs = Specs.list_specs()
+
+    socket =
+      socket
+      |> assign(page_title: "Specs", base: nil, specs_reload: nil)
+      |> stream_configure(:specs, dom_id: &"spec-#{&1.id}")
+      |> load()
 
     {:ok,
      socket
-     |> assign(page_title: "Specs", specs: specs, adding: specs == [])
-     |> assign(base_specs: Specs.list_base_specs(), base: nil, used_in: used_in())
+     |> assign(adding: socket.assigns.specs_empty?)
      |> allow_upload(:base_file,
        accept: ~w(.md .markdown .txt),
        max_entries: 1,
@@ -31,14 +35,27 @@ defmodule FactoryWeb.SpecsLive do
      )}
   end
 
-  def handle_info({:specs_changed}, socket),
-    do:
-      {:noreply,
-       assign(socket,
-         specs: Specs.list_specs(),
-         base_specs: Specs.list_base_specs(),
-         used_in: used_in()
-       )}
+  # Every save of any spec says the list changed (each pause in typing in its editor,
+  # too): reload once per short while rather than once per save.
+  def handle_info({:specs_changed}, socket) do
+    if socket.assigns.specs_reload do
+      {:noreply, socket}
+    else
+      {:noreply, assign(socket, specs_reload: Process.send_after(self(), :reload_specs, 250))}
+    end
+  end
+
+  def handle_info(:reload_specs, socket),
+    do: {:noreply, socket |> assign(specs_reload: nil) |> load()}
+
+  defp load(socket) do
+    specs = Specs.list_specs()
+
+    socket
+    |> assign(specs_empty?: specs == [])
+    |> assign(base_specs: Specs.list_base_specs(), used_in: used_in())
+    |> stream(:specs, specs, reset: true)
+  end
 
   # Base specs: written or uploaded in a window, then kept.
 
@@ -112,7 +129,7 @@ defmodule FactoryWeb.SpecsLive do
         &cancel_upload(&2, :files, &1.ref)
       )
 
-    {:noreply, assign(socket, adding: socket.assigns.specs == [])}
+    {:noreply, assign(socket, adding: socket.assigns.specs_empty?)}
   end
 
   # The review box only appears once a file is added, so until it's unticked it's on.
@@ -128,9 +145,12 @@ defmodule FactoryWeb.SpecsLive do
       nil ->
         {:noreply, socket}
 
+      # Gone from the list now; the rest follows with the next reload.
       spec ->
         {:ok, _} = Specs.delete_spec(spec)
-        {:noreply, put_flash(socket, :info, "Deleted #{spec.name}.")}
+
+        {:noreply,
+         socket |> stream_delete(:specs, spec) |> put_flash(:info, "Deleted #{spec.name}.")}
     end
   end
 
@@ -249,7 +269,7 @@ defmodule FactoryWeb.SpecsLive do
         </label>
 
         <p :for={err <- upload_errors(@uploads.files)} class="text-xs text-error">
-          {upload_error(err)}
+          {upload_error(err, @uploads.files)}
         </p>
 
         <ul :if={@uploads.files.entries != []} class="space-y-1 text-sm">
@@ -265,7 +285,7 @@ defmodule FactoryWeb.SpecsLive do
               :for={err <- upload_errors(@uploads.files, entry)}
               class="text-xs text-error"
             >
-              {upload_error(err)}
+              {upload_error(err, @uploads.files)}
             </span>
             <button
               type="button"
@@ -302,19 +322,19 @@ defmodule FactoryWeb.SpecsLive do
 
         <div class="flex gap-2">
           <button class="btn btn-primary btn-sm">Create spec</button>
-          <button :if={@specs != []} type="button" phx-click="cancel" class="btn btn-ghost btn-sm">
+          <button :if={!@specs_empty?} type="button" phx-click="cancel" class="btn btn-ghost btn-sm">
             Cancel
           </button>
         </div>
       </.form>
 
-      <p :if={@specs == []} class="max-w-xl text-sm text-base-content/55">
+      <p :if={@specs_empty?} class="max-w-xl text-sm text-base-content/55">
         Each spec has four steps, written in order: the overview (the main spec),
         requirements (what it must do), design (how it's built) and tasks (the
         checklist agents work through).
       </p>
 
-      <div :if={@specs != []} class="overflow-x-auto">
+      <div :if={!@specs_empty?} class="overflow-x-auto">
         <table class="w-full text-sm">
           <thead class="text-left text-[13px] text-base-content/55">
             <tr class="border-b border-base-300">
@@ -327,11 +347,11 @@ defmodule FactoryWeb.SpecsLive do
               <th class="w-10 py-2"><span class="sr-only">Actions</span></th>
             </tr>
           </thead>
-          <tbody>
+          <tbody id="specs" phx-update="stream">
             <tr
-              :for={s <- @specs}
+              :for={{id, s} <- @streams.specs}
               phx-click={JS.navigate(~p"/specs/#{s.id}")}
-              id={"spec-#{s.id}"}
+              id={id}
               class="group cursor-pointer border-b border-base-300 hover:bg-base-200"
             >
               <td class="py-2 pr-4">
@@ -559,14 +579,6 @@ defmodule FactoryWeb.SpecsLive do
       {:noreply, socket}
     end
   end
-
-  defp upload_error(:too_large), do: "larger than 2 MB"
-  defp upload_error(:not_accepted), do: "only .md and .txt files"
-
-  defp upload_error(:too_many_files),
-    do: "up to 4 files: the main spec, requirements, design and tasks"
-
-  defp upload_error(err), do: to_string(err)
 
   attr :spec, Spec, required: true
 

@@ -8,9 +8,10 @@ defmodule Factory.Spec do
   @checkbox ~r/^[-*] \[[ xX]\]\s+(?:(\d+(?:\.\d+)*)\.?\s+)?(.+)$/
   @numbered ~r/^(\d+)[.)]\s+(.+)$/
 
-  # A task's labelled sub-items (see `blocks/1`).
-  @objective ~r/^\*{0,2}Objective:?\*{0,2}:?\s*/i
-  @verify ~r/^\*{0,2}(Verify|Verification):?\*{0,2}:?\s*/i
+  # A task's labelled sub-items (see `blocks/1`). The colon makes the label, bold or not
+  # (`Verify:`, `**Verify:**`, `**Verify**:`), so a step that starts "Verifying…" stays a step.
+  @objective ~r/^\*{0,2}Objective(?::\*{0,2}|\*{0,2}:)\s*/i
+  @verify ~r/^\*{0,2}(?:Verify|Verification)(?::\*{0,2}|\*{0,2}:)\s*/i
   @model ~r/^_?\*{0,2}Model:?\*{0,2}:?\s*|_$/i
   @agent ~r/^_?\*{0,2}Agent:?\*{0,2}:?\s*|_$/i
 
@@ -157,13 +158,6 @@ defmodule Factory.Spec do
   end
 
   defp value(line, label), do: line |> String.replace(label, "") |> String.trim()
-
-  @doc """
-  Rewrites a block with a new title, steps (details) and requirements, keeping its
-  bullet, checkbox and number, and its objective, checks and model.
-  """
-  def edit_block(block, title, details, requirements),
-    do: edit_block(block, %{title: title, details: details, requirements: requirements})
 
   @doc """
   Rewrites a block with the fields in `changes` (`:title`, `:objective`, `:details`,

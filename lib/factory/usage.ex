@@ -225,16 +225,34 @@ defmodule Factory.Usage do
         {:month, date} -> scoped(Event, {:month, date})
       end
 
-    events =
-      query
-      |> filtered(filters)
-      |> with_local_time()
-      |> preload([:run, :spec])
-      |> Repo.all()
-
-    events
+    # Summed in the database, one row per session and kind of work, with only the
+    # title and type of its run or spec rather than the whole row.
+    query
+    |> filtered(filters)
+    |> join(:left, [e], r in Factory.Runs.Run, as: :session_run, on: r.id == e.run_id)
+    |> join(:left, [e], s in Factory.Specs.Spec, as: :session_spec, on: s.id == e.spec_id)
+    |> group_by([e], [e.run_id, selected_as(:spec_session), e.source])
+    |> select([e, session_run: r, session_spec: s], %{
+      run_id: e.run_id,
+      # A spec's calls outside any run; a run's calls are the run's.
+      spec_id:
+        selected_as(
+          fragment("CASE WHEN ? IS NULL THEN ? END", e.run_id, e.spec_id),
+          :spec_session
+        ),
+      source: e.source,
+      run_title: max(r.title),
+      run_kind: max(r.kind),
+      spec_name: max(s.name),
+      credits: coalesce(sum(e.credits), 0.0),
+      tokens: coalesce(sum(e.input_tokens + e.output_tokens), 0),
+      calls: count(e.id),
+      first_at: type(min(local_time_of(e.inserted_at)), :naive_datetime_usec),
+      last_at: type(max(local_time_of(e.inserted_at)), :naive_datetime_usec)
+    })
+    |> Repo.all()
     |> Enum.group_by(&session_key/1)
-    |> Enum.map(fn {key, events} -> summarize(key, events) end)
+    |> Enum.map(fn {key, rows} -> summarize(key, rows) end)
     |> sort(filters["sort"])
   end
 
@@ -292,42 +310,35 @@ defmodule Factory.Usage do
     from e in query, join: r in Factory.Runs.Run, on: r.id == e.run_id, where: r.kind == ^type
   end
 
-  defp session_key(%Event{run_id: id}) when not is_nil(id), do: {:run, id}
-  defp session_key(%Event{spec_id: id}) when not is_nil(id), do: {:spec, id}
+  defp session_key(%{run_id: id}) when not is_nil(id), do: {:run, id}
+  defp session_key(%{spec_id: id}) when not is_nil(id), do: {:spec, id}
   defp session_key(_), do: :other
 
-  defp summarize(key, [first | _] = events) do
+  # A session from its rows, one per kind of work.
+  defp summarize(key, [first | _] = rows) do
     {title, kind} =
       case key do
         {:run, _} ->
-          {(first.run && first.run.title) || "Deleted run",
-           if(first.run && first.run.kind,
-             do: Factory.Runs.Types.short(first.run.kind),
-             else: "Chat"
-           )}
+          {first.run_title || "Deleted run",
+           if(first.run_kind, do: Factory.Runs.Types.short(first.run_kind), else: "Chat")}
 
         {:spec, _} ->
-          {(first.spec && first.spec.name) || "Deleted spec", "Spec"}
+          {first.spec_name || "Deleted spec", "Spec"}
 
         :other ->
           {"Other", "Other"}
       end
 
-    times = Enum.map(events, & &1.local_at)
-
     %{
       key: key,
       title: title,
       kind: kind,
-      credits: events |> Enum.map(& &1.credits) |> Enum.sum(),
-      tokens: events |> Enum.map(&(&1.input_tokens + &1.output_tokens)) |> Enum.sum(),
-      calls: length(events),
-      first_at: Enum.min(times, NaiveDateTime),
-      last_at: Enum.max(times, NaiveDateTime),
-      by_source:
-        events
-        |> Enum.group_by(& &1.source)
-        |> Map.new(fn {s, es} -> {s, es |> Enum.map(& &1.credits) |> Enum.sum()} end)
+      credits: rows |> Enum.map(& &1.credits) |> Enum.sum(),
+      tokens: rows |> Enum.map(&to_int(&1.tokens)) |> Enum.sum(),
+      calls: rows |> Enum.map(& &1.calls) |> Enum.sum(),
+      first_at: rows |> Enum.map(& &1.first_at) |> Enum.min(NaiveDateTime),
+      last_at: rows |> Enum.map(& &1.last_at) |> Enum.max(NaiveDateTime),
+      by_source: Map.new(rows, &{&1.source, &1.credits})
     }
   end
 
@@ -346,11 +357,15 @@ defmodule Factory.Usage do
 
   def param_to_key("other"), do: :other
 
-  def param_to_key(param) do
-    case String.split(param, "-", parts: 2) do
-      ["run", id] -> {:run, String.to_integer(id)}
-      ["spec", id] -> {:spec, String.to_integer(id)}
+  # nil for anything else a URL may hold, like "run-abc".
+  def param_to_key(param) when is_binary(param) do
+    with [kind, id] when kind in ["run", "spec"] <- String.split(param, "-", parts: 2),
+         {id, ""} <- Integer.parse(id) do
+      {String.to_existing_atom(kind), id}
+    else
       _ -> nil
     end
   end
+
+  def param_to_key(_param), do: nil
 end

@@ -15,7 +15,24 @@ defmodule Factory.Runs do
   @doc "Subscribes to `{:active_runs_changed}`: a run was made, removed or changed status."
   def subscribe_active, do: Phoenix.PubSub.subscribe(Factory.PubSub, "runs:active")
 
-  defp broadcast(topic, msg), do: Phoenix.PubSub.broadcast(Factory.PubSub, topic, msg)
+  # Broadcasts made inside `with_locked_run/2` wait for its transaction to commit: a page
+  # that reads the runs again when it hears (the active runs' count) sees the change, and
+  # a transaction rolled back tells nobody. Outside one they go at once.
+  @pending {__MODULE__, :pending_broadcasts}
+
+  defp broadcast(topic, msg) do
+    case Process.get(@pending) do
+      pending when is_list(pending) ->
+        if Repo.in_transaction?(),
+          do: Process.put(@pending, [{topic, msg} | pending]),
+          else: send_broadcast({topic, msg})
+
+      nil ->
+        send_broadcast({topic, msg})
+    end
+  end
+
+  defp send_broadcast({topic, msg}), do: Phoenix.PubSub.broadcast(Factory.PubSub, topic, msg)
 
   @doc "The latest runs, newest first, with their tasks: `limit` of them (default 30)."
   def list_runs(limit \\ 30) do
@@ -57,15 +74,48 @@ defmodule Factory.Runs do
 
   def get_run(id), do: Run |> Repo.get(id) |> Repo.preload(:tasks)
 
-  @doc "Reads the latest run under a row lock and applies a transactional callback."
+  @doc """
+  Reads the latest run under a row lock and applies a transactional callback. What the
+  callback broadcasts (`update_run/2`, `post/4`…) goes out once the transaction commits,
+  and not at all when it rolls back; a call inside another leaves that to the outer one.
+  """
   def with_locked_run(id, fun) do
-    Repo.transact(fn ->
-      case Repo.one(from r in Run, where: r.id == ^id, lock: "FOR UPDATE") do
-        nil -> {:error, :not_found}
-        run -> fun.(Repo.preload(run, :tasks))
+    outer = Process.get(@pending)
+    Process.put(@pending, outer || [])
+
+    result =
+      try do
+        Repo.transact(fn ->
+          case Repo.one(from r in Run, where: r.id == ^id, lock: "FOR UPDATE") do
+            nil -> {:error, :not_found}
+            run -> fun.(Repo.preload(run, :tasks))
+          end
+        end)
+      catch
+        kind, reason ->
+          drop_pending(outer)
+          :erlang.raise(kind, reason, __STACKTRACE__)
       end
-    end)
+
+    case {result, outer} do
+      {{:ok, _}, nil} ->
+        pending = Process.delete(@pending)
+        pending |> Enum.reverse() |> Enum.each(&send_broadcast/1)
+
+      # Committed inside another: they go when the outer one commits.
+      {{:ok, _}, _outer} ->
+        :ok
+
+      _rolled_back ->
+        drop_pending(outer)
+    end
+
+    result
   end
+
+  # Forgets what this transaction would have broadcast, keeping what an outer one has.
+  defp drop_pending(nil), do: Process.delete(@pending)
+  defp drop_pending(outer), do: Process.put(@pending, outer)
 
   def create_run(title \\ "New run") do
     with {:ok, run} <- %Run{} |> Run.changeset(%{title: title}) |> Repo.insert() do

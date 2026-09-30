@@ -13,7 +13,7 @@ defmodule Factory.RunTools do
 
   A token says which step a call is for. A run step on its agent's Kiro session
   (`Factory.Kiro.run_step/4`) is reached through the session's token
-  (`grant_session/1`): the session knows the step it's answering, and outside one (a
+  (`grant_session/2`): the session knows the step it's answering, and outside one (a
   chat message) the tools refuse. `grant/3` names a run and step directly. Either way
   a call only writes while the run is on that step (`progress["current"]`) and hasn't
   been cancelled or finished, so a step that was replaced or a run that moved on
@@ -65,9 +65,6 @@ defmodule Factory.RunTools do
 
   @task_tools ~w(get_tasks complete_tasks)
 
-  @doc "Every run tool, as MCP `tools/list` gives them."
-  def tools, do: @tools
-
   @doc """
   The tools `token` offers. A session's lists them all, as Kiro reads them once when
   the session starts; each call is checked against the step then (`call/3`).
@@ -111,8 +108,18 @@ defmodule Factory.RunTools do
 
   defp plan_tool?(name), do: Enum.any?(Factory.PlanTools.tools(), &(&1.name == name))
 
-  @doc "A token for a Kiro session (`:shared` or an agent id): calls act on the step it's answering."
-  def grant_session(key), do: Phoenix.Token.sign(FactoryWeb.Endpoint, @salt, %{session: key})
+  @doc """
+  A token for a Kiro session (`:shared` or an agent id): calls act on the step it's
+  answering. `nonce` ties it to the kiro-cli the session runs now (`Factory.Kiro.Session`
+  makes one for each), so calls with it stop working once the session restarts; calls
+  with a token that has none are refused.
+  """
+  def grant_session(key, nonce \\ nil)
+
+  def grant_session(key, nil), do: Phoenix.Token.sign(FactoryWeb.Endpoint, @salt, %{session: key})
+
+  def grant_session(key, nonce),
+    do: Phoenix.Token.sign(FactoryWeb.Endpoint, @salt, %{session: key, nonce: nonce})
 
   @doc "The MCP server to give Kiro for a step: Factory's, with the step's token."
   def mcp_server(token), do: Factory.PlanTools.mcp_server(token)
@@ -121,8 +128,9 @@ defmodule Factory.RunTools do
   def token?(token), do: match?({:ok, _}, verify(token))
 
   # A step's token is used within the step, so a day is plenty. A session's token lives
-  # as long as the session (it's minted when the session starts, which may be days
-  # ago); what gates it is that the session exists and is on a step (`resolve/1`).
+  # as long as its kiro-cli (it's minted when that starts, which may be days ago); what
+  # gates it is that the session exists, still runs that kiro-cli (the token's nonce)
+  # and is on a step (`resolve/1`).
   defp verify(token) do
     case Phoenix.Token.verify(FactoryWeb.Endpoint, @salt, token || "", max_age: :infinity) do
       {:ok, %{session: _}} = ok ->
@@ -142,10 +150,10 @@ defmodule Factory.RunTools do
   """
   def call(token, name, args) when is_map(args) do
     case verify(token) do
-      {:ok, %{session: key}} ->
+      {:ok, %{session: _} = grant} ->
         cond do
-          plan_tool?(name) -> plan_in_session(key, name, args)
-          name == "get_tasks" -> tasks_in_session(key, token)
+          plan_tool?(name) -> plan_in_session(grant, name, args)
+          name == "get_tasks" -> tasks_in_session(grant, token)
           true -> call_step(token, name, args)
         end
 
@@ -157,10 +165,10 @@ defmodule Factory.RunTools do
   def call(_token, _name, _args), do: {:error, "The arguments must be an object."}
 
   # A planner's tool from a session: for the chat message it's answering, not a run step.
-  defp plan_in_session(key, name, args) do
+  defp plan_in_session(%{session: key} = grant, name, args) do
     with pid when is_pid(pid) <- Factory.Kiro.whereis(key),
          %{run_id: run_id, agent: agent, step: nil} = turn <-
-           Factory.Kiro.Session.current_turn(pid) do
+           Factory.Kiro.Session.current_turn(pid, grant[:nonce]) do
       Factory.PlanTools.call_in_turn(run_id, agent, name, args, turn[:planning])
     else
       %{step: %{}} -> {:error, "During a run step, work on the tasks as they are."}
@@ -171,9 +179,9 @@ defmodule Factory.RunTools do
   end
 
   # Reading the tasks is fine in a chat message too; in a run step it's the step's.
-  defp tasks_in_session(key, token) do
+  defp tasks_in_session(%{session: key} = grant, token) do
     with pid when is_pid(pid) <- Factory.Kiro.whereis(key),
-         %{run_id: run_id, step: nil} <- Factory.Kiro.Session.current_turn(pid),
+         %{run_id: run_id, step: nil} <- Factory.Kiro.Session.current_turn(pid, grant[:nonce]),
          %{} = run <- Runs.get_run(run_id) do
       {:ok, describe(run.tasks)}
     else
@@ -214,10 +222,11 @@ defmodule Factory.RunTools do
     end
   end
 
-  # A session's token stands for the step the session is answering right now.
-  defp resolve(%{session: key}) do
+  # A session's token stands for the step the session is answering right now, if the
+  # token was given to the kiro-cli it runs now.
+  defp resolve(%{session: key} = grant) do
     with pid when is_pid(pid) <- Factory.Kiro.whereis(key),
-         %{run_id: run_id, step: step} <- Factory.Kiro.Session.current_step(pid) do
+         %{run_id: run_id, step: step} <- Factory.Kiro.Session.current_step(pid, grant[:nonce]) do
       {:ok, %{run_id: run_id, step_id: step.id, tasks: step.tasks, verdict: step.verdict}}
     else
       _ ->

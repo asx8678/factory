@@ -20,7 +20,8 @@ defmodule Factory.KiroTest do
   test "/ask streams the reply into the chat and posts it with credits", %{run: run} do
     Chat.handle(run, "/ask Coder hello there")
 
-    assert_receive {:agent_stream, %{name: "Coder", text: "echo: "}}, 5_000
+    # Chunks close together go as one.
+    assert_receive {:agent_stream, %{name: "Coder", text: "echo: " <> _}}, 5_000
     assert_receive {:message, %{author: "Coder", body: "echo: hello there", meta: meta}}, 5_000
     assert meta["credits"] == 0.05
     assert meta["stop_reason"] == "end_turn"

@@ -314,6 +314,11 @@ defmodule Factory.Engine do
                 {:again, run, again} -> walk(run, steps, again)
                 nil -> walk(run, steps, rest)
               end
+
+            # Paused or cancelled while its tasks were verified: what was checked is
+            # kept, and nothing is opened again.
+            :stopped ->
+              nil
           end
 
         {:error, reason} ->
@@ -413,7 +418,7 @@ defmodule Factory.Engine do
 
   defp verify_each(run, step, output, todo) do
     model = Kiro.verify_model()
-    dir = run.settings["project_dir"] || Kiro.config(:workspace)
+    dir = Kiro.workdir(run)
     name = Kiro.model_name(model)
     count = if length(todo) == 1, do: "the task", else: "#{length(todo)} tasks"
 
@@ -423,20 +428,29 @@ defmodule Factory.Engine do
       meta: meta(step)
     )
 
+    # Pausing or cancelling takes effect between tasks, as it does while building.
     checked =
-      for task <- todo do
-        block = Factory.Verifier.spec_task(run, task)
+      todo
+      |> Enum.reduce_while([], fn task, checked ->
+        if Runs.get_run(run.id).status == "running" do
+          block = Factory.Verifier.spec_task(run, task)
 
-        result =
-          Factory.Verifier.verify(block, output, dir,
-            model: model,
-            usage: %{source: "verify_task", run_id: run.id, agent_id: step.agent && step.agent.id}
-          )
+          result =
+            Factory.Verifier.verify(block, output, dir,
+              model: model,
+              usage: %{
+                source: "verify_task",
+                run_id: run.id,
+                agent_id: step.agent && step.agent.id
+              }
+            )
 
-        {task, result}
-      end
-
-    set_activity(step.agent, "done", nil)
+          {:cont, [{task, result} | checked]}
+        else
+          {:halt, checked}
+        end
+      end)
+      |> Enum.reverse()
 
     record =
       Map.new(checked, fn {task, result} -> {"#{task.id}", verification(result, model)} end)
@@ -447,9 +461,21 @@ defmodule Factory.Engine do
 
     for {task, result} <- checked, do: say_verified(run, step, task, result, name)
 
-    case for({task, {:ok, %{passed: false} = r}} <- checked, do: {task, r}) do
-      [] -> {:ok, run}
-      failed -> verify_failed(run, step, failed)
+    failed = for {task, {:ok, %{passed: false} = r}} <- checked, do: {task, r}
+
+    cond do
+      # Stopped while the last one was checked, or before one: nothing goes back.
+      run.status != "running" ->
+        set_activity(step.agent, "idle", nil)
+        :stopped
+
+      failed == [] ->
+        set_activity(step.agent, "done", nil)
+        {:ok, run}
+
+      true ->
+        set_activity(step.agent, "done", nil)
+        verify_failed(run, step, failed)
     end
   end
 
@@ -634,14 +660,7 @@ defmodule Factory.Engine do
     case result do
       {:ok, reply} ->
         set_activity(step.agent, "done", nil)
-
-        {:ok, reply,
-         %{
-           "tokens" => prompt.tokens,
-           "bytes" => prompt.bytes,
-           "sha256" => prompt.sha256,
-           "omitted_bytes" => prompt.omitted_bytes
-         }}
+        {:ok, reply, sent(prompt)}
 
       {:error, reason} ->
         set_activity(step.agent, "error", reason)
@@ -1066,12 +1085,26 @@ defmodule Factory.Engine do
   defp set_activity(nil, _status, _activity), do: :ok
   defp set_activity(card, status, activity), do: Agents.set_activity(card.id, status, activity)
 
-  @doc "Runs left running when Factory stopped are paused, to resume by hand."
+  @doc """
+  Runs left queued or running when Factory stopped have no worker any more: they're
+  paused, with why in their progress, to resume by hand.
+  """
   def reset_runs do
     import Ecto.Query
 
-    Factory.Repo.update_all(from(r in Run, where: r.status == "running"),
-      set: [status: "paused"]
+    reason = "Factory restarted."
+
+    Factory.Repo.update_all(
+      from(r in Run,
+        where: r.status in ["queued", "running"],
+        update: [
+          set: [
+            status: "paused",
+            progress: fragment("? || jsonb_build_object('error', ?::text)", r.progress, ^reason)
+          ]
+        ]
+      ),
+      []
     )
   end
 

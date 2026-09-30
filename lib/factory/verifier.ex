@@ -9,7 +9,8 @@ defmodule Factory.Verifier do
   `Factory.Engine` verifies the tasks a building step marked done, before the run
   goes on, and sends the ones that fail back to that step.
   """
-  alias Factory.{Kiro, Spec, Specs}
+  import Factory.PromptText, only: [text: 1]
+  alias Factory.{Kiro, PromptText, Spec, Specs}
 
   @doc """
   The task as the run's spec writes it (`Factory.Spec.blocks/1`): its objective,
@@ -99,8 +100,7 @@ defmodule Factory.Verifier do
 
   @doc "Reads the verifying model's reply: `{:ok, %{passed:, checks:, fix:}}`."
   def parse(reply) do
-    with [json] <- Regex.run(~r/\{.*\}/s, reply || ""),
-         {:ok, %{} = data} <- JSON.decode(json) do
+    with {:ok, data} <- PromptText.json_object(reply) do
       checks =
         for c <- List.wrap(data["checks"]), is_map(c), is_binary(c["check"]) do
           %{
@@ -121,7 +121,4 @@ defmodule Factory.Verifier do
       _ -> {:error, "The verifying model's reply wasn't something Factory could read."}
     end
   end
-
-  defp text(s) when is_binary(s), do: String.trim(s)
-  defp text(_), do: ""
 end
