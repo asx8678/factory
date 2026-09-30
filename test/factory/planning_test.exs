@@ -26,14 +26,8 @@ defmodule Factory.PlanningTest do
 
   # The planner reaches Factory's plan tools over HTTP, as Kiro does (FactoryWeb.MCP).
   setup do
-    server =
-      start_supervised!(
-        {Bandit, plug: FactoryWeb.Endpoint, ip: :loopback, port: 0, startup_log: false}
-      )
-
-    {:ok, {_ip, port}} = ThousandIsland.listener_info(server)
-    Application.put_env(:factory, :mcp_url, "http://127.0.0.1:#{port}/mcp")
-    on_exit(fn -> Application.delete_env(:factory, :mcp_url) end)
+    start_mcp()
+    :ok
   end
 
   defp plan(run, planner, text, files \\ []) do

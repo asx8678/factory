@@ -71,6 +71,16 @@ defmodule Factory.WorkflowsTest do
     assert Agents.get_agent(planner.id) == nil
   end
 
+  test "a workflow whose job is no longer standard can be deleted like a custom one" do
+    # "Resolve an issue" was a standard workflow once; its row keeps the old key.
+    {:ok, retired} = Repo.insert(%Factory.Agents.Workflow{name: "Resolve an issue", key: "issue"})
+    {:ok, agent} = Agents.create_agent(%{name: "Fixer", workflow_id: retired.id})
+
+    assert {:ok, _} = Workflows.delete(retired)
+    assert Workflows.get(retired.id) == nil
+    assert Agents.get_agent(agent.id) == nil
+  end
+
   test "plain chats talk to the current workflow; a run to its own" do
     {:ok, mine} = Workflows.create("Mine")
     {:ok, mine} = Workflows.set_current(mine)
@@ -158,36 +168,27 @@ defmodule Factory.WorkflowsTest do
     assert Sources.agent_ids(source) == [agent.id]
   end
 
-  test "a failed clone rolls back without broadcasting partial records" do
-    {:ok, workflow} = Workflows.create("Cannot copy")
+  test "a clone copies a source that no longer validates, as it is" do
+    {:ok, workflow} = Workflows.create("Moved folder")
     {:ok, _} = Agents.create_agent(%{name: "Reader", workflow_id: workflow.id})
-    # A source whose required configuration was lost cannot be copied successfully.
+    # A folder source whose folder has since moved: a form would refuse it, a copy keeps it.
     Repo.insert!(%Sources.Source{
       workflow_id: workflow.id,
-      kind: "git",
-      name: "Invalid",
-      config: %{}
+      kind: "folder",
+      name: "Docs",
+      config: %{"path" => "/nowhere/that/exists"}
     })
 
-    Agents.subscribe()
-    parent = self()
+    {:ok, copy} = Workflows.clone(workflow)
+    assert [%{kind: "folder", config: %{"path" => "/nowhere/that/exists"}}] = Sources.list(copy.id)
+  end
 
-    worker =
-      start_supervised!(
-        {Task,
-         fn ->
-           receive do
-             :clone -> send(parent, {:cloned, Workflows.clone(workflow, "Rolled back")})
-           end
-         end}
-      )
+  test "a clone that can't be named fails without leaving a workflow behind" do
+    {:ok, workflow} = Workflows.create("Cannot copy")
+    {:ok, _} = Agents.create_agent(%{name: "Reader", workflow_id: workflow.id})
 
-    ref = Process.monitor(worker)
-    Ecto.Adapters.SQL.Sandbox.allow(Repo, self(), worker)
-    send(worker, :clone)
-    assert_receive {:cloned, {:error, %Ecto.Changeset{}}}, 5_000
-    assert_receive {:DOWN, ^ref, :process, ^worker, :normal}
-    # (No broadcast check: other async tests share the global graph topic.)
-    refute Repo.exists?(from w in Factory.Agents.Workflow, where: w.name == "Rolled back")
+    name = String.duplicate("x", 61)
+    assert {:error, %Ecto.Changeset{}} = Workflows.clone(workflow, name)
+    refute Repo.exists?(from w in Factory.Agents.Workflow, where: w.name == ^name)
   end
 end

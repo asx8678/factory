@@ -6,13 +6,18 @@ defmodule Factory.SpecsConcurrencyTest do
 
   test "concurrent spec attachments replace a complete task set under the parent lock" do
     parent = self()
+
+    # The run is committed for real, so it's removed whatever happens after this,
+    # including a failed assertion below (a run left behind would show in other tests).
+    on_exit(fn ->
+      Ecto.Adapters.SQL.Sandbox.unboxed_run(Repo, fn ->
+        Repo.delete_all(from r in Runs.Run, where: r.title == "Concurrent attachments")
+      end)
+    end)
+
     {creator, creator_ref} = unboxed_task(fn -> Runs.create_run("Concurrent attachments") end)
     assert_receive {:unboxed, ^creator, {:ok, run}}, 5_000
     assert_receive {:DOWN, ^creator_ref, :process, ^creator, :normal}
-
-    on_exit(fn ->
-      Ecto.Adapters.SQL.Sandbox.unboxed_run(Repo, fn -> Repo.delete!(run) end)
-    end)
 
     {first, first_ref} =
       unboxed_task(fn ->

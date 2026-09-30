@@ -70,7 +70,24 @@ if config_env() == :prod do
       You can generate one by calling: mix phx.gen.secret
       """
 
-  host = System.get_env("PHX_HOST") || "example.com"
+  bind_all? = System.get_env("PHX_BIND_ALL") in ~w(true 1)
+
+  # config/prod.exs forces SSL (with HSTS) for every host but localhost, so a Factory
+  # that other machines reach must know its own name: with the default below, anyone
+  # opening it over the network would be redirected to example.com and told to
+  # remember it.
+  host =
+    System.get_env("PHX_HOST") ||
+      if bind_all? do
+        raise """
+        environment variable PHX_HOST is missing.
+        PHX_BIND_ALL makes Factory listen on every interface, and production forces
+        HTTPS for every host but localhost, so it needs the name other machines open it
+        by. For example: PHX_HOST=factory.example.com
+        """
+      else
+        "example.com"
+      end
 
   config :factory, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
@@ -79,13 +96,10 @@ if config_env() == :prod do
     http: [
       # Factory has no sign-in and can browse files, read environment variables and
       # run commands on this machine, so it only listens on this machine unless
-      # PHX_BIND_ALL=true is set (put it behind something that authenticates first).
+      # PHX_BIND_ALL=true is set (put it behind something that authenticates first,
+      # and set PHX_HOST to the name it's reached by).
       # See https://bandit.hexdocs.pm/Bandit.html#t:options/0 for IPv6 vs IPv4.
-      ip:
-        if(System.get_env("PHX_BIND_ALL") in ~w(true 1),
-          do: {0, 0, 0, 0, 0, 0, 0, 0},
-          else: {127, 0, 0, 1}
-        )
+      ip: if(bind_all?, do: {0, 0, 0, 0, 0, 0, 0, 0}, else: {127, 0, 0, 1})
     ],
     secret_key_base: secret_key_base
 

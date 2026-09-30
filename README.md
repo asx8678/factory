@@ -9,10 +9,13 @@ push, open a pull request, update a ticket, or send a message.
 
 ## What you need
 
-* Elixir 1.17+ and PostgreSQL (the dev config expects `postgres`/`postgres` on localhost)
+* Elixir 1.18+ and PostgreSQL (the dev config expects `postgres`/`postgres` on localhost)
 * Node.js, for the Svelte Flow canvas (`mix assets.setup` runs `npm install`)
 * `kiro-cli` 2.24 or later, signed in (`kiro-cli login`). Factory looks for it on your
   `PATH`, else at `~/.local/bin/kiro-cli`; see `config :factory, :kiro` in `config/config.exs`.
+* `git`, to clone the repositories you review and read what there is to review in a
+  project folder. GitHub's `gh`, signed in, is optional: with it the chat lists a
+  repository's open pull requests.
 
 ## Run it
 
@@ -23,6 +26,22 @@ mix phx.server
 
 Then open [localhost:4000](http://localhost:4000), choose a project folder and describe
 what you want built. Kiro's logs go to `tmp/kiro-logs`; cloned data sources to `tmp/sources`.
+
+## Review a pull request
+
+Pick "Review a PR" in the chat and paste a link: a pull request
+(`https://github.com/owner/repo/pull/12`), a repository (`https://github.com/owner/repo`
+or `git@github.com:owner/repo.git`), or a folder on your machine. Factory clones the
+repository over SSH into `~/repo-reviews/<owner>/<repo>` (set
+`config :factory, :review_dir` to put it elsewhere), fetches it again when you paste
+the same link later, and fetches a pull request as its own branch, `pr-12`. Then it
+shows what there is to review in the folder: the branch it's on, the branches with the
+latest work and how far ahead they are, and, with `gh` signed in, the open pull requests.
+
+You need `git` and an SSH key that can read the repository (`ssh -T git@github.com`
+tells you whether GitHub accepts it); git runs without a terminal, so a key that needs a
+passphrase typed in fails rather than waits. An SSH host Factory hasn't seen before is
+trusted on first contact and its key remembered.
 
 ## Environment variables
 

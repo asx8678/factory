@@ -333,7 +333,7 @@ defmodule Factory.KiroTest do
     for options <- ["allow-only", "no-options"] do
       text = "write [test:#{options}]"
       assert {:ok, "[cancelled] echo: " <> ^text} = Kiro.ask(text)
-      assert :ok = Kiro.prompt(agent, run.id, text)
+      assert {:ok, _} = Kiro.prompt(agent, run.id, text)
       assert_receive {:message, %{author: "Coder", body: body}}, 5_000
       assert body =~ "[cancelled] echo: #{text}"
       assert body =~ "Denied: Write notes.md"
@@ -349,7 +349,7 @@ defmodule Factory.KiroTest do
     assert {:ok, "[cancelled] echo: write [test:reject-only]"} =
              Kiro.ask("write [test:reject-only]", allow: ["edit"])
 
-    assert :ok = Kiro.prompt(agent, run.id, "write [test:reject-only]")
+    assert {:ok, _} = Kiro.prompt(agent, run.id, "write [test:reject-only]")
     assert_receive {:message, %{author: "Coder", body: body}}, 5_000
     assert body =~ "[cancelled]"
     assert body =~ "Denied: Write notes.md"
@@ -385,10 +385,12 @@ defmodule Factory.KiroTest do
     state = :sys.get_state(Kiro.whereis(agent.id))
 
     for {dir, result} <- results do
-      assert result == if(dir == state.workdir, do: :ok, else: {:error, :busy})
+      if dir == state.workdir,
+        do: assert({:ok, _} = result),
+        else: assert(result == {:error, :busy})
     end
 
-    assert Enum.count(results, &(elem(&1, 1) == :ok)) == 4
+    assert Enum.count(results, &match?({_, {:ok, _}}, &1)) == 4
   end
 
   @tag :tmp_dir
@@ -406,11 +408,11 @@ defmodule Factory.KiroTest do
     agent: agent,
     run: run
   } do
-    assert :ok = Kiro.prompt(agent, run.id, "first [test:wait]")
+    assert {:ok, _} = Kiro.prompt(agent, run.id, "first [test:wait]")
     assert_receive {:agent_stream, %{text: "waiting"}}, 5_000
     pid = Kiro.whereis(agent.id)
     old = :sys.get_state(pid)
-    assert :ok = Kiro.prompt(agent, run.id, "second [test:wait]")
+    assert {:ok, _} = Kiro.prompt(agent, run.id, "second [test:wait]")
 
     send(pid, {:request_timeout, old.turn.request_id})
     assert_receive {:message, %{author: "Coder", body: "waiting"}}, 5_000
@@ -449,8 +451,8 @@ defmodule Factory.KiroTest do
     run: run
   } do
     configure(:kiro, prompt_timeout: 200)
-    assert :ok = Kiro.prompt(agent, run.id, "[test:wait]")
-    assert :ok = Kiro.prompt(agent, run.id, "next")
+    assert {:ok, _} = Kiro.prompt(agent, run.id, "[test:wait]")
+    assert {:ok, _} = Kiro.prompt(agent, run.id, "next")
     assert_receive {:message, %{author: "Coder", body: "waiting"}}, 5_000
     assert_receive {:message, %{author: "Coder", body: body}}, 5_000
     assert String.ends_with?(body, "\n\nnext")
@@ -470,10 +472,10 @@ defmodule Factory.KiroTest do
       File.write!(Path.join(dir, ".fake-kiro-stall"), method)
       {:ok, run} = Runs.update_run(run, %{settings: %{"project_dir" => dir}})
       agent = %{agent | model: "claude-haiku-4.5"}
-      assert :ok = Kiro.prompt(agent, run.id, "first")
+      assert {:ok, _} = Kiro.prompt(agent, run.id, "first")
       pid = Kiro.whereis(agent.id)
       ref = Process.monitor(pid)
-      assert :ok = Kiro.prompt(agent, run.id, "second")
+      assert {:ok, _} = Kiro.prompt(agent, run.id, "second")
 
       for _ <- 1..2 do
         assert_receive {:message, %{body: body}}, 5_000
@@ -487,7 +489,7 @@ defmodule Factory.KiroTest do
   end
 
   test "completed RPC deadlines cannot fail a later turn", %{agent: agent, run: run} do
-    assert :ok = Kiro.prompt(agent, run.id, "[test:wait]")
+    assert {:ok, _} = Kiro.prompt(agent, run.id, "[test:wait]")
     assert_receive {:agent_stream, %{text: "waiting"}}, 5_000
     pid = Kiro.whereis(agent.id)
     state = :sys.get_state(pid)
@@ -504,7 +506,7 @@ defmodule Factory.KiroTest do
     configure(:context, max_log_entries: 4)
 
     for n <- 1..4 do
-      assert :ok = Kiro.prompt(agent, run.id, "turn #{n}")
+      assert {:ok, _} = Kiro.prompt(agent, run.id, "turn #{n}")
       assert_receive {:message, %{author: "Coder"}}, 5_000
     end
 
@@ -512,7 +514,7 @@ defmodule Factory.KiroTest do
     assert Enum.map(state.log, & &1.id) == ["e8", "e7", "e6", "e5"]
     assert state.log_dropped == 4
     assert :ok = Kiro.compact(agent)
-    assert :ok = Kiro.prompt(agent, run.id, "next")
+    assert {:ok, _} = Kiro.prompt(agent, run.id, "next")
     assert_receive {:message, %{author: "Coder", body: body}}, 5_000
     assert body =~ "[omitted 4 older log entries due to the session retention limit]"
     assert body =~ "turn 4"
@@ -523,7 +525,7 @@ defmodule Factory.KiroTest do
     configure(:context, max_log_bytes: 1600)
 
     for _ <- 1..3 do
-      assert :ok = Kiro.prompt(agent, run.id, String.duplicate("x", 500))
+      assert {:ok, _} = Kiro.prompt(agent, run.id, String.duplicate("x", 500))
       assert_receive {:message, %{author: "Coder"}}, 5_000
     end
 
@@ -536,14 +538,6 @@ defmodule Factory.KiroTest do
   defp send_rpc(pid, port, message),
     do: send(pid, {port, {:data, {:eol, JSON.encode!(message)}}})
 
-  defp configure(key, values) do
-    previous = Application.get_env(:factory, key)
-    Application.put_env(:factory, key, Keyword.merge(previous || [], values))
-
-    on_exit(fn ->
-      if previous,
-        do: Application.put_env(:factory, key, previous),
-        else: Application.delete_env(:factory, key)
-    end)
-  end
+  defp configure(key, values),
+    do: put_app_env(key, Keyword.merge(Application.get_env(:factory, key) || [], values))
 end

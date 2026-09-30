@@ -10,7 +10,9 @@ defmodule Factory.Repos do
   `ssh://git@host/owner/repo`), a web link to the repository or to one of its pull
   requests (made into the SSH address), or a local repository's path or `file://` URL.
   git runs without a terminal: a key it can't use, or a host that asks for a password,
-  makes it fail rather than wait. A host it hasn't seen before is trusted the first time.
+  makes it fail rather than wait. An SSH host it hasn't seen before is trusted on first
+  contact (`StrictHostKeyChecking=accept-new`): its key is remembered, and a later
+  change to it makes git refuse the connection.
   """
 
   @timeout 5 * 60_000
@@ -73,6 +75,10 @@ defmodule Factory.Repos do
 
       task = Task.async(fn -> clone_or_fetch(repo, dir) end)
 
+      # Past the timeout the task is killed, but the git process it started (a child
+      # of the VM, not of the task) keeps running until it finishes or fails on its
+      # own; there's no port to close from here. A later clone of the same link finds
+      # whatever it left in `dir` and either fetches it again or refuses to touch it.
       case Task.yield(task, @timeout) || Task.shutdown(task, :brutal_kill) do
         {:ok, result} ->
           result
@@ -97,7 +103,8 @@ defmodule Factory.Repos do
             {:error, "#{dir} already holds another repository, so Factory left it alone."}
         end
 
-      File.exists?(dir) and File.ls!(dir) != [] ->
+      # A file where the folder would go, or a folder with something else in it.
+      File.exists?(dir) and (not File.dir?(dir) or File.ls!(dir) != []) ->
         {:error, "#{dir} already exists and isn't this repository, so Factory left it alone."}
 
       true ->
@@ -142,21 +149,19 @@ defmodule Factory.Repos do
   # A folder name from an owner or repository name.
   defp safe(name), do: String.replace(name, ~r/[^\w.-]/, "-")
 
+  # git without a terminal, over SSH that won't ask anything (see the moduledoc).
+  @git_env [
+    {"GIT_TERMINAL_PROMPT", "0"},
+    {"GIT_SSH_COMMAND",
+     "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15"}
+  ]
+
   defp git(dir, args) do
-    args = if dir, do: ["-C", dir | args], else: args
-
-    env = [
-      {"GIT_TERMINAL_PROMPT", "0"},
-      {"GIT_SSH_COMMAND",
-       "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15"}
-    ]
-
-    case System.cmd("git", args, stderr_to_stdout: true, env: env) do
-      {out, 0} -> {:ok, String.trim(out)}
-      {out, _} -> {:error, explain(out)}
+    case Factory.GitCmd.run(dir, args, env: @git_env) do
+      {:ok, out} -> {:ok, out}
+      {:error, :not_installed} -> {:error, "git isn't installed."}
+      {:error, out} -> {:error, explain(out)}
     end
-  rescue
-    _ -> {:error, "git isn't installed."}
   end
 
   # git's errors, in plain words.

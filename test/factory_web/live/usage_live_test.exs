@@ -12,8 +12,7 @@ defmodule FactoryWeb.UsageLiveTest do
 
     {:ok, _} = Usage.record(%{source: "review", spec_id: spec.id, credits: 1.25})
 
-    {:ok, view, html} = live(conn, ~p"/usage")
-    assert html =~ "1.75"
+    {:ok, view, _html} = live(conn, ~p"/usage")
     assert has_element?(view, "#usage-chart")
     assert has_element?(view, "#usage-meter", "1.75")
     assert has_element?(view, "#usage-sessions li:first-child", "CSV export")
@@ -29,7 +28,7 @@ defmodule FactoryWeb.UsageLiveTest do
 
     # New calls show up live, in the header too.
     {:ok, _} = Usage.record(%{source: "review", spec_id: spec.id, credits: 1.0})
-    assert render(view) =~ "2.25"
+    assert has_element?(view, "#usage-meter", "2.25")
 
     # The same days as a table.
     {:ok, view, _html} = live(conn, ~p"/usage?view=table")

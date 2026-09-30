@@ -28,6 +28,7 @@ defmodule FactoryWeb.ConnCase do
       import Plug.Conn
       import Phoenix.ConnTest
       import FactoryWeb.ConnCase
+      import Factory.TestHelpers
     end
   end
 

@@ -49,9 +49,10 @@ defmodule FactoryWeb.WorkflowsPageTest do
 
   test "actions are added from the palette and set up in their own panel", %{conn: conn} do
     {:ok, w} = Workflows.create("Ship")
-    {:ok, view, html} = live(conn, ~p"/workflows/#{w.id}")
-    # The canvas gets the kinds of action for its palette.
-    assert html =~ "Create GitHub PR" and html =~ "API request"
+    {:ok, view, _html} = live(conn, ~p"/workflows/#{w.id}")
+    # The canvas gets the kinds of action for its palette, in its graph.
+    assert has_element?(view, "#agent-flow-#{w.id}[data-graph*='Create GitHub PR']")
+    assert has_element?(view, "#agent-flow-#{w.id}[data-graph*='API request']")
 
     render_hook(view, "add_action", %{"type" => "email", "x" => 300, "y" => 0})
     [card] = Agents.list_agents(w.id)

@@ -4,17 +4,11 @@ defmodule FactoryWeb.UISpecRegressionTest do
   alias Factory.Specs
 
   defp open_spec do
-    {:ok, spec} =
-      Specs.create_spec("Tasks", %{
-        requirements: "# R",
-        design: "# D",
-        tasks: "- [ ] 1. First\n- [ ] 2. Second"
-      })
-
-    {:ok, spec} = Specs.approve(spec, "overview")
-    {:ok, spec} = Specs.approve(spec, "requirements")
-    {:ok, spec} = Specs.approve(spec, "design")
-    spec
+    approved_spec("Tasks", %{
+      requirements: "# R",
+      design: "# D",
+      tasks: "- [ ] 1. First\n- [ ] 2. Second"
+    })
   end
 
   test "remote task reorder clears selection, expansion and stale edits", %{conn: conn} do

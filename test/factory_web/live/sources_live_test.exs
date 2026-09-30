@@ -99,9 +99,10 @@ defmodule FactoryWeb.SourcesLiveTest do
     render_hook(view, "delete_sources", %{"ids" => ["source-#{source.id}"]})
     assert Sources.get(source.id) == nil
 
-    # Another workflow has its own sources.
-    {:ok, _view, html} = live(conn, ~p"/workflows/#{Workflows.standard("bug").id}")
-    assert html =~ "&quot;sources&quot;:[]"
+    # Another workflow has its own sources: its canvas starts with none.
+    bug = Workflows.standard("bug")
+    {:ok, view, _html} = live(conn, ~p"/workflows/#{bug.id}")
+    assert has_element?(view, ~s(#agent-flow-#{bug.id}[data-graph*='"sources":[]']))
   end
 
   test "Browse picks a folder or file instead of typing its path", %{conn: conn} do

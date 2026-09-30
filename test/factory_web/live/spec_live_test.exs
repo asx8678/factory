@@ -6,28 +6,29 @@ defmodule FactoryWeb.SpecLiveTest do
   test "creating a spec opens it on the overview step", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/specs")
 
-    {:ok, _view, html} =
+    {:ok, view, _html} =
       view
       |> form("#new-spec", %{name: "Password reset"})
       |> render_submit()
       |> follow_redirect(conn)
 
-    assert html =~ "Password reset"
-    assert html =~ "Skip overview"
+    assert has_element?(view, "#spec-name input[value='Password reset']")
+    assert has_element?(view, "#approve", "Skip overview")
   end
 
   test "writing, approving and moving through the steps to a run", %{conn: conn} do
     {:ok, spec} = Specs.create_spec("Password reset")
-    {:ok, view, html} = live(conn, ~p"/specs/#{spec.id}")
-    assert html =~ "Write here the main spec"
+    {:ok, view, _html} = live(conn, ~p"/specs/#{spec.id}")
+    # An empty step's box says what to write in it.
+    assert has_element?(view, "#spec-overview[placeholder*='Write here the main spec']")
     assert has_element?(view, "#approve", "Skip overview")
 
     view |> element("#spec-editor") |> render_change(%{text: "# Overview\nResetting passwords"})
     assert has_element?(view, "#approve", "Approve overview")
     view |> element("#approve") |> render_click()
     assert_patch(view, ~p"/specs/#{spec.id}?step=requirements")
-    assert render(view) =~ "Write here what you want to build and what it must do."
-    assert render(view) =~ "Use an outline"
+    assert has_element?(view, "#spec-requirements[placeholder*='Write here what you want']")
+    assert has_element?(view, "button[phx-click=outline]", "Use an outline")
 
     view |> element("#spec-editor") |> render_change(%{text: "# Requirements\nA user can reset"})
     view |> element("#approve") |> render_click()
@@ -37,12 +38,14 @@ defmodule FactoryWeb.SpecLiveTest do
     view |> element("#approve") |> render_click()
     assert_patch(view, ~p"/specs/#{spec.id}?step=tasks")
 
-    html = view |> element("#spec-editor") |> render_change(%{text: "- [ ] 1. Add the form"})
-    assert html =~ "Queue tasks to choose which ones the next run does"
+    view |> element("#spec-editor") |> render_change(%{text: "- [ ] 1. Add the form"})
+    assert has_element?(view, "#queue", "Queue tasks to choose which ones the next run does")
     refute has_element?(view, "#start-run")
 
-    html = view |> element("#approve") |> render_click()
-    assert html =~ "Approved"
+    # Approving the last step makes the spec ready to run.
+    view |> element("#approve") |> render_click()
+    refute has_element?(view, "#approve")
+    assert has_element?(view, "#start-run", "Start run")
 
     view |> element("#start-run") |> render_click()
     {path, _flash} = assert_redirect(view)
@@ -51,8 +54,8 @@ defmodule FactoryWeb.SpecLiveTest do
 
   test "a locked step can't be written", %{conn: conn} do
     {:ok, spec} = Specs.create_spec("Locked")
-    {:ok, view, html} = live(conn, ~p"/specs/#{spec.id}?step=tasks")
-    assert html =~ "Finish the Overview first"
+    {:ok, view, _html} = live(conn, ~p"/specs/#{spec.id}?step=tasks")
+    assert has_element?(view, "#step-locked", "Finish the Overview first")
     assert has_element?(view, "#step-locked a", "Go to Overview")
     refute has_element?(view, "#spec-editor")
   end
@@ -66,9 +69,10 @@ defmodule FactoryWeb.SpecLiveTest do
         %{name: "tasks.md", content: "- [ ] 1. Add the date filter"}
       ])
 
-    html = render_upload(files, "requirements.md")
+    render_upload(files, "requirements.md")
     render_upload(files, "tasks.md")
-    assert html =~ "goes into requirements"
+    assert has_element?(view, "#new-spec", "requirements.md")
+    assert has_element?(view, "#new-spec", "goes into requirements")
     assert has_element?(view, "#new-spec input[type=checkbox][name=review][checked]")
 
     {:ok, view, _html} =
@@ -84,9 +88,8 @@ defmodule FactoryWeb.SpecLiveTest do
     # The review finishes in the background and the panel updates.
     Specs.subscribe(spec.id)
     assert_receive {:spec_updated, %{review: %{"status" => "done"}}}, 5_000
-    html = render(view)
-    assert html =~ "Needs work"
-    assert html =~ "Requirement 2 has no acceptance criteria."
+    assert has_element?(view, "#review", "Needs work")
+    assert has_element?(view, "#review", "Requirement 2 has no acceptance criteria.")
   end
 
   test "a spec can be deleted from the list", %{conn: conn} do
@@ -107,7 +110,7 @@ defmodule FactoryWeb.SpecLiveTest do
     view |> form("#new-spec", %{description: description}) |> render_change()
     assert has_element?(view, "#new-spec input[type=checkbox][name=review][checked]")
 
-    {:ok, _view, html} =
+    {:ok, view, _html} =
       view
       |> form("#new-spec", %{name: "", description: description, review: "false"})
       |> render_submit()
@@ -117,7 +120,9 @@ defmodule FactoryWeb.SpecLiveTest do
     assert spec.name == "Users can export invoices as CSV."
     assert spec.overview == "Users can export invoices as CSV.\nOne file per month."
     assert spec.review == %{}
-    assert html =~ "Users can export invoices as CSV."
+    # The spec opens on its overview, named from the first line.
+    assert has_element?(view, "#spec-name input[value='Users can export invoices as CSV.']")
+    assert has_element?(view, "#spec-overview", "Users can export invoices as CSV.")
   end
 
   test "uploading a file fills the open step, and replacing text can be undone", %{conn: conn} do
@@ -128,7 +133,8 @@ defmodule FactoryWeb.SpecLiveTest do
     |> render_upload("req.md")
 
     assert Specs.get_spec(spec.id).overview == "# From the file"
-    assert render(view) =~ "Filled from req.md."
+    assert has_element?(view, "#spec-overview", "# From the file")
+    assert has_element?(view, "#undo-upload", "Undo")
 
     view |> element("#undo-upload") |> render_click()
     assert Specs.get_spec(spec.id).overview == "My own notes"
@@ -137,9 +143,7 @@ defmodule FactoryWeb.SpecLiveTest do
 
   test "Kiro reads the project, asks questions, and the picked tasks are added", %{conn: conn} do
     {:ok, spec} = Specs.create_spec("Reset", %{requirements: "# R", design: "# D"})
-    {:ok, spec} = Specs.approve(spec, "overview")
-    {:ok, spec} = Specs.approve(spec, "requirements")
-    {:ok, spec} = Specs.approve(spec, "design")
+    spec = approved_spec(spec)
     {:ok, view, _html} = live(conn, ~p"/specs/#{spec.id}?step=tasks")
     Specs.subscribe(spec.id)
 
@@ -148,12 +152,11 @@ defmodule FactoryWeb.SpecLiveTest do
     assert has_element?(view, "#suggest-window", "Read the project")
 
     view |> form("#plan-read", %{dir: File.cwd!()}) |> render_submit()
-    assert render(view) =~ "Kiro is reading the project"
+    assert has_element?(view, "#suggest-window", "Kiro is reading the project")
     assert_receive {:spec_updated, %{plan: %{"status" => "questions"}}}, 5_000
 
     # The recommended option starts picked; typing an answer of your own picks it instead.
-    html = render(view)
-    assert html =~ "Where should the reset link go?"
+    assert has_element?(view, "#plan-answers", "Where should the reset link go?")
     assert has_element?(view, ~s(input[name="answer[0]"][value="/reset"][checked]))
 
     view
@@ -166,8 +169,7 @@ defmodule FactoryWeb.SpecLiveTest do
     assert has_element?(view, "#plan-next", "Suggest tasks")
     view |> form("#plan-answers") |> render_submit()
     assert_receive {:spec_updated, %{plan: %{"status" => "tasks"}}}, 5_000
-    html = render(view)
-    assert html =~ "Add the reset route (account)"
+    assert has_element?(view, "#plan-pick", "Add the reset route (account)")
     assert has_element?(view, "#plan-add", "Add 2 tasks")
 
     view |> form("#plan-pick", %{pick: ["1"]}) |> render_change()
@@ -184,9 +186,7 @@ defmodule FactoryWeb.SpecLiveTest do
 
   test "the window opens at whatever stage Kiro is at", %{conn: conn} do
     {:ok, spec} = Specs.create_spec("Waiting", %{requirements: "# R", design: "# D"})
-    {:ok, spec} = Specs.approve(spec, "overview")
-    {:ok, spec} = Specs.approve(spec, "requirements")
-    {:ok, spec} = Specs.approve(spec, "design")
+    spec = approved_spec(spec)
 
     questions = [
       %{"question" => "Which route?", "why" => "", "options" => ["/a", "/b"]},
@@ -224,9 +224,7 @@ defmodule FactoryWeb.SpecLiveTest do
         tasks: "- [ ] 1. Add `mix.exs` deps\n  - With ~> 1.0\n- [ ] 2. Write tests\n- [ ] 3. Ship"
       })
 
-    {:ok, spec} = Specs.approve(spec, "overview")
-    {:ok, spec} = Specs.approve(spec, "requirements")
-    {:ok, spec} = Specs.approve(spec, "design")
+    spec = approved_spec(spec)
     {:ok, view, _html} = live(conn, ~p"/specs/#{spec.id}?step=tasks")
 
     # Code in a title shows as code; the ~ isn't read as formatting.
@@ -271,9 +269,7 @@ defmodule FactoryWeb.SpecLiveTest do
         tasks: "# Tasks\n\n- [ ] 1. Old\n  - A step\n  - _Requirements: 1.1_\n- [x] 2. Done one"
       })
 
-    {:ok, spec} = Specs.approve(spec, "overview")
-    {:ok, spec} = Specs.approve(spec, "requirements")
-    {:ok, spec} = Specs.approve(spec, "design")
+    spec = approved_spec(spec)
     {:ok, spec} = Specs.queue_tasks(spec, ["Old"])
     {:ok, view, _html} = live(conn, ~p"/specs/#{spec.id}?step=tasks")
 
@@ -305,9 +301,7 @@ defmodule FactoryWeb.SpecLiveTest do
         tasks: "- [ ] 1. Vague\n- [ ] 2. Other"
       })
 
-    {:ok, spec} = Specs.approve(spec, "overview")
-    {:ok, spec} = Specs.approve(spec, "requirements")
-    {:ok, spec} = Specs.approve(spec, "design")
+    spec = approved_spec(spec)
     {:ok, spec} = Specs.approve(spec, "tasks")
     {:ok, spec} = Specs.queue_tasks(spec, ["Vague"])
     {:ok, view, _html} = live(conn, ~p"/specs/#{spec.id}?step=tasks")
@@ -348,9 +342,7 @@ defmodule FactoryWeb.SpecLiveTest do
     {:ok, spec} =
       Specs.create_spec("Add", %{requirements: "# R", design: "# D", tasks: "- [ ] 1. First"})
 
-    {:ok, spec} = Specs.approve(spec, "overview")
-    {:ok, spec} = Specs.approve(spec, "requirements")
-    {:ok, spec} = Specs.approve(spec, "design")
+    spec = approved_spec(spec)
     {:ok, view, _html} = live(conn, ~p"/specs/#{spec.id}?step=tasks")
     Specs.subscribe(spec.id)
 
@@ -393,9 +385,7 @@ defmodule FactoryWeb.SpecLiveTest do
         tasks: "- [ ] 1. A\n- [ ] 2. B\n- [ ] 3. C"
       })
 
-    {:ok, spec} = Specs.approve(spec, "overview")
-    {:ok, spec} = Specs.approve(spec, "requirements")
-    {:ok, spec} = Specs.approve(spec, "design")
+    spec = approved_spec(spec)
     {:ok, spec} = Specs.queue_tasks(spec, ["B"])
     {:ok, view, _html} = live(conn, ~p"/specs/#{spec.id}?step=tasks")
 

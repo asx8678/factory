@@ -143,8 +143,7 @@ defmodule Factory.EngineTest do
     %{w: w, coder: coder, tester: tester} = workflow("true")
     {:ok, _} = Agents.link(tester.id, coder.id)
     {:ok, _} = Agents.update_agent(tester, %{prompt: "[test:send-back]"})
-    Application.put_env(:factory, :max_loop_rounds, 0)
-    on_exit(fn -> Application.delete_env(:factory, :max_loop_rounds) end)
+    put_app_env(:max_loop_rounds, 0)
     run = queued_run(w)
     Runs.subscribe(run.id)
 
@@ -257,15 +256,7 @@ defmodule Factory.EngineTest do
 
   test "a step's prompt stays within the budget, and its size and hash are kept" do
     %{w: w, coder: coder, planner: planner} = workflow("true")
-    previous = Application.get_env(:factory, :context)
-
-    on_exit(fn ->
-      if previous,
-        do: Application.put_env(:factory, :context, previous),
-        else: Application.delete_env(:factory, :context)
-    end)
-
-    Application.put_env(:factory, :context, run_prompt_bytes: 3000)
+    put_app_env(:context, run_prompt_bytes: 3000)
 
     run = queued_run(w)
     huge = String.duplicate("A long plan line.\n", 1000)
@@ -321,14 +312,8 @@ defmodule Factory.EngineTest do
   describe "task progress" do
     # Agents reach Factory's run tools over HTTP, as Kiro does (FactoryWeb.MCP).
     setup do
-      server =
-        start_supervised!(
-          {Bandit, plug: FactoryWeb.Endpoint, ip: :loopback, port: 0, startup_log: false}
-        )
-
-      {:ok, {_ip, port}} = ThousandIsland.listener_info(server)
-      Application.put_env(:factory, :mcp_url, "http://127.0.0.1:#{port}/mcp")
-      on_exit(fn -> Application.delete_env(:factory, :mcp_url) end)
+      start_mcp()
+      :ok
     end
 
     defp with_tasks(run, titles) do
@@ -401,6 +386,38 @@ defmodule Factory.EngineTest do
 
       assert {:error, "Factory didn't recognise this step." <> _} =
                Factory.RunTools.call("forged", "get_tasks", %{})
+    end
+
+    test "a task that fails verification goes back to the step, then is left open" do
+      %{w: w, coder: coder} = workflow("true")
+      {:ok, _} = Agents.update_agent(coder, %{prompt: "[test:complete]"})
+      # One more pass rather than the default two, so the run gives up sooner.
+      put_app_env(:max_loop_rounds, 1)
+      # The fake verifier fails a task that says so (test/support/fake_kiro.mjs).
+      run = w |> queued_run() |> with_tasks(["Add the toggle [test:verify-fail]"])
+      Runs.subscribe(run.id)
+
+      assert {:ok, %{status: "done"} = run} = Engine.run(run.id)
+
+      # The chat has the verdict, the work going back, and the run giving up on it.
+      assert_received {:message,
+                       %{role: "factory", body: "Task 1 failed verification by " <> rest}}
+
+      assert rest =~ "Make it do what the task says."
+      assert rest =~ "✗ It does what the task says"
+      assert_received {:message, %{body: "Task 1 went back to Coder to fix (pass 1 of 1)."}}
+
+      assert_received {:message,
+                       %{body: "Task 1 still fails its checks after 1 more passes" <> _}}
+
+      # The result is kept by task id, and the task is open again.
+      assert [%{status: "pending"} = task] = Runs.get_run(run.id).tasks
+      result = run.progress["verification"]["#{task.id}"]
+      assert result["passed"] == false
+      assert result["fix"] == "Make it do what the task says."
+      assert [%{"check" => "It does what the task says", "passed" => false}] = result["checks"]
+      assert run.progress["verify_rounds"] == %{"agent-#{coder.id}" => 1}
+      assert run.progress["feedback"]["agent-#{coder.id}"]["from"] == "Verification"
     end
   end
 

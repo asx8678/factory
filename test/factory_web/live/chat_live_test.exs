@@ -11,15 +11,14 @@ defmodule FactoryWeb.ChatLiveTest do
   end
 
   test "a new chat starts centered, then shows the conversation", %{conn: conn} do
-    {:ok, view, html} = live(conn, ~p"/chat")
-    assert html =~ "What should we build?"
+    {:ok, view, _html} = live(conn, ~p"/chat")
+    assert has_element?(view, "#chat-start", "What should we build?")
 
     view |> form("#chat-form", chat: %{body: "/help"}) |> render_submit()
     assert assert_patch(view) =~ ~r{^/chat/\d+$}
 
-    html = render(view)
-    refute html =~ "What should we build?"
-    assert html =~ "Commands:"
+    refute has_element?(view, "#chat-start")
+    assert has_element?(view, "#messages", "Commands:")
   end
 
   test "an agent's chat shows only that agent's messages", %{
@@ -33,24 +32,23 @@ defmodule FactoryWeb.ChatLiveTest do
     Runs.post(run, "factory", "for everyone")
 
     {:ok, view, _} = live(conn, ~p"/chat/#{run.id}")
-    assert render(view) =~ "to reviewer"
-    assert render(view) =~ "for everyone"
+    assert has_element?(view, "#messages", "to reviewer")
+    assert has_element?(view, "#messages", "for everyone")
 
     view |> element("#chat-map-agent-#{coder.id}") |> render_click()
     assert_patch(view, ~p"/chat/#{run.id}?agent=#{coder.id}")
-    html = render(view)
-    assert html =~ "to coder"
-    refute html =~ "to reviewer"
-    refute html =~ "for everyone"
+    assert has_element?(view, "#messages", "to coder")
+    refute has_element?(view, "#messages", "to reviewer")
+    refute has_element?(view, "#messages", "for everyone")
     assert has_element?(view, "#chat-input[placeholder='Message Coder…']")
 
     view |> element("#agent-all") |> render_click()
-    assert render(view) =~ "to reviewer"
+    assert has_element?(view, "#messages", "to reviewer")
   end
 
   test "sending from an agent's chat posts to that agent", %{conn: conn, coder: coder} do
     {:ok, view, _} = live(conn, ~p"/chat?agent=#{coder.id}")
-    assert render(view) =~ "Chat with Coder"
+    assert has_element?(view, "#chat-page h1", "Chat with Coder")
 
     # Agents need the folder they work in before anything is sent to them.
     view |> form("#chat-form", chat: %{body: "hello coder"}) |> render_submit()
@@ -65,9 +63,8 @@ defmodule FactoryWeb.ChatLiveTest do
     Runs.subscribe(String.to_integer(run_id))
     assert_receive {:message, %{author: "Coder"}}, 5_000
 
-    html = render(view)
-    assert html =~ "hello coder"
-    assert html =~ "echo: hello coder"
+    assert has_element?(view, "#messages", "hello coder")
+    assert has_element?(view, "#messages", "echo: hello coder")
   end
 
   test "an agent's context shows on its card and beside the message box", %{
@@ -94,7 +91,12 @@ defmodule FactoryWeb.ChatLiveTest do
 
     # No Kiro session runs in this test, so the chat says there's nothing to compact.
     view |> element("#compact-chip") |> render_click()
-    assert render(view) =~ "Nothing to compact: Coder has no Kiro session running."
+
+    assert has_element?(
+             view,
+             "#messages",
+             "Nothing to compact: Coder has no Kiro session running."
+           )
   end
 
   test "an agent's activity updates its card in place", %{conn: conn, coder: coder} do

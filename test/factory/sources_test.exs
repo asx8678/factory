@@ -13,13 +13,8 @@ defmodule Factory.SourcesTest do
       )
 
     File.mkdir_p!(tmp)
-    previous = Application.get_env(:factory, :sources_dir)
-    Application.put_env(:factory, :sources_dir, Path.join(tmp, "sources"))
-
-    on_exit(fn ->
-      Application.put_env(:factory, :sources_dir, previous)
-      File.rm_rf(tmp)
-    end)
+    put_app_env(:sources_dir, Path.join(tmp, "sources"))
+    on_exit(fn -> File.rm_rf(tmp) end)
 
     %{workflow: workflow, tmp: tmp}
   end
@@ -206,7 +201,7 @@ defmodule Factory.SourcesTest do
     refute Enum.any?(Specs.files(spec), &(elem(&1, 0) == "data-sources.md"))
   end
 
-  test "repository creation and copying can defer syncing until after commit", %{workflow: w} do
+  test "repository creation can defer syncing until after commit", %{workflow: w} do
     attrs = %{
       kind: "azure_devops",
       name: "Deferred",
@@ -222,17 +217,6 @@ defmodule Factory.SourcesTest do
     assert :global.whereis_name({Sources, source.id}) == :undefined
     assert source.status == "ready"
     assert source.synced_at == nil
-
-    {:ok, copied_workflow} = Workflows.create("Deferred copy")
-
-    assert {:ok, :ok} =
-             Repo.transact(fn ->
-               {:ok, Sources.copy(w.id, copied_workflow.id, %{}, sync: false)}
-             end)
-
-    [copy] = Sources.list(copied_workflow.id)
-    assert :global.whereis_name({Sources, copy.id}) == :undefined
-    assert copy.synced_at == nil
 
     assert {:ok, %{status: "syncing"}} = Sources.start_sync(source)
     assert %{status: "error", error: error} = await_sync(source)
@@ -254,15 +238,8 @@ defmodule Factory.SourcesTest do
     """)
 
     File.chmod!(executable, 0o755)
-    previous = Application.get_env(:factory, :sources_git_executable)
-    previous_timeout = Application.get_env(:factory, :source_sync_timeout)
-    Application.put_env(:factory, :sources_git_executable, executable)
-    Application.put_env(:factory, :source_sync_timeout, 1_000)
-
-    on_exit(fn ->
-      restore_env(:sources_git_executable, previous)
-      restore_env(:source_sync_timeout, previous_timeout)
-    end)
+    put_app_env(:sources_git_executable, executable)
+    put_app_env(:source_sync_timeout, 1_000)
 
     {:ok, source} =
       Sources.create(w.id, %{kind: "git", name: "Slow", config: %{"url" => "file:///unused"}},
@@ -345,9 +322,6 @@ defmodule Factory.SourcesTest do
       end
     end
   end
-
-  defp restore_env(key, nil), do: Application.delete_env(:factory, key)
-  defp restore_env(key, value), do: Application.put_env(:factory, key, value)
 
   defp await_sync(source) do
     case :global.whereis_name({Sources, source.id}) do

@@ -3,15 +3,7 @@ defmodule Factory.UsageTest do
   alias Factory.{Agents, Runs, Specs, Usage, Workflows}
 
   setup tags do
-    previous = Application.get_env(:factory, :timezone)
-    Application.put_env(:factory, :timezone, tags[:timezone] || "UTC")
-
-    on_exit(fn ->
-      if previous,
-        do: Application.put_env(:factory, :timezone, previous),
-        else: Application.delete_env(:factory, :timezone)
-    end)
-
+    put_app_env(:timezone, tags[:timezone] || "UTC")
     {:ok, run} = Runs.create_run("Fix login")
     {:ok, spec} = Specs.create_spec("CSV export")
     %{run: run, spec: spec}
@@ -178,14 +170,7 @@ defmodule Factory.UsageTest do
   end
 
   test "context severity uses the thresholds exposed for the graph" do
-    previous = Application.get_env(:factory, :context)
-    Application.put_env(:factory, :context, compact_at: 60)
-
-    on_exit(fn ->
-      if previous,
-        do: Application.put_env(:factory, :context, previous),
-        else: Application.delete_env(:factory, :context)
-    end)
+    put_app_env(:context, compact_at: 60)
 
     assert %{mid: 36.0, high: 60} = FactoryWeb.Usage.thresholds()
     assert FactoryWeb.Usage.level(35.9) == "low"
