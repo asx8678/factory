@@ -27,7 +27,9 @@ what you want built. Kiro's logs go to `tmp/kiro-logs`; cloned data sources to `
 ## Workflows
 
 Pick one in the chat's header. Each is a set of agents you can change on the Workflows
-page, and restore to how it came.
+page, and restore to how it came (runs that used its agents keep what they handed over).
+When Factory's own prompts improve, agents you haven't changed get them at startup; one
+you've changed keeps yours until you restore it.
 
 * **Build a feature**: a planner, a coder, a tester and a reviewer. Describe the change;
   the planner reads the code and writes the tasks; start it, and they build task by task.
@@ -42,11 +44,17 @@ page, and restore to how it came.
   web; a Devil's Advocate can send it back; the Incident Reporter writes the answer. Log
   files dropped into the chat (`.log`, `.json`, `.csv`, up to 20 MB) are kept whole for
   the agents to search, in `tmp/evidence`. The two agents that search the web never see
-  what you pasted, only what the others hand them, with internal hosts, IDs and secrets
-  taken out. When it's done, **Fix it** starts a Fix a bug chat from the report.
+  what you pasted, only what the others hand them, with internal hosts, user names, your
+  folders, IDs and secrets taken out, and the names you list under Settings → Web
+  searches. When it's done, **Fix it** starts a Fix a bug chat from the report.
 
 Agents that only read ask you first, in the chat, before they fetch a web page, read
 outside the project, or run a pull request's own code.
+
+A run pauses once it has used 10 credits and asks whether to go on (Continue lets it use
+as many again); the header shows what it has used against that. Change the limit, or
+turn it off with 0, under Settings → Runs. If Kiro refuses for its monthly usage limit,
+every page says so until it answers again.
 
 ## Environment variables
 
