@@ -116,6 +116,16 @@ defmodule FactoryWeb.PlanPanel do
           <.icon name="hero-magnifying-glass-micro" class="size-3.5 text-base-content/55" />
           <span class="font-medium">Scope check</span>
           <span class="text-base-content/45">by {@check.author}</span>
+          <span
+            :if={verdict(@check.body)}
+            id="chat-plan-verdict"
+            class={[
+              "rounded px-1.5 py-px font-medium",
+              verdict_class(verdict(@check.body))
+            ]}
+          >
+            {verdict(@check.body)}
+          </span>
           <.icon
             name="hero-chevron-down-micro"
             class="ml-auto size-3.5 text-base-content/45 transition-transform group-open:rotate-180"
@@ -513,4 +523,20 @@ defmodule FactoryWeb.PlanPanel do
     </div>
     """
   end
+
+  # The scope check's verdict, from its report's first section (Factory.Specs.Planner
+  # asks for one of three).
+  defp verdict(body) do
+    case Regex.run(
+           ~r/Verdict:?\**:?\s*\**(Ready to build|Ready after small fixes|Needs rework)/i,
+           body || ""
+         ) do
+      [_, v] -> String.capitalize(v)
+      _ -> nil
+    end
+  end
+
+  defp verdict_class("Ready to build"), do: "bg-success/15 text-success"
+  defp verdict_class("Ready after small fixes"), do: "bg-warning/15 text-warning"
+  defp verdict_class(_rework), do: "bg-error/15 text-error"
 end

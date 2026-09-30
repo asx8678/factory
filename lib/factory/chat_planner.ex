@@ -18,7 +18,7 @@ defmodule Factory.ChatPlanner do
   """
   alias Factory.{Agents, Kiro, PlanTools, Repo, Runs, Specs}
   alias Factory.Runs.Run
-  alias Factory.Specs.Planner
+  alias Factory.Specs.{Planner, TaskCheck}
 
   @doc """
   Whether a chat message is a plan review asked with the Review plan button, which
@@ -39,19 +39,26 @@ defmodule Factory.ChatPlanner do
   end
 
   @doc """
-  Plans in the background; the reply is posted to the run. `extra:` is one more request
-  for this turn only, not a message in the chat nor part of what the person asked
-  (a plan review asked with a button). `check: true` makes it a check that reports and
-  can't change the plan: the plan tools only read it or ask (a scope check); the reply
-  is posted as it is, marked `"check" => true`.
+  Plans in the background; the reply is posted to the run. `action:` is a button in
+  the chat's plan, which the planner is asked in place of a message (it isn't posted
+  to the chat nor counted among the person's requests):
+
+    * `:scope` checks the scope of work: it reads the code and reports, and the plan
+      tools only read the plan. The report is posted as it is, marked `"check" => true`.
+    * `:refine` reworks the plan in place (it can't be replaced), acting on
+      `findings:`, the scope check shown with the plan, if any.
+
+  Both are told which tasks Factory's own rules find thin (`Factory.Specs.TaskCheck`).
   """
   def start(%Run{} = run, planner, opts \\ []) do
-    with {:ok, {run, files, prompt}} <- prepare(run, planner, opts[:extra]) do
-      start_request(run, planner, files, prompt, opts[:check] == true)
+    mode = opts[:action]
+
+    with {:ok, {run, files, prompt}} <- prepare(run, planner, mode, opts[:findings]) do
+      start_request(run, planner, files, prompt, mode)
     end
   end
 
-  defp prepare(run, planner, extra) do
+  defp prepare(run, planner, mode, findings) do
     Runs.with_locked_run(run.id, fn run ->
       if run.status == "draft" do
         requests =
@@ -63,17 +70,17 @@ defmodule Factory.ChatPlanner do
               not review_message?(m),
               do: text
 
-        asked = if extra, do: requests ++ [extra], else: requests
-
         spec = Specs.for_run(run)
         # Base specs are rules, not part of the run's own files.
         files = Enum.reject(Specs.files(spec), &(elem(&1, 0) == "tasks.md"))
         base = Specs.base_files_for_run(run)
         current = if Specs.tasks(spec) == [], do: nil, else: PlanTools.describe(spec, :full)
 
+        action = mode && %{mode: mode, thin: thin_tasks(spec), findings: findings}
+
         prompt = %{
-          full: Planner.chat_prompt(planner.name, asked, base ++ files, current),
-          parts: Planner.chat_prompt_parts(planner.name, asked, base ++ files, current)
+          full: Planner.chat_prompt(planner.name, requests, base ++ files, current, action),
+          parts: Planner.chat_prompt_parts(planner.name, requests, base ++ files, current, action)
         }
 
         run =
@@ -89,7 +96,17 @@ defmodule Factory.ChatPlanner do
     end)
   end
 
-  defp start_request(run, planner, files, prompt, check?) do
+  # Each task Factory's rules find thin, by its number, with what it's missing: the same
+  # tasks the chat's plan marks.
+  defp thin_tasks(spec) do
+    {_, tasks} = Factory.Spec.blocks(spec.tasks || "")
+
+    for {task, i} <- Enum.with_index(tasks, 1), TaskCheck.thin?(task) do
+      "Task #{i}, #{task.title}: #{Enum.join(TaskCheck.issues(task), ", ")}"
+    end
+  end
+
+  defp start_request(run, planner, files, prompt, mode) do
     dir = run.settings["project_dir"] || Kiro.config(:workspace)
     generation = run.planner_generation
 
@@ -100,19 +117,19 @@ defmodule Factory.ChatPlanner do
       # On the planner's own Kiro session, which keeps the conversation between
       # messages; a one-off session when that one is busy in another folder.
       result =
-        case plan_in_session(run, planner, prompt, generation, dir, check?) do
-          {:error, :busy} -> plan_once(run, planner, prompt, generation, dir, check?)
+        case plan_in_session(run, planner, prompt, generation, dir, mode) do
+          {:error, :busy} -> plan_once(run, planner, prompt, generation, dir, mode)
           result -> result
         end
 
-      result = with {:ok, r} <- result, do: {:ok, Map.put(r, :check, check?)}
+      result = with {:ok, r} <- result, do: {:ok, Map.put(r, :check, mode == :scope)}
       finish(run.id, generation, planner, files, result)
     end)
 
     :ok
   end
 
-  defp plan_in_session(run, planner, prompt, generation, dir, check?) do
+  defp plan_in_session(run, planner, prompt, generation, dir, mode) do
     {brief, ask} = prompt.parts
 
     brief =
@@ -130,15 +147,24 @@ defmodule Factory.ChatPlanner do
         stream: false,
         activity: "Planning “#{run.title}”",
         on_tool: &show_progress(run.id, planner, Planner.describe_tool(&1, dir)),
-        planning: %{generation: generation, notify: self(), read_only: check?},
+        planning: %{
+          generation: generation,
+          notify: self(),
+          read_only: mode == :scope,
+          keep_plan: mode == :refine
+        },
         on_busy: :return
       )
 
-    with {:ok, reply} <- reply, do: read_result(reply, generation, check?)
+    with {:ok, reply} <- reply, do: read_result(reply, generation, mode == :scope)
   end
 
-  defp plan_once(run, planner, prompt, generation, dir, check?) do
-    token = PlanTools.grant(run.id, generation, planner, read_only: check?)
+  defp plan_once(run, planner, prompt, generation, dir, mode) do
+    token =
+      PlanTools.grant(run.id, generation, planner,
+        read_only: mode == :scope,
+        keep_plan: mode == :refine
+      )
 
     with {:ok, reply} <-
            Kiro.ask(prompt.full,
@@ -149,7 +175,7 @@ defmodule Factory.ChatPlanner do
              on_tool: &show_progress(run.id, planner, Planner.describe_tool(&1, dir)),
              usage: %{source: "plan_chat", run_id: run.id, agent_id: planner.id}
            ) do
-      read_result(reply, generation, check?)
+      read_result(reply, generation, mode == :scope)
     end
   end
 

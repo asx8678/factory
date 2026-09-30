@@ -746,7 +746,8 @@ defmodule Factory.Specs do
       task ->
         dir = project_dir(spec)
         topic = "spec:#{spec.id}"
-        prompt = Planner.improve_prompt(kiro_files(spec), task, instruction)
+        asked = (home_run(spec) || %{description: nil}).description
+        prompt = Planner.improve_prompt(kiro_files(spec), task, instruction, asked || "")
 
         on_tool = fn update ->
           broadcast(topic, {:task_activity, task.title, Planner.describe_tool(update, dir)})

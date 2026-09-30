@@ -114,13 +114,15 @@ defmodule Factory.Specs.Planner do
   end
 
   @doc """
-  Prompt for improving one task: Kiro may read the project, then rewrites the task
-  following the person's instruction (or its own judgement when there is none).
+  Prompt for improving one task: Kiro reads the code the task touches, checks it against
+  the tasks around it, then rewrites it following the person's instruction (or, with
+  none, so it can be built without guessing). `asked` is what the person asked for in
+  the chat that made the plan, when there is one.
   """
-  def improve_prompt(files, task, instruction) do
+  def improve_prompt(files, task, instruction, asked \\ "") do
     ask =
       case String.trim(instruction) do
-        "" -> "Make it clearer, more specific and easier to build and test on its own."
+        "" -> "Make it ready to build without guessing."
         text -> text
       end
 
@@ -135,21 +137,37 @@ defmodule Factory.Specs.Planner do
         "\n"
       )
 
+    asked =
+      case String.trim(asked || "") do
+        "" -> ""
+        text -> "\nWhat the person asked for, which the whole plan serves:\n#{text}\n"
+      end
+
     """
     <task-planning step="improve">
     You are improving one implementation task of the spec below, for the project in the \
-    current folder. You may read files to check names, paths and conventions. \
-    Don't change anything and don't run commands.
+    current folder. Don't change anything and don't run commands.
 
     The task now:
     #{current}
 
     What the person wants done better:
     #{ask}
+    #{asked}
+    Before you rewrite it:
+    1. Read the code it touches. Open every file and function it names, check they exist \
+    and are spelled right, and find the real ones where they're wrong or missing.
+    2. Find the tests that cover that code and how they're written, and what else \
+    depends on it (callers, templates, routes, migrations, config).
+    3. Read the tasks before and after it in tasks.md: it shouldn't redo their work or \
+    use anything built after it.
 
-    Keep the task one small change that can be built and tested on its own. Name the \
-    files or modules it touches. Keep requirement numbers that still apply. Wrap code, \
-    paths and commands in `backticks`.
+    Then rewrite it: a title that says what changes; steps in order, naming the exact \
+    files and functions and what changes in each; a last step that says how to check it's \
+    done (the test to add or run, or what to look at). Keep it one small change that can \
+    be built and tested on its own. Keep what the person wrote unless it's wrong, and \
+    don't add work beyond what the task is for. Keep requirement numbers that still \
+    apply. Wrap code, paths and commands in `backticks`.
 
     #{json_shape()}
     </task-planning>
@@ -284,11 +302,13 @@ its own, naming the files it touches and the requirement numbers it covers. Incl
   end
 
   @doc """
-  `chat_prompt/4` in two parts for a planner's own Kiro session: `{brief, ask}`, the
+  `chat_prompt/5` in two parts for a planner's own Kiro session: `{brief, ask}`, the
   spec files and the rest. The session sends the brief only when it hasn't yet.
   """
-  def chat_prompt_parts(name, requests, files, current),
-    do: {spec_text(files), name |> chat_prompt(requests, [], current) |> String.trim_trailing()}
+  def chat_prompt_parts(name, requests, files, current, action \\ nil),
+    do:
+      {spec_text(files),
+       name |> chat_prompt(requests, [], current, action) |> String.trim_trailing()}
 
   @doc """
   Prompt for planning in a chat: the planner reads the project, rethinks how the
@@ -296,8 +316,14 @@ its own, naming the files it touches and the requirement numbers it covers. Incl
   tools (`Factory.PlanTools`): a summary and approach first, then its tasks a few at a
   time. `current` is the plan so far (`Factory.PlanTools.describe/1`), which it refines
   rather than starting over. Without the tools it replies with JSON (`parse_chat_plan/1`).
+
+  `action` is a button in the chat's plan instead of a message:
+  `%{mode: :scope, thin: [line]}` checks the scope of work and reports, changing
+  nothing; `%{mode: :refine, thin: [line], findings: text | nil}` reworks the plan,
+  acting on a scope check's `findings`. `thin` is what Factory's own rules found
+  missing in tasks (`Factory.Specs.TaskCheck`), one line per task.
   """
-  def chat_prompt(name, requests, files, current) do
+  def chat_prompt(name, requests, files, current, action \\ nil) do
     asked = requests |> Enum.with_index(1) |> Enum.map_join("\n\n", fn {r, i} -> "#{i}. #{r}" end)
 
     current =
@@ -305,13 +331,39 @@ its own, naming the files it touches and the requirement numbers it covers. Incl
         do: "None yet.",
         else: current
 
+    mode = action && action.mode
+
     """
-    <task-planning step="chat">
+    <task-planning step="#{step(mode)}">
     You are #{name}, the planner in a software factory. The person is chatting with you \
     about a change to the project in the current folder. Look at the project first: read \
     the files you need to understand its stack, conventions and the code this touches. \
     Don't change any files and don't run commands.
 
+    #{String.trim(instructions(mode))}
+
+    The plan so far:
+    #{current}
+    #{thin_text(action)}
+    </task-planning>
+
+    <requests>
+    The person's messages, oldest first. Later ones refine or override earlier ones; \
+    answers to your questions are among them.
+
+    #{asked}
+    </requests>
+    #{findings_text(action)}
+    #{spec_text(files)}
+    """
+  end
+
+  defp step(nil), do: "chat"
+  defp step(:scope), do: "scope-check"
+  defp step(:refine), do: "refine"
+
+  defp instructions(nil) do
+    """
     Then write the plan with the factory tools:
     - If the request isn't clear enough to plan without guessing (what should be built, \
     where it goes in the code, how to tell it works), call ask_user with 1 to 5 short, \
@@ -323,24 +375,125 @@ its own, naming the files it touches and the requirement numbers it covers. Incl
     - With a plan already, refine it with what the person said last: update_task, \
     remove_tasks and add_tasks. Keep what still fits; the person may have edited tasks.
 
-    The plan so far:
-    #{current}
-
     When you're done, end with a short reply to the person, 2 to 4 sentences: how you'd \
     do it and why, what you changed, or what you need to know. Don't list the tasks: \
     Factory shows them.
 
     Only if the factory tools aren't available, reply instead with only this JSON object:
     {"clear": true | false, "reply": "<2 to 4 sentences>", "questions": [{"question": "<question>", "options": ["<option>"]}], "tasks": [#{@task_json}]}
-    </task-planning>
-
-    <requests>
-    #{asked}
-    </requests>
-
-    #{spec_text(files)}
     """
   end
+
+  defp instructions(:scope) do
+    """
+    The person pressed Scope: before anything is built, check the scope of work. Does \
+    this plan do everything they asked, only what they asked, and can each task be built \
+    without guessing? This is a review: the plan tools only read the plan this turn. \
+    Don't try to change it, and don't call ask_user: questions for the person go in your \
+    report.
+
+    Work through it in this order, and don't skip reading the code:
+    1. Pin down the ask. From the requests and the spec files, list for yourself each \
+    thing that must be true when this is done, including what the person clearly \
+    expects but didn't spell out. Where they conflict, the latest request wins.
+    2. Read the code. For every task, open the files and functions it names: check they \
+    exist, the names are right, and the change fits how the code works today. Find \
+    what depends on that code (callers, templates, routes, jobs, migrations, config) \
+    and the tests that cover it.
+    3. Trace. Match each expectation to the tasks that deliver it. An expectation with \
+    no task is missing; a task or step that serves no expectation is beyond scope.
+    4. Judge each task: could an agent build it without guessing (the files, the steps, \
+    a way to check it's done)? Is it one change that can be built and tested alone? Is \
+    it in build order, with nothing used before the task that makes it?
+    5. Look for what breaks: behaviour that changes for existing users or callers, data \
+    to migrate, tests that will fail, permissions and security, errors and empty states.
+
+    Then reply with this report, leaving out any section with nothing in it. Back each \
+    point with evidence, `path/to/file.ex:line` or the task number. Say so when you \
+    couldn't confirm something in the code rather than guessing.
+
+    **Verdict:** Ready to build, Ready after small fixes, or Needs rework, and in one \
+    sentence why.
+    **Covered:** each expectation and the task numbers that deliver it.
+    **Missing:** what the request needs that no task does, and where it belongs: which \
+    task, or a new task after which one.
+    **Beyond scope:** tasks or steps that go further than asked, and whether to drop them.
+    **Wrong or unclear:** names that don't match the code, wrong assumptions about how \
+    it works, and tasks an agent couldn't build without guessing.
+    **Size and order:** tasks to split or merge, and tasks in the wrong order.
+    **Risks:** what could break, and the decisions the person should make, as questions.
+    **First changes:** the two or three changes to make first, most important first.
+
+    A line or two per point. Factory shows this report above the plan, and the person's \
+    Refine button acts on it.
+    """
+  end
+
+  defp instructions(:refine) do
+    """
+    The person pressed Refine: rework the plan below so that it does everything they \
+    asked and nothing more, and so that an agent can build every task without guessing. \
+    The plan exists: change it only with update_task, remove_tasks and add_tasks. Never \
+    call create_plan, which would throw away the person's edits.
+
+    First investigate, without touching the plan:
+    1. From the requests and the spec files, list for yourself what must be true when \
+    this is done. Where they conflict, the latest request wins.
+    2. Read the code each task touches. Check every file, module and function it names \
+    exists and is spelled right, and find the real ones where it's wrong. Find the tests \
+    that cover that code and how they're written, and what depends on it (callers, \
+    templates, routes, jobs, migrations, config).
+    3. If there's a scope check below, go through it point by point and confirm each one \
+    in the code before acting on it. Skip a point that turns out to be wrong, and say so.
+    4. Decide the changes: tasks to fix, split, merge, reorder, drop or add.
+
+    Then change the plan, as little as it takes:
+    - Every task ends up with a title that says what changes; steps in order, naming the \
+    exact files and functions and what changes in each; a last step that says how to \
+    check it's done (the test to add or run, or what to look at); and the requirement \
+    numbers it covers.
+    - One change per task, buildable and testable on its own, in build order. Tests go in \
+    the task that needs them or the one right after.
+    - Leave good tasks as they are. The person may have written or edited tasks: keep \
+    their wording and intent, and only add what's missing. Don't add work nobody asked for.
+    - If only the person can decide something the plan depends on, call ask_user rather \
+    than guess.
+
+    Last, call get_plan and check the result against what you set out to change: every \
+    task concrete, nothing missing, nothing beyond scope. Fix what isn't.
+
+    End with a short reply to the person, 2 to 4 sentences: what you changed and why, \
+    and what you left for them to decide. Don't list the tasks: Factory shows them.
+
+    Only if the factory tools aren't available, reply instead with only this JSON object, \
+    holding the whole reworked plan:
+    {"clear": true, "reply": "<2 to 4 sentences>", "questions": [], "tasks": [#{@task_json}]}
+    """
+  end
+
+  defp thin_text(%{thin: [_ | _] = thin}) do
+    """
+
+    Factory's own check found these tasks thin (it looks for steps, named code, a way to \
+    check the task is done, and a clear title):
+    #{Enum.map_join(thin, "\n", &"- #{&1}")}
+    """
+  end
+
+  defp thin_text(_action), do: ""
+
+  defp findings_text(%{findings: findings}) when is_binary(findings) do
+    """
+
+    <scope-check>
+    Your scope check of this plan, from earlier in this chat:
+
+    #{String.trim(findings)}
+    </scope-check>
+    """
+  end
+
+  defp findings_text(_action), do: ""
 
   @doc """
   Reads a chat plan: `{:ok, %{reply:, tasks:, questions:}}`. When the planner found the

@@ -384,10 +384,6 @@ defmodule FactoryWeb.ChatLive do
   # The plan being made (FactoryWeb.PlanPanel): each task edited, removed, or handed to
   # Kiro to flesh out from the code or change as asked; or the whole plan reviewed again.
 
-  @refine "Improve this task: read the code it touches and make it concrete. " <>
-            "Name the exact files and functions it changes, list the steps in order, and say " <>
-            "how to check it's done. Keep it one small change."
-
   def handle_event("plan_edit", %{"i" => i}, socket),
     do: {:noreply, assign(socket, plan_editing: String.to_integer(i), plan_asking: nil)}
 
@@ -441,44 +437,32 @@ defmodule FactoryWeb.ChatLive do
     do: {:noreply, assign(socket, plan_check: nil)}
 
   def handle_event("plan_refine", %{"i" => i}, socket),
-    do: {:noreply, ask_kiro(socket, String.to_integer(i), @refine)}
+    do: {:noreply, ask_kiro(socket, String.to_integer(i), "")}
 
-  # A check of the plan against what was asked, reported in the chat; nothing changes.
-  @scope_check """
-  Check the scope of work before anything is built. Read the code this plan touches and \
-  compare the plan with what I asked for. Don't change the plan: this is a check.
-
-  Reply with short sections, only the ones that have something in them:
-  - **Covered**: what the plan does that the request needs.
-  - **Missing**: what the request needs that no task covers, such as edge cases, data or \
-  migrations, config, error handling, docs, tests.
-  - **Beyond scope**: tasks or steps that go further than what was asked.
-  - **Risks**: what could break, and what's unclear that I should decide.
-  - **Size**: tasks too big to build and check in one go, or too small to stand alone.
-
-  End with the one or two changes you'd make first.\
-  """
-
+  # Scope: the planner checks the plan against what was asked and the code, and reports
+  # above the plan; nothing changes (Factory.Specs.Planner has the prompt).
   def handle_event("plan_scope", _, socket) do
     run = socket.assigns.run && Runs.get_run(socket.assigns.run.id)
     planner = socket.assigns.planner
 
     if run && planner && run.status == "draft" do
-      Factory.ChatPlanner.start(run, planner, extra: @scope_check, check: true)
+      Factory.ChatPlanner.start(run, planner, action: :scope)
       {:noreply, assign(socket, plan_checking: true)}
     else
       {:noreply, put_flash(socket, :error, "This run has no planner to check its plan.")}
     end
   end
 
-  # The planner looks at the code and the whole plan again. The request goes to the
-  # planner only, not into the chat; its reply does.
+  # Refine (and "Refine with this"): the planner reworks the plan in place from the
+  # code, acting on the scope check shown with it. The request goes to the planner
+  # only, not into the chat; its reply does.
   def handle_event("plan_review", _, socket) do
     run = socket.assigns.run && Runs.get_run(socket.assigns.run.id)
     planner = socket.assigns.planner
 
     if run && planner && run.status == "draft" do
-      Factory.ChatPlanner.start(run, planner, extra: review_request(plan_tasks(socket)))
+      findings = socket.assigns.plan_check && socket.assigns.plan_check.body
+      Factory.ChatPlanner.start(run, planner, action: :refine, findings: findings)
       {:noreply, assign(socket, plan_checking: false)}
     else
       {:noreply, put_flash(socket, :error, "This run has no planner to review its plan.")}
@@ -614,21 +598,6 @@ defmodule FactoryWeb.ChatLive do
           true -> fields.(task.title, List.replace_at(task.details, j, value))
         end
     end
-  end
-
-  # What the planner is asked when the plan is reviewed, naming the thin tasks.
-  defp review_request(tasks) do
-    thin =
-      for {t, i} <- Enum.with_index(tasks, 1), Factory.Specs.TaskCheck.thin?(t) do
-        "#{i} (#{Enum.join(Factory.Specs.TaskCheck.issues(t), ", ")})"
-      end
-
-    "Look at the code again and improve this plan. Make every task concrete: the files " <>
-      "and functions it changes, the steps in order, and how to check it's done. Split " <>
-      "tasks that are too big, merge ones that are too small, add any missing tests, and " <>
-      "keep what I've edited. If you checked the scope earlier in this chat, act on what " <>
-      "you found." <>
-      if(thin == [], do: "", else: " These need more context: #{Enum.join(thin, "; ")}.")
   end
 
   # The run's spec, where its plan lives; followed while the chat is open, so Kiro's

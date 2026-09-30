@@ -199,20 +199,28 @@ defmodule Factory.PlanTools do
       generation: generation,
       planner: %{id: planner.id, name: planner.name},
       pid: self(),
-      # A check (Check scope) reads the plan and may ask, but doesn't change it.
-      read_only: Keyword.get(opts, :read_only, false)
+      # A scope check reads the plan and may ask, but doesn't change it.
+      read_only: Keyword.get(opts, :read_only, false),
+      # Refine changes the plan in place; it can't replace it.
+      keep_plan: Keyword.get(opts, :keep_plan, false)
     })
   end
 
   @reading_tools ~w(get_plan ask_user)
 
-  defp read_only_refusal(name) do
-    if name in @reading_tools,
-      do: nil,
-      else:
-        {:error,
-         "This is a check: report what you'd change in your reply, and leave the plan as it is."}
-  end
+  # What a button's turn may not do: a scope check changes nothing, and Refine keeps the
+  # plan it reworks, with the person's edits. nil when the call may go ahead.
+  defp refusal(%{read_only: true}, name) when name not in @reading_tools,
+    do:
+      {:error,
+       "This is a check: report what you'd change in your reply, and leave the plan as it is."}
+
+  defp refusal(%{keep_plan: true}, "create_plan"),
+    do:
+      {:error,
+       "You're refining this plan, so it can't be replaced: change it with update_task, remove_tasks and add_tasks."}
+
+  defp refusal(_turn, _name), do: nil
 
   @doc "The MCP server to give a Kiro session (ACP `session/new`), with the token."
   def mcp_server(token) do
@@ -269,7 +277,7 @@ defmodule Factory.PlanTools do
       result =
         Runs.with_locked_run(grant.run_id, fn run ->
           if run.status == "draft" and run.planner_generation == grant.generation do
-            (Map.get(grant, :read_only) && read_only_refusal(name)) || apply_tool(name, args, run)
+            refusal(grant, name) || apply_tool(name, args, run)
           else
             {:error,
              "This plan was replaced by a newer request or the run has started. Stop and end your turn."}
@@ -312,9 +320,12 @@ defmodule Factory.PlanTools do
   # `FactoryWeb.MCP` and the chat): `{:elicit, request, then}`. `then` gets the answer
   # (`%{"action" => …, "content" => …}`); without one, the questions are shown after
   # the turn as before, or left for the reply.
-  def call_in_turn(_run_id, _agent, name, _args, %{read_only: true})
+  def call_in_turn(_run_id, _agent, name, _args, %{read_only: true} = planning)
       when name not in @reading_tools,
-      do: read_only_refusal(name)
+      do: refusal(planning, name)
+
+  def call_in_turn(_run_id, _agent, "create_plan", _args, %{keep_plan: true} = planning),
+    do: refusal(planning, "create_plan")
 
   def call_in_turn(run_id, agent, "ask_user", args, planning) when is_map(args) do
     questions = questions(args)
