@@ -25,7 +25,6 @@ defmodule FactoryWeb.ChatLive do
     {:ok,
      socket
      |> assign(runs: Runs.list_runs(), runs_reload: nil, run: nil, focus: nil, count: 0)
-     |> assign(run_usage: %{turns: 0, credits: 0})
      |> assign(draft: "", view: "chat", streaming: %{})
      |> assign(message_ids: [], earlier?: false, history?: false)
      |> assign(commands: Chat.commands())
@@ -76,7 +75,6 @@ defmodule FactoryWeb.ChatLive do
         {:noreply,
          socket
          |> assign(page_title: (focus && focus.name) || "Chat", focus: focus, count: 0)
-         |> assign(run_usage: %{turns: 0, credits: 0})
          |> assign(streaming: %{})
          |> assign(message_ids: [], earlier?: false, history?: false)
          |> stream(:messages, [], reset: true, limit: -@message_limit)
@@ -326,8 +324,7 @@ defmodule FactoryWeb.ChatLive do
       count: length(messages),
       message_ids: Enum.map(messages, & &1.id),
       earlier?: earlier?,
-      history?: false,
-      run_usage: Runs.usage(socket.assigns.run.id)
+      history?: false
     )
     |> stream(:messages, messages, reset: true, limit: -@message_limit)
   end
@@ -354,9 +351,7 @@ defmodule FactoryWeb.ChatLive do
     messages =
       Repo.all(from m in Message, where: m.id in ^socket.assigns.message_ids, order_by: m.id)
 
-    socket
-    |> assign(run_usage: Runs.usage(socket.assigns.run.id))
-    |> stream(:messages, messages, limit: -@message_limit)
+    stream(socket, :messages, messages, limit: -@message_limit)
   end
 
   # In an agent's view, show only what was sent to it and what it (or the factory about it) replied.
@@ -997,11 +992,6 @@ defmodule FactoryWeb.ChatLive do
              plan_check: if(message.meta["check"], do: message)
            ),
          else: socket
-
-    socket =
-      if message.author && socket.assigns.run,
-        do: assign(socket, run_usage: Runs.usage(socket.assigns.run.id)),
-        else: socket
 
     if visible?(message, socket) and not socket.assigns.history? do
       ids = socket.assigns.message_ids

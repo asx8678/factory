@@ -186,6 +186,17 @@ defmodule Factory.Chat do
     if workflow && Workflows.kind(workflow) == "incident" do
       names = Factory.Evidence.save(run, files)
 
+      # The user names they show, learned once for what the agents that search the web
+      # are given (`Factory.Engine`), rather than from the files for each prompt.
+      users = Factory.Redact.users_in(Enum.map(files, &elem(&1, 1)))
+      run = Runs.get_run(run.id)
+
+      {:ok, run} =
+        Runs.update_run(run, %{
+          settings:
+            Map.update(run.settings || %{}, "evidence_users", users, &Enum.uniq(&1 ++ users))
+        })
+
       say(
         run,
         "Kept #{Enum.join(names, ", ")} for the agents to search, whole, however big."

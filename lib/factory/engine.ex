@@ -1064,15 +1064,18 @@ defmodule Factory.Engine do
 
   # What an agent that searches the web never sees, besides what `Factory.Redact` finds
   # itself: the names listed in Settings, the user names anything in the run shows (the
-  # attached files too), and the run's folders.
+  # attached files too, learned as they came: `Factory.Chat`), and the run's folders.
   defp redaction(run) do
-    texts =
-      [run.description, run.spec] ++
-        Map.values(run.progress["outputs"] || %{}) ++ Factory.Evidence.heads(run)
+    texts = [run.description, run.spec] ++ Map.values(run.progress["outputs"] || %{})
+
+    # A run whose files came before Factory learned from them as they came.
+    attached =
+      (run.settings || %{})["evidence_users"] ||
+        Factory.Redact.users_in(Factory.Evidence.heads(run))
 
     [
       names: Factory.Redact.saved_names(),
-      users: Factory.Redact.users_in(texts),
+      users: Enum.uniq(Factory.Redact.users_in(texts) ++ attached),
       paths: [project_dir(run), Factory.Evidence.root(), Factory.Kiro.config(:workspace)]
     ]
   end
