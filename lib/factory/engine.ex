@@ -394,13 +394,14 @@ defmodule Factory.Engine do
     results = run.progress["verification"] || %{}
 
     todo =
-      if Application.get_env(:factory, :verify_tasks, true) and marks_tasks?(run, step),
-        do:
-          Enum.filter(
-            run.tasks,
-            &(&1.status == "done" and get_in(results, ["#{&1.id}", "passed"]) != true)
-          ),
-        else: []
+      if Application.get_env(:factory, :verify_tasks, true) and step.kind != "action" and
+           marks_tasks?(run, step),
+         do:
+           Enum.filter(
+             run.tasks,
+             &(&1.status == "done" and get_in(results, ["#{&1.id}", "passed"]) != true)
+           ),
+         else: []
 
     if todo == [], do: {:ok, run}, else: verify_each(run, step, output, todo)
   end
