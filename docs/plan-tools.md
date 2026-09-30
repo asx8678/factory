@@ -51,30 +51,41 @@ chat bubble.
 - A planner step whose run already has its tasks hands them on without a second
   planning turn. An action card with no arrows, in a workflow with agents, doesn't run.
 
-## Next
+## Planning from the chat, after the start, and on the Spec page
 
-1. **Create tasks after the run has started.** Messages to the planner then go to its
-   own `Kiro.Session`, which has the run tools but not the plan tools, so "create tasks
-   for X" does nothing. Give sessions the plan tools too (the session token already
-   resolves to the current turn; a planner turn outside a run step would resolve to the
-   run and its `planner_generation`). This also lets the draft planner use its session
-   instead of a fresh `Kiro.ask`, so follow-ups keep their context and cost less.
-2. **Asking for tasks without a planner.** "Fix a bug" and "Update dependencies" have no
-   planner agent, so the chat sends a request to the first agent (Investigator,
-   Auditor), which can't write tasks; plain text to Factory itself only takes slash
-   commands. Either route a draft's plain text to a planning turn whatever the first
-   agent is, or give those workflows a planner.
-3. **Spec page "Suggest tasks"** (`Specs.plan_questions/2`, `plan_tasks/2`): still its own
-   two-turn JSON flow. Moving it onto the tools would need a place for suggestions to
-   wait until they're picked (`spec.plan`), since the tools write the spec directly.
-4. **Questions in the chat.** The "Not clear enough to plan yet" badge shows even when
-   tasks came with the questions; questions asked alongside a plan are plain text under
-   it, not choices to click (`meta["questions"]` is stored). MCP elicitation for
-   mid-turn questions is untried (Kiro supports it, but it holds the turn open).
-5. **Loose action cards on the canvas** now don't run, but the Workflows page doesn't
-   say so. Mark them ("Not connected: won't run") on the card.
-6. **Don't resend the job and spec** to a session that already has them on a later step.
-   Interacts with `primed`, `carry` and `restart` after compaction.
+- A planning agent's Kiro session (planner, researcher or orchestrator kind) also has
+  the plan tools. In a chat message, the agent that plans the run
+  (`Factory.Chat.planner_for/1`) can read and change the plan before or after the run
+  starts (`Factory.PlanTools.call_in_turn/4`); after the start the plan can't be
+  replaced, and the run's tasks follow the spec, keeping which are done. The message
+  reminds the planner that only the tools change the plan.
+- `/run` on a finished run with open tasks runs it again; each step's prompt lists which
+  tasks are done.
+- Workflows without a planner plan with their first agent when it's a researcher or an
+  orchestrator; plain text to Factory on a draft goes to that planner.
+- A planner's questions with options show as choices in the chat; "Send answers" posts
+  them to the planner.
+- The Spec page's "Suggest tasks" adds suggestions with `suggest_tasks` into
+  `spec.plan["tasks"]` as they come (a token per round); the JSON reply is the fallback.
+- A run step's prompt is a brief (role, job, rules, spec, sources, instructions) and an
+  ask; the session sends the brief once per agent and run (again after a compaction or
+  restart, or when it changes).
+- Action cards with no arrows are marked on the canvas ("Not connected: runs skip it").
 
-Done since the first version: one task shape (`Factory.Specs.Planner.task/1`, `task_json/0`),
-and the boot reset no longer logs a sandbox error in tests (`reset_on_boot`).
+Verified on Kiro 2.26 (30 Sep 2026): after a run finished, the planner added a task with
+`get_plan` + `add_tasks` and `/run` built only that task; Spec page suggestions arrived
+3 at a time (20 in 40 s).
+
+## Open
+
+1. **MCP elicitation** for mid-turn questions is untried: Kiro supports it, but it holds
+   the turn open while the person answers. The chat's question choices cover the
+   common case.
+2. **Draft planning still uses a fresh `Kiro.ask`** per message (it's what guards against
+   a replaced request with `planner_generation`). The planner's session now has the
+   tools, so drafts could move onto it for context and cost; the generation guard would
+   have to move with it.
+3. **The chat's message box** says "Describe a change…" only for planner-kind agents;
+   an Investigator or Auditor that plans a draft shows "Message Investigator…".
+4. `test/factory/runs_test.exs` "pruning removes stale empty chats" failed once in a
+   full run and not in eight others; cause not found.
