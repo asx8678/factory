@@ -380,9 +380,9 @@ defmodule FactoryWeb.ChatLive do
   end
 
   # The plan being made (FactoryWeb.PlanPanel): each task edited, removed, or handed to
-  # Kiro to refine with the code or change as asked; or the whole plan reviewed again.
+  # Kiro to flesh out from the code or change as asked; or the whole plan reviewed again.
 
-  @refine "Refine this task with the code: read the code it touches and make it concrete. " <>
+  @refine "Flesh out this task: read the code it touches and make it concrete. " <>
             "Name the exact files and functions it changes, list the steps in order, and say " <>
             "how to check it's done. Keep it one small change."
 

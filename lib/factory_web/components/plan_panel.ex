@@ -7,7 +7,7 @@ defmodule FactoryWeb.PlanPanel do
   panel ends with the choice to implement the plan.
 
   A task too thin to build without guessing (`Factory.Specs.TaskCheck`) is marked with
-  what it's missing and the way to refine it. Review plan has the planner look at the
+  what it's missing; Flesh out has Kiro read the code it touches and fill it in. Review plan has the planner look at the
   code and the whole plan again, and improve it.
 
   Events (to the chat LiveView): `plan_edit`, `plan_edit_cancel`, `plan_save`,
@@ -173,7 +173,7 @@ defmodule FactoryWeb.PlanPanel do
               <p
                 :if={(i + 1) in @thin and @improve[task.title] == nil}
                 id={"chat-plan-thin-#{i}"}
-                title="Refine with code, or edit it, so an agent can build it without guessing"
+                title="Flesh it out, or edit it, so an agent can build it without guessing"
                 class="mt-1.5 flex items-center gap-1.5 text-xs text-warning"
               >
                 <.icon name="hero-exclamation-triangle-micro" class="size-3.5" />
@@ -294,7 +294,7 @@ defmodule FactoryWeb.PlanPanel do
         title="Kiro reads the code this task touches and rewrites it: the exact files, the steps, how to check it"
         class="flex h-6 items-center gap-1 rounded-md px-1.5 text-xs text-primary hover:bg-primary/10 disabled:opacity-40"
       >
-        <.icon name="hero-code-bracket-micro" class="size-3.5" /> Refine with code
+        <.icon name="hero-sparkles-micro" class="size-3.5" /> Flesh out
       </button>
       <button
         id={"chat-plan-change-#{@i}"}
