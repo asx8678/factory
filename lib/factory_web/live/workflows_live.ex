@@ -995,6 +995,7 @@ defmodule FactoryWeb.WorkflowsLive do
       flash={@flash}
       usage={@usage_meter}
       active_runs={@active_runs}
+      kiro={@kiro}
       active={:workflows}
       full
     >

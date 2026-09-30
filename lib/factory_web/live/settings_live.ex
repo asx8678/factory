@@ -11,8 +11,8 @@ defmodule FactoryWeb.SettingsLive do
 
   alias Factory.Kiro.Catalog
 
+  # The check's result arrives through FactoryWeb.KiroStatus, as `kiro_checked/2`.
   def mount(_params, _session, socket) do
-    if connected?(socket), do: Catalog.subscribe()
     {:ok, socket |> assign(page_title: "Settings", tabs: @tabs, checking: false) |> catalog()}
   end
 
@@ -44,8 +44,7 @@ defmodule FactoryWeb.SettingsLive do
     {:noreply, assign(socket, checking: true)}
   end
 
-  def handle_info({:kiro_catalog, _}, socket),
-    do: {:noreply, socket |> assign(checking: false) |> catalog()}
+  def kiro_checked(_catalog, socket), do: socket |> assign(checking: false) |> catalog()
 
   def handle_params(params, _uri, socket) do
     tab = if params["tab"] in Enum.map(@tabs, &elem(&1, 0)), do: params["tab"], else: "general"
@@ -77,7 +76,13 @@ defmodule FactoryWeb.SettingsLive do
 
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} usage={@usage_meter} active_runs={@active_runs} active={:settings}>
+    <Layouts.app
+      flash={@flash}
+      usage={@usage_meter}
+      active_runs={@active_runs}
+      kiro={@kiro}
+      active={:settings}
+    >
       <Layouts.page_title title="Settings" />
 
       <div class="grid gap-10 md:grid-cols-[12rem_minmax(0,1fr)]">

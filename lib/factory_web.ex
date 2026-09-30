@@ -54,6 +54,7 @@ defmodule FactoryWeb do
 
       on_mount FactoryWeb.UsageMeter
       on_mount FactoryWeb.ActiveRuns
+      on_mount FactoryWeb.KiroStatus
 
       unquote(html_helpers())
     end

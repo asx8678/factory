@@ -392,6 +392,10 @@ defmodule Factory.Chat do
           question
       end
 
+    prompt_agent(run, agent, text)
+  end
+
+  defp prompt_agent(run, agent, text) do
     tagged(agent, fn ->
       case Kiro.prompt(agent, run.id, text) do
         :ok ->
@@ -401,10 +405,51 @@ defmodule Factory.Chat do
           say(run, "#{agent.name} is still answering. Try again when it's idle.")
 
         {:error, reason} ->
-          say(run, "Couldn't start Kiro for #{agent.name}: #{inspect(reason)}")
+          say(run, "Couldn't start Kiro for #{agent.name}: #{reason_text(reason)}")
       end
     end)
   end
+
+  @doc """
+  The Try again under a failure (`Factory.ChatPlanner`, `Factory.Kiro.Session`): what
+  Kiro couldn't take goes again, once whatever stopped it is fixed (signed out, say).
+  The plan is planned again the same way; a message goes to its agent again. Once per
+  failure: the button goes when it's used.
+  """
+  def retry(%Run{} = run, %{meta: %{"retry" => %{} = retry}} = message) do
+    if message.run_id == run.id and "retry" in message.actions and !message.meta["retried"] do
+      Runs.update_message_meta(message.id, &Map.put(&1, "retried", true))
+
+      case retry do
+        %{"kind" => "plan"} ->
+          case planner_for(run) do
+            nil -> say(run, "This chat has no planner to plan it.")
+            planner -> Factory.ChatPlanner.start(run, planner, plan_again(retry["action"]))
+          end
+
+        %{"kind" => "ask", "agent_id" => id, "text" => text} when is_binary(text) ->
+          case Agents.get_agent(id) do
+            nil -> say(run, "That agent is gone, so there's nobody to send it to.")
+            agent -> prompt_agent(run, agent, text)
+          end
+
+        _ ->
+          :ok
+      end
+    end
+
+    :ok
+  end
+
+  def retry(_run, _message), do: :ok
+
+  defp plan_again("scope"), do: [action: :scope]
+  defp plan_again("refine"), do: [action: :refine]
+  defp plan_again(_), do: []
+
+  # Reasons come as sentences; anything else as Elixir writes it.
+  defp reason_text(reason) when is_binary(reason), do: reason
+  defp reason_text(reason), do: inspect(reason)
 
   defp agent_line(a), do: "• #{a.name}: #{a.model}, #{a.kiro_mode} mode"
 

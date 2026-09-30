@@ -783,7 +783,13 @@ defmodule FactoryWeb.SpecLive do
 
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} usage={@usage_meter} active_runs={@active_runs} active={:specs}>
+    <Layouts.app
+      flash={@flash}
+      usage={@usage_meter}
+      active_runs={@active_runs}
+      kiro={@kiro}
+      active={:specs}
+    >
       <Layouts.back_link :if={!@home_run} to={~p"/specs"}>Specs</Layouts.back_link>
       <Layouts.back_link :if={@home_run} to={~p"/chat/#{@home_run.id}"}>
         {@home_run.title}

@@ -259,6 +259,76 @@ defmodule Factory.Kiro do
   @doc "Asks Kiro one question in a throwaway session and waits for the reply. See `Factory.Kiro.Ask`."
   defdelegate ask(text, opts \\ []), to: Factory.Kiro.Ask, as: :run
 
+  @signed_out "Kiro isn't signed in. Run `kiro-cli login` in a terminal, then try again."
+
+  @doc """
+  Where the log `log_name` ends now. Taken just before `open_port/2`, it marks where
+  that kiro-cli's own lines begin, for `stop_reason/3`: the logs are shared by every
+  kiro-cli that ran under the same name.
+  """
+  def log_mark(log_name) do
+    case File.stat(Path.join(config(:log_dir), log_name)) do
+      {:ok, %{size: size}} -> size
+      _ -> 0
+    end
+  end
+
+  @doc """
+  Why kiro-cli stopped with exit `code`, in words, from what it wrote to the log
+  `log_name` after `mark` (`log_mark/1`): not signed in, or else the last error it gave.
+  What it says on any way out (its output closed, its engine slow to stop) isn't a
+  reason. Failing both, the exit code and where the log is.
+  """
+  def stop_reason(log_name, mark, code) do
+    lines =
+      log_name
+      |> log_since(mark)
+      |> String.split(~r/\R/)
+      |> Enum.map(&String.trim/1)
+
+    error =
+      lines
+      |> Enum.filter(&String.starts_with?(&1, "error:"))
+      |> Enum.reject(&(&1 =~ ~r/failed to forward|did not exit within/))
+      |> List.last()
+
+    cond do
+      Enum.any?(lines, &(&1 =~ ~r/not logged in/i)) ->
+        @signed_out
+
+      error ->
+        "Kiro stopped: #{error |> String.replace_prefix("error:", "") |> String.trim()} " <>
+          "(exit code #{code}). Details are in tmp/kiro-logs/#{log_name}."
+
+      true ->
+        "Kiro stopped unexpectedly (exit code #{code}). Details are in tmp/kiro-logs/#{log_name}."
+    end
+  end
+
+  @doc "Whether `reason` (`stop_reason/3`) is that Kiro isn't signed in."
+  def signed_out?(reason), do: reason == @signed_out
+
+  # What kiro-cli wrote to its log after `mark`, at most the last 64 KB of it. A log
+  # that's shorter than the mark was started again: all of it is new.
+  defp log_since(log_name, mark) do
+    path = Path.join(config(:log_dir), log_name)
+
+    with {:ok, %{size: size}} <- File.stat(path),
+         from = if(size < mark, do: 0, else: max(mark, size - 65_536)),
+         {:ok, file} <- File.open(path, [:read, :binary]) do
+      try do
+        case :file.pread(file, from, size - from) do
+          {:ok, data} -> data
+          _ -> ""
+        end
+      after
+        File.close(file)
+      end
+    else
+      _ -> ""
+    end
+  end
+
   @doc """
   Starts `kiro-cli acp --agent-engine v3` in `workdir`, with its stderr going to
   `log_name` in the log folder. Messages arrive as `{port, {:data, {:eol | :noeol, text}}}`.

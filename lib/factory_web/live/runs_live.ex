@@ -44,7 +44,13 @@ defmodule FactoryWeb.RunsLive do
 
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} usage={@usage_meter} active_runs={@active_runs} active={:runs}>
+    <Layouts.app
+      flash={@flash}
+      usage={@usage_meter}
+      active_runs={@active_runs}
+      kiro={@kiro}
+      active={:runs}
+    >
       <Layouts.page_title
         title="Runs"
         subtitle="Every factory run and chat, newest first, with what it cost."

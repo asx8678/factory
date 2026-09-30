@@ -183,7 +183,13 @@ defmodule Factory.ChatPlanner do
           result -> result
         end
 
-      result = with {:ok, r} <- result, do: {:ok, Map.put(r, :check, mode == :scope)}
+      result =
+        case result do
+          {:ok, r} -> {:ok, Map.put(r, :check, mode == :scope)}
+          # A failure remembers what was asked, for its Try again.
+          {:error, reason} -> {:error, reason, mode}
+        end
+
       finish(run.id, generation, planner, files, result)
     end)
 
@@ -372,9 +378,22 @@ defmodule Factory.ChatPlanner do
     end
   end
 
-  defp finish(run, planner, _files, {:error, reason}) do
+  defp finish(run, planner, files, {:error, reason}),
+    do: finish(run, planner, files, {:error, reason, nil})
+
+  # The chat's Try again (`Factory.Chat.retry/2`) plans again the same way (a scope
+  # check, a refine, or the plan), once whatever stopped it is fixed.
+  defp finish(run, planner, _files, {:error, reason, mode}) do
     Agents.set_activity(planner.id, "error", reason)
-    post(run, planner, "I couldn't plan it: #{reason} Try again, or say it differently.", %{})
+    hint = if reason =~ ~r/try again/i, do: "", else: " Try again, or say it differently."
+
+    post(
+      run,
+      planner,
+      "I couldn't plan it: #{reason}#{hint}",
+      %{"retry" => %{"kind" => "plan", "action" => mode && to_string(mode)}},
+      ["retry"]
+    )
   end
 
   defp ask(run, planner, reply, questions) do

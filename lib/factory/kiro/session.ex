@@ -154,6 +154,8 @@ defmodule Factory.Kiro.Session do
     :switching,
     # new with each kiro-cli, in the token its MCP server gets (`mcp_servers/1`)
     :nonce,
+    # where that kiro-cli's lines begin in its log (`Kiro.stop_reason/3`)
+    log_mark: 0,
     buffer: "",
     next_id: 1,
     pending: %{},
@@ -270,12 +272,16 @@ defmodule Factory.Kiro.Session do
 
   # Starts kiro-cli and opens a Kiro session in it (answered in handle_message/2).
   defp open(state) do
-    log_name = if state.key == :shared, do: "shared.log", else: "agent-#{state.key}.log"
-    port = Kiro.open_port(state.workdir, log_name)
+    mark = Kiro.log_mark(log_name(state))
+    port = Kiro.open_port(state.workdir, log_name(state))
     nonce = Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
     params = %{protocolVersion: 1, clientCapabilities: %{}}
-    request(%{state | port: port, nonce: nonce}, "initialize", params, :initialize)
+    state = %{state | port: port, nonce: nonce, log_mark: mark}
+    request(state, "initialize", params, :initialize)
   end
+
+  defp log_name(%{key: :shared}), do: "shared.log"
+  defp log_name(%{key: key}), do: "agent-#{key}.log"
 
   @impl true
   def handle_call({:prompt, agent, run_id, text, opts}, _from, state) do
@@ -436,10 +442,10 @@ defmodule Factory.Kiro.Session do
   end
 
   def handle_info({port, {:exit_status, code}}, %{port: port} = state) do
-    fail(
-      %{state | port: nil},
-      "Kiro stopped unexpectedly (exit code #{code}). Details are in tmp/kiro-logs."
-    )
+    reason = Kiro.stop_reason(log_name(state), state.log_mark, code)
+    # Signed out: every page says so until Kiro works again.
+    if Kiro.signed_out?(reason), do: Factory.Kiro.Catalog.note_failure(reason)
+    fail(%{state | port: nil}, reason)
   end
 
   def handle_info({:request_timeout, id}, state) do
@@ -549,6 +555,9 @@ defmodule Factory.Kiro.Session do
         )
 
       {:new_session, %{"result" => %{"sessionId" => sid} = result}} ->
+        # A session opened, so Kiro is signed in again: a check clears the warning.
+        if Factory.Kiro.Catalog.signed_out?(), do: Factory.Kiro.Catalog.check_later()
+
         next(%{
           state
           | session_id: sid,
@@ -1096,13 +1105,7 @@ defmodule Factory.Kiro.Session do
   defp reject_switch(%{switching: %Job{} = job} = state, reason) do
     Agents.set_activity(job.agent.id, "error", reason)
     answer(job, {:error, reason})
-
-    if run = Runs.get_run(job.run_id) do
-      Runs.post(run, "factory", "#{job.agent.name} couldn't start: #{reason}",
-        meta: %{"agent_id" => job.agent.id}
-      )
-    end
-
+    tell_failed(job, reason)
     %{state | switching: nil}
   end
 
@@ -1374,19 +1377,32 @@ defmodule Factory.Kiro.Session do
     state = if state.turn, do: finish_turn(state, why.(state.turn.agent)), else: state
     waiting = if state.switching, do: [state.switching | state.queue], else: state.queue
 
-    for %Job{agent: agent, run_id: run_id, gone: false} = job <- waiting do
+    for %Job{agent: agent, gone: false} = job <- waiting do
       Agents.set_activity(agent.id, "error", why.(agent))
       answer(job, {:error, why.(agent)})
-
-      if run = Runs.get_run(run_id) do
-        Runs.post(run, "factory", "#{agent.name} couldn't start: #{why.(agent)}",
-          meta: %{"agent_id" => agent.id}
-        )
-      end
+      tell_failed(job, why.(agent))
     end
 
     %{state | queue: [], switching: nil}
   end
+
+  # A job that failed before its turn: its chat hears why, unless whoever sent it waits
+  # for the answer and says so itself (the planner, a run step), which would say it
+  # twice. A message sent from the chat can be sent again from there
+  # (`Factory.Chat.retry/2`), once whatever stopped it is fixed.
+  defp tell_failed(%Job{reply_to: nil} = job, reason) do
+    if run = Runs.get_run(job.run_id) do
+      Runs.post(run, "factory", "#{job.agent.name} couldn't start: #{reason}",
+        meta: %{
+          "agent_id" => job.agent.id,
+          "retry" => %{"kind" => "ask", "agent_id" => job.agent.id, "text" => job.text}
+        },
+        actions: ["retry"]
+      )
+    end
+  end
+
+  defp tell_failed(_job, _reason), do: :ok
 
   # Nobody waits for a job any more (`mine?` picks it): its caller gave up on it
   # (`withdraw/2`) or ended. A job still queued is dropped. The turn in progress is

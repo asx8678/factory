@@ -28,6 +28,9 @@ defmodule Factory.Kiro.Catalog do
   @doc "The error from the last check, if it failed."
   def error, do: get()["error"]
 
+  @doc "Whether the last check, or a Kiro that stopped since, found Kiro signed out."
+  def signed_out?, do: Kiro.signed_out?(error())
+
   defp get, do: :persistent_term.get(@key, %{})
 
   @doc "Loads the catalog remembered from the last check. Called at startup."
@@ -55,16 +58,23 @@ defmodule Factory.Kiro.Catalog do
         {:ok, catalog}
 
       {:error, reason} ->
-        save(
-          Map.merge(get(), %{
-            "error" => reason,
-            "failed_at" => DateTime.utc_now(:second) |> DateTime.to_iso8601()
-          })
-        )
-
+        note_failure(reason)
         Logger.warning("Couldn't check Kiro's models: #{reason}")
         {:error, reason}
     end
+  end
+
+  @doc """
+  Remembers why Kiro couldn't be used, keeping the last good list: a failed check, or
+  a session that found Kiro signed out. Pages show it until a check works again.
+  """
+  def note_failure(reason) do
+    save(
+      Map.merge(get(), %{
+        "error" => reason,
+        "failed_at" => DateTime.utc_now(:second) |> DateTime.to_iso8601()
+      })
+    )
   end
 
   @doc "Checks in the background, e.g. at startup."
@@ -86,6 +96,7 @@ defmodule Factory.Kiro.Catalog do
     workdir = Kiro.config(:workspace)
     File.mkdir_p!(workdir)
     File.mkdir_p!(Kiro.config(:log_dir))
+    mark = Kiro.log_mark("catalog.log")
     port = Kiro.open_port(workdir, "catalog.log")
 
     try do
@@ -95,14 +106,14 @@ defmodule Factory.Kiro.Catalog do
         params: %{protocolVersion: 1, clientCapabilities: %{}}
       })
 
-      with {:ok, _} <- await(port, 1),
+      with {:ok, _} <- await(port, 1, mark),
            :ok <-
              send_json(port, %{
                id: 2,
                method: "session/new",
                params: %{cwd: workdir, mcpServers: []}
              }),
-           {:ok, result} <- await(port, 2) do
+           {:ok, result} <- await(port, 2, mark) do
         options =
           for %{"id" => id, "options" => opts} <- List.wrap(result["configOptions"]),
               id in ["model", "mode"],
@@ -133,15 +144,16 @@ defmodule Factory.Kiro.Catalog do
   defp send_json(port, msg), do: Wire.send_json(port, Map.put(msg, :jsonrpc, "2.0"))
 
   # Waits for the reply to request `id`, at most @timeout in all however much else Kiro
-  # sends meanwhile.
-  defp await(port, id), do: await(port, id, "", System.monotonic_time(:millisecond) + @timeout)
+  # sends meanwhile. `mark` is where this kiro-cli's lines begin in its log.
+  defp await(port, id, mark),
+    do: await(port, id, mark, "", System.monotonic_time(:millisecond) + @timeout)
 
-  defp await(port, id, buffer, deadline) do
+  defp await(port, id, mark, buffer, deadline) do
     receive do
       {^port, {:data, data}} ->
         case Wire.read(buffer, data) do
           {:partial, buffer} ->
-            await(port, id, buffer, deadline)
+            await(port, id, mark, buffer, deadline)
 
           {:message, %{"id" => ^id, "result" => result}} ->
             {:ok, result}
@@ -150,11 +162,11 @@ defmodule Factory.Kiro.Catalog do
             {:error, error["message"] || inspect(error)}
 
           _ ->
-            await(port, id, "", deadline)
+            await(port, id, mark, "", deadline)
         end
 
       {^port, {:exit_status, status}} ->
-        {:error, "kiro-cli stopped (exit #{status}). Is it installed and signed in?"}
+        {:error, Kiro.stop_reason("catalog.log", mark, status)}
     after
       max(deadline - System.monotonic_time(:millisecond), 0) ->
         {:error, "Kiro didn't answer within #{div(@timeout, 1000)} seconds."}

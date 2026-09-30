@@ -520,6 +520,17 @@ defmodule FactoryWeb.ChatLive do
     {:noreply, socket}
   end
 
+  # Try again under a failure: what Kiro couldn't take goes again (`Factory.Chat.retry/2`).
+  def handle_event("retry", %{"id" => id}, socket) do
+    with %{} = run <- socket.assigns.run,
+         {id, ""} <- Integer.parse(to_string(id)),
+         %Message{} = message <- Repo.get(Message, id) do
+      Chat.retry(Runs.get_run(run.id), message)
+    end
+
+    {:noreply, socket}
+  end
+
   # Pause and Resume beside the workflow: the same as typing the command.
   def handle_event("control", %{"command" => command}, socket)
       when command in ["/pause", "/resume"] do
@@ -934,7 +945,14 @@ defmodule FactoryWeb.ChatLive do
 
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} usage={@usage_meter} active_runs={@active_runs} active={:chat} full>
+    <Layouts.app
+      flash={@flash}
+      usage={@usage_meter}
+      active_runs={@active_runs}
+      kiro={@kiro}
+      active={:chat}
+      full
+    >
       <div id="chat-page" phx-hook="ChatKeys" class="flex h-full flex-col bg-base-100">
         <header class="flex min-h-11 shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-base-300 px-4 py-1.5 sm:px-6">
           <.chat_switcher runs={@runs} run={@run} />

@@ -45,11 +45,13 @@ defmodule Factory.Kiro.Ask do
   end
 
   defp converse(text, workdir, opts) do
+    mark = Kiro.log_mark("ask.log")
     port = Kiro.open_port(workdir, "ask.log")
     deadline = System.monotonic_time(:millisecond) + Kiro.config(:prompt_timeout)
 
     conn = %{
       port: port,
+      log_mark: mark,
       workdir: workdir,
       deadline: deadline,
       allow: opts[:allow] || [],
@@ -166,9 +168,10 @@ defmodule Factory.Kiro.Ask do
         end
 
       {^port, {:exit_status, code}} ->
-        {:error,
-         "Kiro stopped unexpectedly (exit code #{code}). Details are in tmp/kiro-logs/ask.log.",
-         acc}
+        reason = Kiro.stop_reason("ask.log", conn.log_mark, code)
+        # Signed out: every page says so until Kiro works again.
+        if Kiro.signed_out?(reason), do: Kiro.Catalog.note_failure(reason)
+        {:error, reason, acc}
     after
       timeout ->
         {:error,

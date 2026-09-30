@@ -38,6 +38,10 @@ defmodule FactoryWeb.Layouts do
     default: 0,
     doc: "queued and running runs for the header, from FactoryWeb.ActiveRuns"
 
+  attr :kiro, :map,
+    default: nil,
+    doc: "whether Kiro is signed in (`signed_out`, `checking`), from FactoryWeb.KiroStatus"
+
   attr :current_scope, :map,
     default: nil,
     doc: "the current [scope](https://phoenix.hexdocs.pm/scopes.html)"
@@ -95,6 +99,7 @@ defmodule FactoryWeb.Layouts do
         </nav>
 
         <div class="flex items-center gap-4 text-sm">
+          <.kiro_signed_out :if={@kiro && @kiro.signed_out} checking={@kiro.checking} />
           <.link
             :if={@active_runs > 0}
             id="active-runs"
@@ -118,6 +123,36 @@ defmodule FactoryWeb.Layouts do
     </main>
 
     <.flash_group flash={@flash} />
+    """
+  end
+
+  attr :checking, :boolean, default: false
+
+  # Agents can't run while Kiro is signed out: said before anything is sent, with how
+  # to fix it and a way to check again (FactoryWeb.KiroStatus handles "kiro_check").
+  defp kiro_signed_out(assigns) do
+    ~H"""
+    <div
+      id="kiro-signed-out"
+      role="status"
+      class="flex items-center gap-2 rounded-full border border-warning/40 bg-warning/10 py-0.5 pr-1 pl-2.5 text-xs text-base-content/80"
+    >
+      <.icon name="hero-exclamation-triangle-mini" class="size-4 shrink-0 text-warning" />
+      <span class="whitespace-nowrap">
+        Kiro isn't signed in<span class="hidden lg:inline">: run
+        <code class="font-mono">kiro-cli login</code>
+        in a terminal</span>
+      </span>
+      <button
+        id="kiro-check"
+        type="button"
+        phx-click="kiro_check"
+        disabled={@checking}
+        class="rounded-full bg-base-100 px-2 py-0.5 font-medium text-base-content/75 shadow-sm transition-colors hover:text-base-content disabled:opacity-60"
+      >
+        {if @checking, do: "Checking…", else: "Check again"}
+      </button>
+    </div>
     """
   end
 

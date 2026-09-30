@@ -596,6 +596,7 @@ defmodule FactoryWeb.ChatParts do
         id={"answers-#{@message.id}"}
         message={@message}
       />
+      <.retry_button message={@message} run={@run} />
       <.plan_card
         :if={@message.meta["tasks"] not in [nil, []]}
         id={"plan-#{@message.id}"}
@@ -622,6 +623,7 @@ defmodule FactoryWeb.ChatParts do
       <div id={"md-#{@id}"} class="md" phx-hook="Markdown" phx-update="ignore">
         {FactoryWeb.Markdown.render(@message.body)}
       </div>
+      <.retry_button message={@message} run={@run} />
       <button
         :if={"start" in @message.actions and startable?(@run)}
         id={"start-#{@message.id}"}
@@ -749,6 +751,30 @@ defmodule FactoryWeb.ChatParts do
   end
 
   defp startable?(run), do: run && run.status == "draft" && run.tasks != []
+
+  attr :message, :map, required: true
+  attr :run, :map, default: nil
+
+  # Under a failure Kiro couldn't take (signed out, say): sends it again, once. A plan
+  # is planned again only while the run is a draft.
+  defp retry_button(assigns) do
+    ~H"""
+    <button
+      :if={retryable?(@message, @run)}
+      id={"retry-#{@message.id}"}
+      phx-click="retry"
+      phx-value-id={@message.id}
+      class="mt-3 inline-flex items-center gap-1.5 rounded-full border border-base-content/15 px-3.5 py-1 text-sm font-medium transition-colors hover:border-primary/40 hover:bg-primary/5"
+    >
+      <.icon name="hero-arrow-path-mini" class="size-4" /> Try again
+    </button>
+    """
+  end
+
+  defp retryable?(message, run) do
+    "retry" in message.actions and !message.meta["retried"] and run != nil and
+      (message.meta["retry"]["kind"] != "plan" or run.status == "draft")
+  end
 
   attr :names, :list, required: true
 
