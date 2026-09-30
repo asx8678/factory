@@ -17,15 +17,21 @@ defmodule FactoryWeb.SettingsLive do
   end
 
   defp catalog(socket) do
+    planning = Factory.Prefs.get("planning_model")
+    verifying = Factory.Prefs.get("verify_model")
+
     assign(socket,
       models: Catalog.models() || [],
       modes: Catalog.modes() || [],
       checked_at: Catalog.checked_at(),
       check_error: Catalog.error(),
-      planning: Factory.Prefs.get("planning_model"),
-      verifying: Factory.Prefs.get("verify_model")
+      role_form: to_form(%{"planning" => planning || "", "verifying" => verifying || ""})
     )
   end
+
+  # A role's choices: Factory's own pick first, then every model this Kiro offers.
+  defp model_options(models, default_label),
+    do: [{default_label, ""} | for(m <- models, do: {m["name"], m["value"]})]
 
   # Which model plans and which verifies; "" goes back to Factory's choice.
   def handle_event("role_models", params, socket) do
@@ -105,34 +111,34 @@ defmodule FactoryWeb.SettingsLive do
                 <p class="mt-0.5 text-sm text-base-content/55">
                   Plan with the strongest model Factory uses, build on Auto, and verify with a different, quicker one.
                 </p>
-                <form
+                <.form
+                  for={@role_form}
                   id="role-models-form"
                   phx-change="role_models"
                   class="mt-3 divide-y divide-base-300/70 rounded-xl border border-base-300/70"
                 >
-                  <label class="flex items-center gap-4 px-3.5 py-3">
+                  <div class="flex items-center gap-4 px-3.5 py-3">
                     <span class="min-w-0 flex-1">
                       <span class="block text-sm font-medium">Planning</span>
                       <span class="block text-xs text-base-content/55">
                         The chat's planner, Scope and Refine, and Suggest with AI and Improve on the Spec page.
                       </span>
                     </span>
-                    <select
-                      name="planning"
-                      class="h-8 w-56 shrink-0 rounded-md border border-base-300 bg-base-100 px-2 text-[13px] outline-none focus:border-base-content/30"
-                    >
-                      <option value="" selected={@planning in [nil, ""]}>
-                        Factory's choice ({Factory.Kiro.model_name(Factory.Kiro.strongest())})
-                      </option>
-                      <option
-                        :for={m <- @models}
-                        value={m["value"]}
-                        selected={@planning == m["value"]}
-                      >
-                        {m["name"]}
-                      </option>
-                    </select>
-                  </label>
+                    <.input
+                      field={@role_form[:planning]}
+                      type="select"
+                      id="planning-model"
+                      aria-label="Planning model"
+                      options={
+                        model_options(
+                          @models,
+                          "Factory's choice (#{Factory.Kiro.model_name(Factory.Kiro.strongest())})"
+                        )
+                      }
+                      class="h-8 w-full rounded-md border border-base-300 bg-base-100 px-2 text-[13px] outline-none focus:border-base-content/30"
+                      wrapper_class="w-56 shrink-0"
+                    />
+                  </div>
                   <div class="flex items-center gap-4 px-3.5 py-3">
                     <span class="min-w-0 flex-1">
                       <span class="block text-sm font-medium">Building</span>
@@ -144,30 +150,29 @@ defmodule FactoryWeb.SettingsLive do
                       Per agent, Auto unless set
                     </span>
                   </div>
-                  <label class="flex items-center gap-4 px-3.5 py-3">
+                  <div class="flex items-center gap-4 px-3.5 py-3">
                     <span class="min-w-0 flex-1">
                       <span class="block text-sm font-medium">Verifying</span>
                       <span class="block text-xs text-base-content/55">
                         Checks each finished task against its Verify list, running its commands, and sends it back when a check fails.
                       </span>
                     </span>
-                    <select
-                      name="verifying"
-                      class="h-8 w-56 shrink-0 rounded-md border border-base-300 bg-base-100 px-2 text-[13px] outline-none focus:border-base-content/30"
-                    >
-                      <option value="" selected={@verifying in [nil, ""]}>
-                        Quick and different ({Factory.Kiro.model_name(Factory.Kiro.quick())})
-                      </option>
-                      <option
-                        :for={m <- @models}
-                        value={m["value"]}
-                        selected={@verifying == m["value"]}
-                      >
-                        {m["name"]}
-                      </option>
-                    </select>
-                  </label>
-                </form>
+                    <.input
+                      field={@role_form[:verifying]}
+                      type="select"
+                      id="verifying-model"
+                      aria-label="Verifying model"
+                      options={
+                        model_options(
+                          @models,
+                          "Quick and different (#{Factory.Kiro.model_name(Factory.Kiro.quick())})"
+                        )
+                      }
+                      class="h-8 w-full rounded-md border border-base-300 bg-base-100 px-2 text-[13px] outline-none focus:border-base-content/30"
+                      wrapper_class="w-56 shrink-0"
+                    />
+                  </div>
+                </.form>
                 <p
                   :if={!Enum.any?(@models, &String.contains?(&1["value"], "opus"))}
                   class="mt-2 text-xs text-base-content/55"

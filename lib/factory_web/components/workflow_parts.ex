@@ -241,7 +241,11 @@ defmodule FactoryWeb.WorkflowParts do
       assign(assigns,
         standard: standard,
         custom: custom,
-        modified: Workflows.modified?(assigns.workflow)
+        modified: Workflows.modified?(assigns.workflow),
+        name_form:
+          to_form(%{
+            "name" => if(assigns.naming == "rename", do: assigns.workflow.name, else: "")
+          })
       )
 
     ~H"""
@@ -303,8 +307,9 @@ defmodule FactoryWeb.WorkflowParts do
         </span>
       </div>
 
-      <form
+      <.form
         :if={@naming in ["rename", "new"]}
+        for={@name_form}
         id="workflow-name-form"
         phx-submit={if @naming == "new", do: "wf_create", else: "wf_rename"}
         phx-keydown="wf_naming"
@@ -312,21 +317,22 @@ defmodule FactoryWeb.WorkflowParts do
         phx-value-what=""
         class="flex items-center gap-2"
       >
-        <input
-          name="name"
-          value={if @naming == "rename", do: @workflow.name, else: ""}
+        <.input
+          field={@name_form[:name]}
+          id="workflow-name-input"
           placeholder="Workflow name"
           maxlength="60"
           phx-mounted={JS.focus()}
-          class="h-7 w-60 rounded-md border border-base-300 bg-base-100 px-2.5 text-sm outline-none focus:border-base-content/30"
+          class="h-7 w-full rounded-md border border-base-300 bg-base-100 px-2.5 text-sm outline-none focus:border-base-content/30"
+          wrapper_class="w-60"
         />
-        <button class="btn btn-primary btn-xs">
+        <button id="workflow-name-save" class="btn btn-primary btn-xs">
           {if @naming == "new", do: "Create", else: "Rename"}
         </button>
         <button type="button" phx-click="wf_naming" phx-value-what="" class="btn btn-ghost btn-xs">
           Cancel
         </button>
-      </form>
+      </.form>
 
       <div class="ml-auto flex flex-wrap items-center gap-1">
         <.bar_button
@@ -454,6 +460,8 @@ defmodule FactoryWeb.WorkflowParts do
 
   # Editing what an arrow says on its hand-off.
   def link_prompt_window(assigns) do
+    assigns = assign(assigns, form: to_form(%{"prompt" => assigns.link.prompt}))
+
     ~H"""
     <div
       id="link-prompt-window"
@@ -462,7 +470,7 @@ defmodule FactoryWeb.WorkflowParts do
       phx-key="Escape"
     >
       <.form
-        for={%{}}
+        for={@form}
         id="link-prompt-form"
         phx-submit="link_prompt_save"
         phx-click-away="link_prompt_close"
@@ -495,17 +503,21 @@ defmodule FactoryWeb.WorkflowParts do
           </button>
         </header>
         <div class="px-5 py-4">
-          <textarea
+          <.input
+            field={@form[:prompt]}
+            type="textarea"
             id="link-prompt-text"
-            name="prompt"
             rows="7"
             phx-mounted={JS.focus()}
             placeholder={"e.g. Only pass on the tasks that touch the API, and list the files you changed so #{@to.name} can start there."}
             class="textarea w-full text-sm leading-relaxed"
-          >{@link.prompt}</textarea>
+            wrapper_class="block"
+          />
         </div>
         <footer class="flex items-center gap-2 border-t border-base-content/10 px-5 py-3">
-          <button type="submit" class="btn btn-primary btn-sm">Save prompt</button>
+          <button type="submit" id="link-prompt-save" class="btn btn-primary btn-sm">
+            Save prompt
+          </button>
           <button type="button" phx-click="link_prompt_close" class="btn btn-ghost btn-sm">
             Cancel
           </button>

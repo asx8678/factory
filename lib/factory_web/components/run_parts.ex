@@ -73,16 +73,11 @@ defmodule FactoryWeb.RunParts do
   def run_state(assigns) do
     ~H"""
     <span class="inline-flex items-center gap-1.5 text-xs text-base-content/60">
-      <span class={["size-1.5 rounded-full", state_dot(@run)]}></span>
+      <span class={["size-1.5 rounded-full", Layouts.status_dot(@run.status)]}></span>
       {state_text(@run)}
     </span>
     """
   end
-
-  defp state_dot(%{status: status}) when status in ~w(queued running), do: "bg-info"
-  defp state_dot(%{status: "paused"}), do: "bg-warning"
-  defp state_dot(%{status: "done"}), do: "bg-success"
-  defp state_dot(_), do: "bg-base-content/30"
 
   defp state_text(%{status: status}), do: String.capitalize(status)
 end

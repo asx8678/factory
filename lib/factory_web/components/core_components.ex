@@ -186,6 +186,10 @@ defmodule FactoryWeb.CoreComponents do
   attr :class, :any, default: nil, doc: "the input class to use over defaults"
   attr :error_class, :any, default: nil, doc: "the input error class to use over defaults"
 
+  attr :wrapper_class, :any,
+    default: nil,
+    doc: "the class of the element around the label and input, over the default fieldset"
+
   attr :rest, :global,
     include: ~w(accept autocomplete capture cols disabled form list max maxlength min minlength
                 multiple pattern placeholder readonly required rows size step)
@@ -214,7 +218,7 @@ defmodule FactoryWeb.CoreComponents do
       end)
 
     ~H"""
-    <div class="fieldset mb-2">
+    <div class={@wrapper_class || "fieldset mb-2"}>
       <label for={@id}>
         <input
           type="hidden"
@@ -242,7 +246,7 @@ defmodule FactoryWeb.CoreComponents do
 
   def input(%{type: "select"} = assigns) do
     ~H"""
-    <div class="fieldset mb-2">
+    <div class={@wrapper_class || "fieldset mb-2"}>
       <label for={@id}>
         <span :if={@label} class="label mb-1">{@label}</span>
         <select
@@ -263,7 +267,7 @@ defmodule FactoryWeb.CoreComponents do
 
   def input(%{type: "textarea"} = assigns) do
     ~H"""
-    <div class="fieldset mb-2">
+    <div class={@wrapper_class || "fieldset mb-2"}>
       <label for={@id}>
         <span :if={@label} class="label mb-1">{@label}</span>
         <textarea
@@ -284,7 +288,7 @@ defmodule FactoryWeb.CoreComponents do
   # All other inputs text, datetime-local, url, password, etc. are handled here...
   def input(assigns) do
     ~H"""
-    <div class="fieldset mb-2">
+    <div class={@wrapper_class || "fieldset mb-2"}>
       <label for={@id}>
         <span :if={@label} class="label mb-1">{@label}</span>
         <input
@@ -453,6 +457,39 @@ defmodule FactoryWeb.CoreComponents do
     <span class={[@name, @class]} />
     """
   end
+
+  @doc """
+  Why a file can't be uploaded, in a few words, for the errors `upload_errors/1,2` list;
+  the limits come from the upload's configuration (`allow_upload/3`).
+  """
+  def upload_error(:too_large, upload),
+    do: "larger than #{div(upload.max_file_size, 1_000_000)} MB"
+
+  def upload_error(:not_accepted, _upload), do: "only .md and .txt files"
+  def upload_error(:too_many_files, %{max_entries: 1}), do: "one file at a time"
+  def upload_error(:too_many_files, upload), do: "up to #{upload.max_entries} files at a time"
+  def upload_error(err, _upload), do: to_string(err)
+
+  @doc """
+  Text with `code` spans shown as code and everything else escaped, as safe HTML. Built
+  as a string rather than a template, so no template whitespace gets into text whose
+  line breaks are kept (`whitespace-pre-wrap`).
+  """
+  def inline_code(text) do
+    ~r/(`[^`\n]+`)/
+    |> Regex.split(to_string(text || ""), include_captures: true)
+    |> Enum.map(fn
+      "`" <> rest = part when byte_size(part) > 2 ->
+        code = rest |> String.trim_trailing("`") |> escape()
+        ~s(<code class="code-inline">#{code}</code>)
+
+      part ->
+        escape(part)
+    end)
+    |> Phoenix.HTML.raw()
+  end
+
+  defp escape(text), do: text |> Phoenix.HTML.html_escape() |> Phoenix.HTML.safe_to_string()
 
   ## JS Commands
 

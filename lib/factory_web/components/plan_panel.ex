@@ -99,6 +99,7 @@ defmodule FactoryWeb.PlanPanel do
           type="button"
           phx-click="tasks"
           title="Open the plan on the Spec page"
+          aria-label="Open the plan on the Spec page"
           class="grid size-6 shrink-0 place-items-center rounded-md text-base-content/50 hover:bg-base-content/[0.06] hover:text-base-content"
         >
           <.icon name="hero-arrow-top-right-on-square-micro" class="size-3.5" />
@@ -444,7 +445,7 @@ defmodule FactoryWeb.PlanPanel do
           type="button"
           phx-click="action"
           phx-value-action="start"
-          class="btn btn-primary btn-sm"
+          class="btn btn-primary btn-sm phx-click-loading:pointer-events-none phx-click-loading:opacity-60"
         >
           <.icon name="hero-play-micro" class="size-3.5" />
           {if @job == "review", do: "Yes, review", else: "Yes, implement"}
@@ -491,18 +492,20 @@ defmodule FactoryWeb.PlanPanel do
 
   # A line edited where it is, looking as it did: Enter or leaving it saves, Esc cancels.
   defp inline_field(assigns) do
+    assigns = assign(assigns, form: to_form(%{"value" => assigns.value}))
+
     ~H"""
-    <form
+    <.form
+      for={@form}
       id={"chat-plan-inline-#{@i}-#{@part}"}
       phx-submit="plan_inline_save"
       class={["min-w-0", @class]}
     >
       <input type="hidden" name="i" value={@i} />
       <input type="hidden" name="part" value={@part} />
-      <input
-        type="text"
-        name="value"
-        value={@value}
+      <.input
+        field={@form[:value]}
+        id={"chat-plan-inline-#{@i}-#{@part}-value"}
         placeholder={@placeholder}
         data-inline
         phx-blur="plan_inline_save"
@@ -510,8 +513,9 @@ defmodule FactoryWeb.PlanPanel do
         phx-value-part={@part}
         aria-label={if @part == "title", do: "Task title", else: "Step"}
         class="-mx-1 w-full rounded bg-base-100/60 px-1 outline-none ring-1 ring-primary/40 placeholder:text-base-content/35 focus:ring-primary/70"
+        wrapper_class="min-w-0"
       />
-    </form>
+    </.form>
     """
   end
 
@@ -556,6 +560,7 @@ defmodule FactoryWeb.PlanPanel do
         <span class="sr-only">Edit</span>
       </button>
       <button
+        id={"chat-plan-remove-#{@i}"}
         type="button"
         phx-click="plan_remove"
         phx-value-i={@i}
@@ -575,17 +580,25 @@ defmodule FactoryWeb.PlanPanel do
   attr :builders, :list, default: []
 
   defp edit_form(assigns) do
+    assigns = assign(assigns, form: to_form(Factory.Specs.task_params(assigns.task), as: :task))
+
     ~H"""
-    <form id={"chat-plan-form-#{@i}"} phx-submit="plan_save" class="space-y-2.5">
+    <.form for={@form} id={"chat-plan-form-#{@i}"} phx-submit="plan_save" class="space-y-2.5">
       <input type="hidden" name="i" value={@i} />
-      <TaskList.task_fields task={@task} as="task" builders={@builders} focus />
+      <TaskList.task_fields
+        id={"chat-plan-form-#{@i}"}
+        form={@form}
+        task={@task}
+        builders={@builders}
+        focus
+      />
       <div class="flex justify-end gap-1.5">
         <button type="button" phx-click="plan_edit_cancel" class="btn btn-ghost btn-xs">
           Cancel
         </button>
-        <button class="btn btn-primary btn-xs">Save</button>
+        <button id={"chat-plan-save-#{@i}"} class="btn btn-primary btn-xs">Save</button>
       </div>
-    </form>
+    </.form>
     """
   end
 
@@ -593,27 +606,31 @@ defmodule FactoryWeb.PlanPanel do
   attr :i, :integer, required: true
 
   defp ask_form(assigns) do
+    assigns = assign(assigns, form: to_form(%{"instruction" => ""}))
+
     ~H"""
-    <form
+    <.form
+      for={@form}
       id={"chat-plan-ask-#{@i}"}
       phx-submit="plan_ask"
       class="mt-2 flex items-center gap-1.5"
     >
       <input type="hidden" name="i" value={@i} />
-      <input
-        type="text"
-        name="instruction"
+      <.input
+        field={@form[:instruction]}
+        id={"chat-plan-ask-#{@i}-instruction"}
         required
         autofocus
         placeholder="How should Kiro change it? e.g. use Req, add a test for the empty case"
         aria-label="How should Kiro change this task?"
-        class="h-7 min-w-0 flex-1 rounded-md border border-base-300 bg-base-100 px-2.5 text-[13px] outline-none focus:border-primary/50"
+        class="h-7 w-full rounded-md border border-base-300 bg-base-100 px-2.5 text-[13px] outline-none focus:border-primary/50"
+        wrapper_class="min-w-0 flex-1"
       />
-      <button class="btn btn-primary btn-xs">Change it</button>
+      <button id={"chat-plan-ask-send-#{@i}"} class="btn btn-primary btn-xs">Change it</button>
       <button type="button" phx-click="plan_ask_open" phx-value-i="" class="btn btn-ghost btn-xs">
         Cancel
       </button>
-    </form>
+    </.form>
     """
   end
 

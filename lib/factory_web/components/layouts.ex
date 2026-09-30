@@ -177,6 +177,14 @@ defmodule FactoryWeb.Layouts do
   def status_text("error"), do: "text-error"
   def status_text(_), do: "text-base-content/50"
 
+  @doc """
+  The colour of a status dot: for the statuses above, and for the states of a run's
+  steps (`FactoryWeb.WorkflowMap.states/2`), whose busy dot pulses.
+  """
+  def status_dot(:busy), do: "bg-info animate-pulse"
+  def status_dot(state) when is_atom(state) and not is_nil(state),
+    do: status_dot(Atom.to_string(state))
+
   def status_dot(s) when s in ["running", "queued"], do: "bg-info"
   def status_dot(s) when s in ["done", "verified"], do: "bg-success"
   def status_dot(s) when s in ["waiting", "paused"], do: "bg-warning"

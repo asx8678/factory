@@ -8,6 +8,8 @@ defmodule FactoryWeb.SpecsLive do
   alias Factory.Specs
   alias Factory.Specs.Spec
 
+  @name_error "Give the spec a name, describe the feature, or add a spec file."
+
   def mount(_params, _session, socket) do
     if connected?(socket), do: Specs.subscribe()
     specs = Specs.list_specs()
@@ -15,7 +17,7 @@ defmodule FactoryWeb.SpecsLive do
     {:ok,
      socket
      |> assign(page_title: "Specs", specs: specs, adding: specs == [])
-     |> assign(base_specs: Specs.list_base_specs(), base: nil, used_in: used_in())
+     |> assign(base_specs: Specs.list_base_specs(), base: nil, base_form: nil, used_in: used_in())
      |> allow_upload(:base_file,
        accept: ~w(.md .markdown .txt),
        max_entries: 1,
@@ -43,29 +45,25 @@ defmodule FactoryWeb.SpecsLive do
   # Base specs: written or uploaded in a window, then kept.
 
   def handle_event("base_new", _, socket),
-    do: {:noreply, assign(socket, base: %{id: nil, name: "", content: "", error: nil})}
+    do: {:noreply, set_base(socket, %{id: nil, name: "", content: "", error: nil})}
 
   def handle_event("base_edit", %{"id" => id}, socket) do
     case Specs.get_spec(id) do
       %{kind: "base"} = s ->
-        {:noreply,
-         assign(socket, base: %{id: s.id, name: s.name, content: s.overview, error: nil})}
+        {:noreply, set_base(socket, %{id: s.id, name: s.name, content: s.overview, error: nil})}
 
       _ ->
         {:noreply, socket}
     end
   end
 
-  def handle_event("base_change", params, socket),
-    do:
-      {:noreply,
-       update(
-         socket,
-         :base,
-         &%{&1 | name: params["name"] || "", content: params["content"] || ""}
-       )}
+  def handle_event("base_change", params, socket) do
+    base = socket.assigns.base
+    changed = %{base | name: params["name"] || "", content: params["content"] || ""}
+    {:noreply, set_base(socket, changed)}
+  end
 
-  def handle_event("base_cancel", _, socket), do: {:noreply, assign(socket, base: nil)}
+  def handle_event("base_cancel", _, socket), do: {:noreply, set_base(socket, nil)}
 
   def handle_event("base_save", params, socket) do
     {:noreply, socket} = handle_event("base_change", params, socket)
@@ -80,11 +78,15 @@ defmodule FactoryWeb.SpecsLive do
       {:ok, spec} ->
         {:noreply,
          socket
-         |> assign(base: nil, base_specs: Specs.list_base_specs())
+         |> set_base(nil)
+         |> assign(base_specs: Specs.list_base_specs())
          |> put_flash(:info, "Saved the base spec “#{spec.name}”.")}
 
-      {:error, _} ->
+      {:error, %Ecto.Changeset{}} ->
         {:noreply, update(socket, :base, &%{&1 | error: "Give it a name."})}
+
+      {:error, _reason} ->
+        {:noreply, put_flash(socket, :error, "Saved, but a run couldn't follow the change.")}
     end
   end
 
@@ -92,7 +94,8 @@ defmodule FactoryWeb.SpecsLive do
     with %{kind: "base"} = spec <- Specs.get_spec(id), {:ok, _} <- Specs.delete_spec(spec) do
       {:noreply,
        socket
-       |> assign(base: nil, base_specs: Specs.list_base_specs())
+       |> set_base(nil)
+       |> assign(base_specs: Specs.list_base_specs())
        |> put_flash(:info, "Deleted the base spec “#{spec.name}”.")}
     else
       _ -> {:noreply, socket}
@@ -159,9 +162,26 @@ defmodule FactoryWeb.SpecsLive do
         {:noreply, push_navigate(socket, to: ~p"/specs/#{spec.id}")}
 
       {:error, changeset} ->
-        {:noreply, assign(socket, form: to_form(params, errors: changeset.errors))}
+        # The name's error says what else would do instead of a name.
+        errors =
+          Enum.map(changeset.errors, fn
+            {:name, _} -> {:name, {@name_error, []}}
+            other -> other
+          end)
+
+        {:noreply, assign(socket, form: to_form(params, errors: errors))}
     end
   end
+
+  # The base spec being written or edited in its window, and the form it's typed in.
+  defp set_base(socket, nil), do: assign(socket, base: nil, base_form: nil)
+
+  defp set_base(socket, base),
+    do:
+      assign(socket,
+        base: base,
+        base_form: to_form(%{"name" => base.name, "content" => base.content})
+      )
 
   def render(assigns) do
     ~H"""
@@ -193,40 +213,37 @@ defmodule FactoryWeb.SpecsLive do
         phx-change="validate"
         class="mb-10 max-w-xl space-y-3"
       >
-        <label class="block">
+        <div class="block">
           <span class="text-sm font-medium">Name</span>
-          <input
-            name="name"
-            value={@form[:name].value}
+          <.input
+            field={@form[:name]}
+            id="new-spec-name"
             placeholder="e.g. Password reset"
             maxlength="80"
             autofocus
             class="input mt-1 w-full"
+            wrapper_class="block"
           />
-        </label>
-        <p
-          :for={{msg, _} <- Keyword.get_values(@form.errors, :name)}
-          class="-mt-1 text-xs text-error"
-        >
-          Give the spec a name, describe the feature, or add a spec file.
-        </p>
+        </div>
 
-        <label class="block pt-2">
+        <div class="block pt-2">
           <span class="text-sm font-medium">What do you want to build?</span>
           <span class="block text-xs text-base-content/55">
             Write what must be done: who it's for, what they must be able to do and what
             should happen. A few sentences are enough; this becomes the spec's Overview.
           </span>
-          <textarea
+          <.input
+            field={@form[:description]}
+            type="textarea"
             id="new-spec-description"
-            name="description"
             phx-hook="DropText"
             rows="5"
             phx-debounce="400"
             placeholder="People who forget their password can get a reset link by email and choose a new one. The link works once and expires after 30 minutes."
             class="textarea mt-1.5 w-full text-sm leading-relaxed"
-          >{@form[:description].value}</textarea>
-        </label>
+            wrapper_class="block"
+          />
+        </div>
 
         <p class="flex items-center gap-3 text-xs text-base-content/45" aria-hidden="true">
           <span class="h-px flex-1 bg-base-300"></span>
@@ -249,7 +266,7 @@ defmodule FactoryWeb.SpecsLive do
         </label>
 
         <p :for={err <- upload_errors(@uploads.files)} class="text-xs text-error">
-          {upload_error(err)}
+          {upload_error(err, @uploads.files)}
         </p>
 
         <ul :if={@uploads.files.entries != []} class="space-y-1 text-sm">
@@ -265,7 +282,7 @@ defmodule FactoryWeb.SpecsLive do
               :for={err <- upload_errors(@uploads.files, entry)}
               class="text-xs text-error"
             >
-              {upload_error(err)}
+              {upload_error(err, @uploads.files)}
             </span>
             <button
               type="button"
@@ -279,29 +296,26 @@ defmodule FactoryWeb.SpecsLive do
           </li>
         </ul>
 
-        <label
+        <div
           :if={@uploads.files.entries != [] or String.trim(@form[:description].value || "") != ""}
-          class="flex items-start gap-2.5 rounded-lg bg-base-200 px-3 py-2.5 text-sm"
+          class="rounded-lg bg-base-200 px-3 py-2.5 text-sm"
         >
-          <input type="hidden" name="review" value="false" />
-          <input
+          <.input
+            field={@form[:review]}
             type="checkbox"
-            name="review"
-            value="true"
-            checked={@form[:review].value == "true"}
-            class="checkbox checkbox-sm mt-0.5"
+            id="new-spec-review"
+            label="Review with Kiro"
+            class="checkbox checkbox-sm"
+            wrapper_class="block"
           />
-          <span>
-            Review with Kiro
-            <span class="block text-xs text-base-content/55">
-              Scores the spec and lists what's missing: acceptance criteria,
-              expected results, edge cases, scope.
-            </span>
+          <span class="block pl-7 text-xs text-base-content/55">
+            Scores the spec and lists what's missing: acceptance criteria,
+            expected results, edge cases, scope.
           </span>
-        </label>
+        </div>
 
         <div class="flex gap-2">
-          <button class="btn btn-primary btn-sm">Create spec</button>
+          <button id="create-spec-submit" class="btn btn-primary btn-sm">Create spec</button>
           <button :if={@specs != []} type="button" phx-click="cancel" class="btn btn-ghost btn-sm">
             Cancel
           </button>
@@ -455,7 +469,7 @@ defmodule FactoryWeb.SpecsLive do
       >
         <div class="absolute inset-0" phx-click="base_cancel" aria-hidden="true"></div>
         <.form
-          for={%{}}
+          for={@base_form}
           id="base-spec-form"
           phx-change="base_change"
           phx-submit="base_save"
@@ -471,24 +485,27 @@ defmodule FactoryWeb.SpecsLive do
             class="min-h-0 flex-1 space-y-3 overflow-y-auto px-5 py-4"
             phx-drop-target={@uploads.base_file.ref}
           >
-            <input
-              name="name"
-              value={@base.name}
+            <.input
+              field={@base_form[:name]}
+              id="base-spec-name"
               placeholder="e.g. Coding standards"
               maxlength="80"
               autofocus
               class="input w-full"
+              wrapper_class="block"
             />
             <p :if={@base.error} class="text-xs text-error">{@base.error}</p>
-            <textarea
+            <.input
+              field={@base_form[:content]}
+              type="textarea"
               id="base-spec-content"
-              name="content"
               phx-hook="DropText"
               rows="14"
               phx-debounce="300"
               placeholder="e.g. Use TypeScript strict mode. Every change comes with tests. Never commit secrets."
               class="textarea w-full font-mono text-[12px] leading-relaxed"
-            >{@base.content}</textarea>
+              wrapper_class="block"
+            />
             <label
               for={@uploads.base_file.ref}
               class="flex cursor-pointer items-center gap-2 text-sm text-base-content/60 hover:text-base-content"
@@ -550,23 +567,13 @@ defmodule FactoryWeb.SpecsLive do
     if entry.done? do
       text = consume_uploaded_entry(socket, entry, fn %{path: p} -> {:ok, File.read!(p)} end)
 
-      {:noreply,
-       update(socket, :base, fn base ->
-         name = if base.name == "", do: Path.rootname(entry.client_name), else: base.name
-         %{base | content: text, name: name}
-       end)}
+      base = socket.assigns.base
+      name = if base.name == "", do: Path.rootname(entry.client_name), else: base.name
+      {:noreply, set_base(socket, %{base | content: text, name: name})}
     else
       {:noreply, socket}
     end
   end
-
-  defp upload_error(:too_large), do: "larger than 2 MB"
-  defp upload_error(:not_accepted), do: "only .md and .txt files"
-
-  defp upload_error(:too_many_files),
-    do: "up to 4 files: the main spec, requirements, design and tasks"
-
-  defp upload_error(err), do: to_string(err)
 
   attr :spec, Spec, required: true
 

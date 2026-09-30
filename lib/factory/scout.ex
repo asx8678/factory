@@ -90,6 +90,86 @@ defmodule Factory.Scout do
     end
   end
 
+  @doc """
+  What `scout/1` found, as the picks a review can start from, in the order to offer
+  them: the branch that's checked out first (when it isn't the base, a pull request
+  fetched as `pr-12` before it), then the uncommitted changes, the open pull requests,
+  the other branches with work beyond the base, and, on the base itself, its latest
+  commits. Each is `%{kind:, value:, label:, detail:, at:}` with `kind` one of
+  `:branch` (also `current:`, `ahead:`, `latest:`, the branch with the newest commit),
+  `:pr`, `:changes` or `:recent`. Empty unless the scout answered `{:ok, _}`.
+  """
+  def review_picks({:ok, scout}) do
+    worth = Enum.filter(scout.branches, &(&1.label != scout.base and (&1.ahead || 1) > 0))
+
+    # The latest changes: the branch with the newest commit, suggested.
+    latest =
+      Enum.max_by(worth, &DateTime.to_unix(&1.at || ~U[1970-01-01 00:00:00Z]), fn -> nil end)
+
+    branch = fn b ->
+      pr = with [_, n] <- Regex.run(~r/^pr-(\d+)$/, b.label), do: n
+
+      %{
+        kind: :branch,
+        value: b.name,
+        label: if(is_binary(pr), do: "Pull request ##{pr}", else: b.label),
+        current: b.current,
+        ahead: b.ahead,
+        latest: latest != nil and b.name == latest.name,
+        detail: Enum.join(Enum.reject([b.subject, b.author], &(&1 in [nil, ""])), " · "),
+        at: b.at
+      }
+    end
+
+    # A pull request fetched as `pr-12` first, then the branch that's checked out.
+    {prs_here, worth} = Enum.split_with(worth, &Regex.match?(~r/^pr-\d+$/, &1.label))
+    {current, others} = Enum.split_with(worth, & &1.current)
+    current = prs_here ++ current
+
+    prs =
+      for p <- scout.prs || [] do
+        %{kind: :pr, value: p.url, label: "##{p.number} #{p.title}", detail: p.branch, at: p.at}
+      end
+
+    changes =
+      if scout.dirty > 0,
+        do: [
+          %{
+            kind: :changes,
+            value: "",
+            label: "Uncommitted changes",
+            detail:
+              "#{scout.dirty} #{if scout.dirty == 1, do: "file", else: "files"} changed on #{scout.current || "this branch"}",
+            at: nil
+          }
+        ],
+        else: []
+
+    # On the base, or a branch with nothing beyond it: its latest commits are the work.
+    recent =
+      case scout.recent do
+        [latest | _] = commits when current == [] ->
+          [
+            %{
+              kind: :recent,
+              value: "#{length(commits)}",
+              label: "Latest commits on #{scout.current || "this branch"}",
+              detail:
+                "#{length(commits)} #{if length(commits) == 1, do: "commit", else: "commits"}, the latest “#{latest.subject}”",
+              at: latest.at
+            }
+          ]
+
+        _ ->
+          []
+      end
+
+    # Branches first, the latest changes leading; the base's own commits last.
+    Enum.map(current, branch) ++ changes ++ prs ++ Enum.map(others, branch) ++ recent
+  end
+
+  def review_picks(_scout), do: []
+
   defp changes_idea(dir) do
     files =
       case git(dir, ~w(status --porcelain)) do
@@ -339,21 +419,13 @@ defmodule Factory.Scout do
     end
   end
 
+  # git's answer as it is: `repo/1` puts its errors in words.
   defp git(dir, args) do
-    case System.cmd("git", ["-C", dir | args], stderr_to_stdout: true) do
-      {out, 0} -> {:ok, String.trim(out)}
-      {out, _} -> {:error, String.trim(out)}
-    end
-  rescue
-    _ -> {:error, "git isn't installed."}
-  end
-
-  defp time(nil), do: nil
-
-  defp time(text) do
-    case DateTime.from_iso8601(text) do
-      {:ok, at, _} -> at
-      _ -> nil
+    case Factory.GitCmd.run(dir, args) do
+      {:error, :not_installed} -> {:error, "git isn't installed."}
+      other -> other
     end
   end
+
+  defp time(text), do: Factory.GitCmd.time(text)
 end

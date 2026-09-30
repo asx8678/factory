@@ -348,8 +348,16 @@ defmodule Factory.Usage do
 
   def param_to_key(param) do
     case String.split(param, "-", parts: 2) do
-      ["run", id] -> {:run, String.to_integer(id)}
-      ["spec", id] -> {:spec, String.to_integer(id)}
+      ["run", id] -> keyed(:run, id)
+      ["spec", id] -> keyed(:spec, id)
+      _ -> nil
+    end
+  end
+
+  # nil for an id that isn't a number, like any other param that names no session.
+  defp keyed(kind, id) do
+    case Integer.parse(id) do
+      {n, ""} -> {kind, n}
       _ -> nil
     end
   end

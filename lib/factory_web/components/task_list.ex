@@ -22,12 +22,15 @@ defmodule FactoryWeb.TaskList do
       |> Enum.with_index()
       |> Enum.filter(fn {t, _} -> matches?(t, assigns.filter) end)
 
+    filter_form = to_form(%{"q" => assigns.filter})
+
     selected_titles =
       for {t, i} <- Enum.with_index(assigns.tasks), MapSet.member?(assigns.selected, i), do: t
 
     assigns =
       assign(assigns,
         shown: shown,
+        filter_form: filter_form,
         count: MapSet.size(assigns.selected),
         any_queued: Enum.any?(selected_titles, & &1.queued),
         any_unqueued: Enum.any?(selected_titles, &is_nil(&1.queued)),
@@ -47,7 +50,8 @@ defmodule FactoryWeb.TaskList do
         />
 
         <div :if={@count == 0} class="flex flex-1 items-center gap-3">
-          <form
+          <.form
+            for={@filter_form}
             id="task-filter"
             phx-change="task_filter"
             phx-submit="task_filter"
@@ -55,17 +59,18 @@ defmodule FactoryWeb.TaskList do
           >
             <.icon
               name="hero-magnifying-glass-mini"
-              class="pointer-events-none absolute left-2 top-1/2 size-4 -translate-y-1/2 text-base-content/45"
+              class="pointer-events-none absolute left-2 top-1/2 z-10 size-4 -translate-y-1/2 text-base-content/45"
             />
-            <input
-              name="q"
-              value={@filter}
+            <.input
+              field={@filter_form[:q]}
+              id="task-filter-q"
               placeholder="Filter tasks"
               phx-debounce="150"
               autocomplete="off"
               class="h-7 w-full rounded-md border border-base-300 bg-base-100 pl-7 pr-2 text-sm outline-none focus:border-base-content/30"
+              wrapper_class="block"
             />
-          </form>
+          </.form>
           <button
             :if={Enum.any?(@tasks, &is_nil(&1.queued))}
             id="queue-all"
@@ -384,8 +389,11 @@ defmodule FactoryWeb.TaskList do
 
   # Edits one task in place. Esc cancels.
   defp edit_form(assigns) do
+    assigns = assign(assigns, form: to_form(Factory.Specs.task_params(assigns.task)))
+
     ~H"""
-    <form
+    <.form
+      for={@form}
       id={"task-edit-#{@i}"}
       phx-submit="task_save"
       phx-keydown="task_edit_cancel"
@@ -396,14 +404,16 @@ defmodule FactoryWeb.TaskList do
       <p :if={@from_kiro} class="flex items-center gap-1.5 text-xs text-info">
         <.icon name="hero-sparkles-micro" class="size-3.5" /> Filled in with Kiro's suggestion
       </p>
-      <.task_fields task={@task} builders={@builders} focus />
+      <.task_fields id={"task-edit-#{@i}"} form={@form} task={@task} builders={@builders} focus />
       <div class="flex items-center gap-2">
-        <button type="submit" class="btn btn-primary btn-xs">Save</button>
+        <button type="submit" id={"task-edit-#{@i}-save"} class="btn btn-primary btn-xs">
+          Save
+        </button>
         <button type="button" phx-click="task_edit_cancel" class="btn btn-ghost btn-xs">
           Cancel
         </button>
       </div>
-    </form>
+    </.form>
     """
   end
 
@@ -427,13 +437,21 @@ defmodule FactoryWeb.TaskList do
 
   # Asking Kiro to improve a task: what to do better, Kiro at work, then its suggestion.
   defp improve_panel(assigns) do
+    assigns =
+      assign(assigns,
+        key: :erlang.phash2(assigns.task.title),
+        form: to_form(%{"instruction" => assigns.entry[:instruction] || ""})
+      )
+
     ~H"""
     <div
-      id={"improve-#{:erlang.phash2(@task.title)}"}
+      id={"improve-#{@key}"}
       class="mt-3 max-w-[80ch] rounded-lg border border-info/20 bg-info/[0.04] p-3"
     >
-      <form
+      <.form
         :if={@entry.status == :asking}
+        for={@form}
+        id={"improve-form-#{@key}"}
         phx-submit="improve_send"
         phx-keydown="improve_close"
         phx-key="Escape"
@@ -441,16 +459,19 @@ defmodule FactoryWeb.TaskList do
         class="space-y-2"
       >
         <input type="hidden" name="title" value={@task.title} />
-        <label class="flex items-center gap-1.5 text-xs font-medium text-info">
+        <p class="flex items-center gap-1.5 text-xs font-medium text-info">
           <.icon name="hero-sparkles-micro" class="size-3.5" /> What should Kiro do better?
-        </label>
-        <textarea
-          name="instruction"
+        </p>
+        <.input
+          field={@form[:instruction]}
+          type="textarea"
+          id={"improve-instruction-#{@key}"}
           rows="2"
           phx-mounted={JS.focus()}
           placeholder="e.g. Split the setup from the tests, name the exact files, add acceptance criteria… Leave empty to let Kiro decide."
           class="block w-full resize-y rounded-md border border-base-300 bg-base-100 px-2.5 py-2 text-[13px] leading-relaxed outline-none placeholder:text-base-content/40 focus:border-info/60"
-        >{@entry.instruction}</textarea>
+          wrapper_class="block"
+        />
         <div class="flex items-center gap-2">
           <button type="submit" class="btn btn-info btn-xs">
             <.icon name="hero-sparkles-micro" class="size-3.5" /> Ask Kiro
@@ -467,7 +488,7 @@ defmodule FactoryWeb.TaskList do
             Kiro reads the project; nothing changes until you apply.
           </span>
         </div>
-      </form>
+      </.form>
 
       <div :if={@entry.status == :thinking} class="flex items-center gap-2 text-[13px]">
         <span class="loading loading-spinner loading-xs text-info"></span>
@@ -554,6 +575,17 @@ defmodule FactoryWeb.TaskList do
   written out by Kiro after a quick look at the project, then reviewed.
   """
   def new_task(assigns) do
+    assigns =
+      assign(assigns,
+        draft_form:
+          assigns.draft &&
+            to_form(%{"title" => assigns.draft.title, "notes" => assigns.draft.notes}),
+        draft_edit_form:
+          if(match?(%{status: :editing, suggestion: %{}}, assigns.draft),
+            do: to_form(Factory.Specs.task_params(assigns.draft.suggestion))
+          )
+      )
+
     ~H"""
     <button
       :if={is_nil(@draft)}
@@ -582,8 +614,9 @@ defmodule FactoryWeb.TaskList do
         </button>
       </div>
 
-      <form
+      <.form
         :if={@draft.status == :writing}
+        for={@draft_form}
         id="task-draft"
         phx-change="draft_change"
         phx-submit="draft_submit"
@@ -591,20 +624,24 @@ defmodule FactoryWeb.TaskList do
         phx-key="Escape"
         class="space-y-3"
       >
-        <input
-          name="title"
-          value={@draft.title}
+        <.input
+          field={@draft_form[:title]}
+          id="task-draft-title"
           autocomplete="off"
           placeholder="What should be done? e.g. Export invoices as CSV"
           phx-mounted={JS.focus()}
           class="h-8 w-full rounded-md border border-base-300 bg-base-100 outline-none placeholder:text-base-content/40 focus:border-base-content/30 px-3 text-[14px] font-medium"
+          wrapper_class="block"
         />
-        <textarea
-          name="notes"
+        <.input
+          field={@draft_form[:notes]}
+          type="textarea"
+          id="task-draft-notes"
           rows="3"
           placeholder="Notes (optional): what it should do, files you know it touches, what to watch out for…"
           class="block w-full resize-y rounded-md border border-base-300 bg-base-100 outline-none placeholder:text-base-content/40 focus:border-base-content/30 px-3 py-2 text-[13px] leading-relaxed"
-        >{@draft.notes}</textarea>
+          wrapper_class="block"
+        />
         <div class="flex flex-wrap items-center gap-2">
           <button
             id="draft-improve"
@@ -633,7 +670,7 @@ defmodule FactoryWeb.TaskList do
               else: "Write your idea in your own words, then let AI suggest the full task."}
           </span>
         </div>
-      </form>
+      </.form>
 
       <div :if={@draft.status == :thinking} class="space-y-2">
         <p class="text-sm font-medium text-base-content/80">{@draft.title}</p>
@@ -673,20 +710,27 @@ defmodule FactoryWeb.TaskList do
         </div>
       </div>
 
-      <form
+      <.form
         :if={@draft.status == :editing}
+        for={@draft_edit_form}
         id="task-draft-edit"
         phx-submit="draft_save"
         class="space-y-3"
       >
-        <.task_fields task={@draft.suggestion} builders={@builders} focus />
+        <.task_fields
+          id="task-draft-edit"
+          form={@draft_edit_form}
+          task={@draft.suggestion}
+          builders={@builders}
+          focus
+        />
         <div class="flex items-center gap-2">
-          <button type="submit" class="btn btn-primary btn-sm">
+          <button type="submit" id="task-draft-edit-save" class="btn btn-primary btn-sm">
             <.icon name="hero-plus-mini" class="size-4" /> Add task
           </button>
           <button type="button" phx-click="draft_back" class="btn btn-ghost btn-sm">Back</button>
         </div>
-      </form>
+      </.form>
     </section>
     """
   end
@@ -809,111 +853,132 @@ defmodule FactoryWeb.TaskList do
   defp plural([_], word), do: word
   defp plural(_list, word), do: word <> "s"
 
+  attr :id, :string, required: true, doc: "the form's id, which the fields' ids start with"
+  attr :form, :any,
+    required: true,
+    doc: "the task as a form: to_form(Factory.Specs.task_params(task))"
+
   attr :task, :map, required: true
   attr :focus, :boolean, default: false
-  attr :as, :string, default: nil, doc: ~s(nests the fields' names, e.g. "task" for task[title])
   attr :builders, :list, default: [], doc: "the names of the agents a task can be given to"
 
   @doc """
   A task's fields, for editing it or a new one Kiro wrote: the form sends title,
-  objective, details and verify (a line each), model and requirements.
+  objective, details and verify (a line each), model and requirements, under the
+  form's names (plain, or `task[title]` for a form made with `as: :task`).
   """
   def task_fields(assigns) do
-    as = assigns.as
+    field_class =
+      "h-8 w-full rounded-md border border-base-300 bg-base-100 px-2.5 outline-none placeholder:text-base-content/35 focus:border-base-content/30"
+
+    area_class =
+      "block w-full resize-y rounded-md border border-base-300 bg-base-100 px-2.5 py-2 text-[13px] leading-relaxed outline-none placeholder:text-base-content/35 focus:border-base-content/30"
+
+    select_class =
+      "h-8 w-full rounded-md border border-base-300 bg-base-100 px-2 text-[13px] outline-none focus:border-base-content/30"
+
+    agents = Enum.uniq(assigns.builders ++ List.wrap(assigns.task[:agent]))
+    models = Factory.Kiro.task_models() -- ["auto"]
 
     assigns =
       assign(assigns,
-        models: Factory.Kiro.task_models() -- ["auto"],
-        n: fn field -> if as, do: "#{as}[#{field}]", else: field end
+        field_class: field_class,
+        area_class: area_class,
+        select_class: select_class,
+        agent_options: [{"First that builds", ""} | agents],
+        model_options: [{"Auto", ""} | for(m <- models, do: {Factory.Kiro.model_name(m), m})]
       )
 
     ~H"""
-    <label class="block">
+    <div class="block">
       <span class="mb-1 block text-xs font-medium text-base-content/60">Title</span>
-      <input
-        name={@n.("title")}
-        value={@task.title}
+      <.input
+        field={@form[:title]}
+        id={"#{@id}-title"}
         required
         autocomplete="off"
         phx-mounted={@focus && JS.focus()}
-        class="h-8 w-full rounded-md border border-base-300 bg-base-100 px-2.5 text-sm font-medium outline-none focus:border-base-content/30"
+        class={[@field_class, "text-sm font-medium"]}
+        wrapper_class="block"
       />
-    </label>
-    <label class="block">
+    </div>
+    <div class="block">
       <span class="mb-1 flex items-baseline justify-between text-xs font-medium text-base-content/60">
         Objective <span class="font-normal text-base-content/45">What's true when it's done</span>
       </span>
-      <input
-        name={@n.("objective")}
-        value={@task[:objective]}
+      <.input
+        field={@form[:objective]}
+        id={"#{@id}-objective"}
         autocomplete="off"
         placeholder="e.g. A person can download this month's invoices as a CSV file."
-        class="h-8 w-full rounded-md border border-base-300 bg-base-100 px-2.5 text-[13px] outline-none placeholder:text-base-content/35 focus:border-base-content/30"
+        class={[@field_class, "text-[13px]"]}
+        wrapper_class="block"
       />
-    </label>
-    <label class="block">
+    </div>
+    <div class="block">
       <span class="mb-1 flex items-baseline justify-between text-xs font-medium text-base-content/60">
         Approach
         <span class="font-normal text-base-content/45">One step per line · `code` in backticks</span>
       </span>
-      <textarea
-        name={@n.("details")}
+      <.input
+        field={@form[:details]}
+        type="textarea"
+        id={"#{@id}-details"}
         rows={max(3, length(@task.details) + 1)}
-        class="block w-full resize-y rounded-md border border-base-300 bg-base-100 px-2.5 py-2 text-[13px] leading-relaxed outline-none focus:border-base-content/30"
-      >{Enum.join(@task.details, "\n")}</textarea>
-    </label>
-    <label class="block">
+        class={@area_class}
+        wrapper_class="block"
+      />
+    </div>
+    <div class="block">
       <span class="mb-1 flex items-baseline justify-between text-xs font-medium text-base-content/60">
         Verify <span class="font-normal text-base-content/45">One check per line</span>
       </span>
-      <textarea
-        name={@n.("verify")}
+      <.input
+        field={@form[:verify]}
+        type="textarea"
+        id={"#{@id}-verify"}
         rows={max(2, length(checks(@task)) + 1)}
         placeholder="e.g. `mix test test/app/export_test.exs` passes"
-        class="block w-full resize-y rounded-md border border-base-300 bg-base-100 px-2.5 py-2 text-[13px] leading-relaxed outline-none placeholder:text-base-content/35 focus:border-base-content/30"
-      >{Enum.join(checks(@task), "\n")}</textarea>
-    </label>
+        class={@area_class}
+        wrapper_class="block"
+      />
+    </div>
     <div class="grid gap-3 sm:grid-cols-3">
-      <label class="block">
+      <div class="block">
         <span class="mb-1 block text-xs font-medium text-base-content/60">Agent</span>
-        <select
-          name={@n.("agent")}
-          class="h-8 w-full rounded-md border border-base-300 bg-base-100 px-2 text-[13px] outline-none focus:border-base-content/30"
-        >
-          <option value="" selected={@task[:agent] in [nil, ""]}>First that builds</option>
-          <option
-            :for={name <- Enum.uniq(@builders ++ List.wrap(@task[:agent]))}
-            value={name}
-            selected={@task[:agent] == name}
-          >
-            {name}
-          </option>
-        </select>
-      </label>
-      <label class="block">
+        <.input
+          field={@form[:agent]}
+          type="select"
+          id={"#{@id}-agent"}
+          options={@agent_options}
+          class={@select_class}
+          wrapper_class="block"
+        />
+      </div>
+      <div class="block">
         <span class="mb-1 block text-xs font-medium text-base-content/60">Model</span>
-        <select
-          name={@n.("model")}
-          class="h-8 w-full rounded-md border border-base-300 bg-base-100 px-2 text-[13px] outline-none focus:border-base-content/30"
-        >
-          <option value="" selected={@task[:model] in [nil, "", "auto"]}>Auto</option>
-          <option :for={m <- @models} value={m} selected={@task[:model] == m}>
-            {Factory.Kiro.model_name(m)}
-          </option>
-        </select>
-      </label>
-      <label class="block">
+        <.input
+          field={@form[:model]}
+          type="select"
+          id={"#{@id}-model"}
+          options={@model_options}
+          class={@select_class}
+          wrapper_class="block"
+        />
+      </div>
+      <div class="block">
         <span class="mb-1 flex items-baseline justify-between text-xs font-medium text-base-content/60">
           Requirements <span class="font-normal text-base-content/45">Comma separated</span>
         </span>
-        <input
-          name={@n.("requirements")}
-          value={Enum.join(@task.requirements, ", ")}
+        <.input
+          field={@form[:requirements]}
+          id={"#{@id}-requirements"}
           autocomplete="off"
           placeholder="1.1, 1.2"
-          class="h-8 w-full rounded-md border border-base-300 bg-base-100 px-2.5 font-mono text-xs outline-none focus:border-base-content/30"
+          class={[@field_class, "font-mono text-xs"]}
+          wrapper_class="block"
         />
-      </label>
+      </div>
     </div>
     """
   end
@@ -987,21 +1052,10 @@ defmodule FactoryWeb.TaskList do
 
   attr :text, :string, required: true
 
-  # Task text with `code` shown as code. Nothing else is formatted, so it reads as written.
+  # Task text with `code` shown as code (FactoryWeb.CoreComponents.inline_code/1). Nothing
+  # else is formatted, so it reads as written.
   def inline(assigns) do
-    parts =
-      assigns.text
-      |> String.split("`")
-      |> Enum.with_index()
-      |> Enum.reject(fn {part, _} -> part == "" end)
-
-    assigns = assign(assigns, parts: parts)
-
-    ~H"""
-    <%= for {part, i} <- @parts do %>
-      <code :if={rem(i, 2) == 1} class="code-inline">{part}</code><span :if={rem(i, 2) == 0}>{part}</span>
-    <% end %>
-    """
+    ~H"{inline_code(@text)}"
   end
 
   def matches?(_task, ""), do: true

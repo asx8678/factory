@@ -10,7 +10,7 @@ defmodule FactoryWeb.RunLive do
   alias FactoryWeb.WorkflowMap
 
   def mount(%{"id" => id}, _session, socket) do
-    case Runs.get_run(id) do
+    case run_by_id(id) do
       nil ->
         {:ok,
          socket |> put_flash(:error, "That run doesn't exist.") |> push_navigate(to: ~p"/runs")}
@@ -28,6 +28,14 @@ defmodule FactoryWeb.RunLive do
          |> FactoryWeb.UsageMeter.scope({:run, run.id})
          |> assign(page_title: run.title)
          |> load(run)}
+    end
+  end
+
+  # A run by the id in the URL; nil for an id that isn't a number, as for one that's gone.
+  defp run_by_id(id) do
+    case Integer.parse(id) do
+      {n, ""} -> Runs.get_run(n)
+      _ -> nil
     end
   end
 

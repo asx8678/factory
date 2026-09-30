@@ -120,8 +120,10 @@ defmodule FactoryWeb.SuggestTasks do
 
   # Stage 1: the project folder, then Kiro reads it.
   defp start(assigns) do
+    assigns = assign(assigns, form: to_form(%{"dir" => assigns.project_dir}))
+
     ~H"""
-    <form id="plan-read" phx-submit="plan_read" class="flex min-h-0 flex-1 flex-col">
+    <.form for={@form} id="plan-read" phx-submit="plan_read" class="flex min-h-0 flex-1 flex-col">
       <div class="flex-1 overflow-y-auto px-5 py-6 sm:px-6">
         <div class="max-w-2xl">
           <p class="text-[14px] leading-relaxed text-base-content/75">
@@ -134,28 +136,29 @@ defmodule FactoryWeb.SuggestTasks do
             {@plan["error"]}
           </p>
 
-          <label class="mt-6 block">
+          <div class="mt-6 block">
             <span class="text-sm font-medium">Project folder</span>
             <span class="block text-xs text-base-content/70">
               The folder with the code this spec is for.
             </span>
-            <input
-              name="dir"
-              value={@project_dir}
+            <.input
+              field={@form[:dir]}
+              id="plan-read-dir"
               required
               spellcheck="false"
               class="input mt-1.5 w-full font-mono text-[13px]"
+              wrapper_class="block"
             />
-          </label>
+          </div>
         </div>
       </div>
       <footer class="flex items-center justify-end gap-2 border-t border-base-300 px-5 py-3 sm:px-6">
         <button type="button" phx-click="close_suggest" class="btn btn-ghost btn-sm">Cancel</button>
-        <button class="btn btn-primary btn-sm">
+        <button id="plan-read-submit" class="btn btn-primary btn-sm">
           {if @status == "error", do: "Try again", else: "Read the project"}
         </button>
       </footer>
-    </form>
+    </.form>
     """
   end
 
@@ -201,8 +204,15 @@ defmodule FactoryWeb.SuggestTasks do
   # Stage 2: Kiro's questions, one at a time, each with options a, b, c… and an answer
   # of your own. Keys: A–D pick, Enter moves on.
   defp questions(%{plan: %{"questions" => []}} = assigns) do
+    assigns = assign(assigns, form: to_form(%{}))
+
     ~H"""
-    <form id="plan-answers" phx-submit="plan_tasks" class="flex min-h-0 flex-1 flex-col">
+    <.form
+      for={@form}
+      id="plan-answers"
+      phx-submit="plan_tasks"
+      class="flex min-h-0 flex-1 flex-col"
+    >
       <div class="flex-1 overflow-y-auto px-5 py-8 sm:px-8">
         <div class="mx-auto max-w-2xl">
           <p class="text-base leading-relaxed">
@@ -214,7 +224,7 @@ defmodule FactoryWeb.SuggestTasks do
       <footer class="flex items-center justify-end gap-2 border-t border-base-300 px-5 py-3 sm:px-8">
         <button id="plan-suggest" class="btn btn-primary btn-sm">Suggest tasks</button>
       </footer>
-    </form>
+    </.form>
     """
   end
 
@@ -224,8 +234,11 @@ defmodule FactoryWeb.SuggestTasks do
     q = Enum.at(questions, i)
     key = to_string(i)
 
+    # The options are radios, with the answer of your own inside the last one's label,
+    # so they're written out rather than core inputs.
     assigns =
       assign(assigns,
+        form: to_form(%{}),
         questions: questions,
         i: i,
         q: q,
@@ -235,7 +248,8 @@ defmodule FactoryWeb.SuggestTasks do
       )
 
     ~H"""
-    <form
+    <.form
+      for={@form}
       id="plan-answers"
       phx-change="plan_answer"
       phx-submit="plan_next"
@@ -361,7 +375,7 @@ defmodule FactoryWeb.SuggestTasks do
           {if @last, do: "Suggest tasks", else: "Next"}
         </button>
       </footer>
-    </form>
+    </.form>
     """
   end
 
@@ -430,15 +444,19 @@ defmodule FactoryWeb.SuggestTasks do
     tasks = assigns.plan["tasks"]
     count = MapSet.size(assigns.picked)
 
+    # The picks are one checkbox per task under `pick[]`, so they're written out: the
+    # core checkbox sends a hidden "false" with each, which the list can't take.
     assigns =
       assign(assigns,
+        form: to_form(%{}),
         tasks: tasks,
         count: count,
         has_tasks: String.trim(assigns.spec.tasks) != ""
       )
 
     ~H"""
-    <form
+    <.form
+      for={@form}
       id="plan-pick"
       phx-change="plan_pick"
       phx-submit="plan_add"
@@ -555,7 +573,7 @@ defmodule FactoryWeb.SuggestTasks do
           </button>
         </div>
       </footer>
-    </form>
+    </.form>
     """
   end
 

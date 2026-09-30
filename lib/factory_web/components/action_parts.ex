@@ -24,6 +24,7 @@ defmodule FactoryWeb.ActionParts do
       assign(assigns,
         type: type,
         config: config,
+        form: to_form(%{"name" => assigns.action.name, "config" => config}, as: :action),
         missing: Actions.missing(assigns.action),
         result: if(assigns.running, do: :running, else: assigns.result)
       )
@@ -62,32 +63,35 @@ defmodule FactoryWeb.ActionParts do
         </button>
       </div>
 
-      <form
+      <.form
         :if={@type}
+        for={@form}
         id="action-form"
         phx-change="action_change"
         phx-submit="action_save"
         class="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3"
       >
         <p class="text-xs leading-relaxed text-base-content/60">{@type.blurb}</p>
-        <label class="block">
+        <div class="block">
           <span class="mb-1 block text-xs font-medium text-base-content/70">Name</span>
-          <input
-            name="action[name]"
-            value={@action.name}
+          <.input
+            field={@form[:name]}
+            id="action-name"
             phx-debounce="400"
             class="h-8 w-full rounded-md border border-base-300 bg-base-100 px-2.5 text-sm outline-none focus:border-base-content/30"
+            wrapper_class="block"
           />
-        </label>
+        </div>
 
-        <label :for={{key, label, input, hint, required} <- @type.fields} class="block">
+        <div :for={{key, label, input, hint, required} <- @type.fields} class="block">
           <span class="mb-1 flex items-baseline justify-between text-xs font-medium text-base-content/70">
             {label}
             <span :if={!required} class="font-normal text-base-content/40">optional</span>
           </span>
-          <input
+          <.input
             :if={input in [:text, :env]}
             name={"action[config][#{key}]"}
+            id={"action-config-#{key}"}
             value={@config[key]}
             placeholder={hint}
             phx-debounce="400"
@@ -96,28 +100,34 @@ defmodule FactoryWeb.ActionParts do
               "h-8 w-full rounded-md border border-base-300 bg-base-100 px-2.5 text-sm outline-none placeholder:text-base-content/35 focus:border-base-content/30",
               input == :env && "font-mono text-xs"
             ]}
+            wrapper_class="block"
           />
-          <textarea
+          <.input
             :if={input == :textarea}
+            type="textarea"
             name={"action[config][#{key}]"}
+            id={"action-config-#{key}"}
+            value={@config[key]}
             rows="3"
             placeholder={hint}
             phx-debounce="400"
             class="block w-full resize-y rounded-md border border-base-300 bg-base-100 px-2.5 py-1.5 text-sm outline-none placeholder:text-base-content/35 focus:border-base-content/30"
-          >{@config[key]}</textarea>
-          <select
+            wrapper_class="block"
+          />
+          <.input
             :if={match?({:select, _}, input)}
+            type="select"
             name={"action[config][#{key}]"}
+            id={"action-config-#{key}"}
+            value={@config[key] || hint}
+            options={elem(input, 1)}
             class="select select-sm w-full"
-          >
-            <option :for={o <- elem(input, 1)} value={o} selected={(@config[key] || hint) == o}>
-              {o}
-            </option>
-          </select>
+            wrapper_class="block"
+          />
           <span :if={input == :env} class="mt-0.5 block text-[11px] text-base-content/45">
             The name of an environment variable; its value is read when the action runs, never saved.
           </span>
-        </label>
+        </div>
 
         <p class="rounded-md bg-base-content/[0.04] px-2.5 py-2 text-[11px] leading-relaxed text-base-content/55">
           In any setting: <code class="code-inline">{"{{run}}"}</code>
@@ -125,7 +135,7 @@ defmodule FactoryWeb.ActionParts do
           what was done, <code class="code-inline">{"{{branch}}"}</code>
           the run's branch, <code class="code-inline">{"{{run_id}}"}</code>.
         </p>
-      </form>
+      </.form>
 
       <div class="space-y-2 border-t border-base-content/10 px-4 py-3">
         <p :if={@missing != []} class="text-xs text-warning">

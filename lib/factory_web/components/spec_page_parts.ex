@@ -368,14 +368,6 @@ defmodule FactoryWeb.SpecPageParts do
   def entry_errors(upload),
     do: for(entry <- upload.entries, err <- upload_errors(upload, entry), do: {entry, err})
 
-  def upload_error(:too_large), do: "larger than 2 MB"
-
-  def upload_error(:not_accepted), do: "only .md and .txt files"
-
-  def upload_error(:too_many_files), do: "one file at a time"
-
-  def upload_error(err), do: to_string(err)
-
   # An empty step's text box says what to write in it.
   def placeholder(step) do
     {question, explanation} = intro(step)
@@ -475,6 +467,12 @@ defmodule FactoryWeb.SpecPageParts do
 
   # The open step: Write and Preview, the editor or the task list, upload and approve.
   def step_editor(assigns) do
+    assigns =
+      assign(assigns,
+        upload_form: to_form(%{}),
+        editor_form: to_form(%{"text" => assigns.text})
+      )
+
     ~H"""
     <section>
       <div class="mb-2 flex flex-wrap items-center gap-3">
@@ -535,8 +533,9 @@ defmodule FactoryWeb.SpecPageParts do
               title="Kiro is waiting for you"
             ></span>
           </button>
-          <form
+          <.form
             :if={!@approved}
+            for={@upload_form}
             id="spec-upload"
             phx-change="upload_changed"
             phx-submit="upload_changed"
@@ -549,7 +548,7 @@ defmodule FactoryWeb.SpecPageParts do
               <.icon name="hero-arrow-up-tray-mini" class="size-4" /> Upload file
               <.live_file_input upload={@uploads.file} class="sr-only" />
             </label>
-          </form>
+          </.form>
           <button
             :if={@approved}
             phx-click="reopen"
@@ -564,7 +563,7 @@ defmodule FactoryWeb.SpecPageParts do
             phx-click="approve"
             disabled={@step != "overview" and String.trim(@text) == ""}
             class={[
-              "btn btn-sm",
+              "btn btn-sm phx-click-loading:pointer-events-none phx-click-loading:opacity-60",
               if(@step == "overview" and String.trim(@text) == "",
                 do: "btn-ghost",
                 else: "btn-primary"
@@ -578,18 +577,26 @@ defmodule FactoryWeb.SpecPageParts do
         </div>
       </div>
 
-      <form :if={!@preview} id="spec-editor" phx-change="edit" phx-submit="edit">
-        <textarea
+      <.form
+        :if={!@preview}
+        for={@editor_form}
+        id="spec-editor"
+        phx-change="edit"
+        phx-submit="edit"
+      >
+        <.input
+          field={@editor_form[:text]}
+          type="textarea"
           id={"spec-#{@step}"}
-          name="text"
           phx-hook="PromptEditor"
           data-drop
           phx-debounce="600"
           spellcheck="false"
           placeholder={placeholder(@step)}
           class="block min-h-[26rem] w-full resize-none rounded-lg border border-base-300 bg-base-100 px-4 py-3 font-mono text-[12px] leading-relaxed outline-none placeholder:text-base-content/40 focus:border-base-content/30"
-        >{@text}</textarea>
-      </form>
+          wrapper_class="block"
+        />
+      </.form>
 
       <FactoryWeb.TaskList.list
         :if={@preview && @step == "tasks" && @task_list != []}
@@ -627,13 +634,13 @@ defmodule FactoryWeb.SpecPageParts do
       </p>
 
       <p :for={err <- upload_errors(@uploads.file)} class="mt-2 text-sm text-error">
-        {upload_error(err)}
+        {upload_error(err, @uploads.file)}
       </p>
       <p
         :for={{entry, err} <- entry_errors(@uploads.file)}
         class="mt-2 text-sm text-error"
       >
-        {entry.client_name}: {upload_error(err)}
+        {entry.client_name}: {upload_error(err, @uploads.file)}
         <button
           phx-click="cancel_upload"
           phx-value-ref={entry.ref}

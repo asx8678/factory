@@ -6,7 +6,7 @@ defmodule FactoryWeb.SpecLive do
   alias Factory.Specs.Spec
 
   def mount(%{"id" => id}, _session, socket) do
-    case Specs.get_spec(id) do
+    case spec_by_id(id) do
       nil ->
         {:ok,
          socket |> put_flash(:error, "That spec doesn't exist.") |> push_navigate(to: ~p"/specs")}
@@ -18,7 +18,8 @@ defmodule FactoryWeb.SpecLive do
          socket
          |> FactoryWeb.UsageMeter.scope({:spec, spec.id})
          |> assign(home_run: Specs.home_run(spec))
-         |> assign(page_title: spec.name, spec: spec, preview: false, saved: false, undo: nil)
+         |> put_spec(spec)
+         |> assign(page_title: spec.name, preview: false, saved: false, undo: nil)
          |> assign(suggest: false, activity: [], answers: %{}, others: %{}, add_mode: "append")
          |> assign(question: 0)
          |> assign(selected: MapSet.new(), expanded: MapSet.new(), filter: "", editing: nil)
@@ -35,6 +36,19 @@ defmodule FactoryWeb.SpecLive do
     end
   end
 
+  # A spec by the id in the URL; nil for an id that isn't a number, as for one that's gone.
+  defp spec_by_id(id) do
+    case Integer.parse(id) do
+      {n, ""} -> Specs.get_spec(n)
+      _ -> nil
+    end
+  end
+
+  # The spec, and its tasks parsed once (Factory.Specs.task_list/1) for the list, the
+  # queue and the handlers, rather than on every render.
+  defp put_spec(socket, spec),
+    do: assign(socket, spec: spec, task_list: Specs.task_list(spec))
+
   # Saves from this page and the background review and task suggestions all arrive here.
   def handle_info({:spec_updated, spec}, socket) do
     socket =
@@ -45,7 +59,8 @@ defmodule FactoryWeb.SpecLive do
     {:noreply,
      socket
      |> plan_defaults(socket.assigns.spec.plan, spec.plan)
-     |> assign(spec: spec, page_title: spec.name)}
+     |> put_spec(spec)
+     |> assign(page_title: spec.name)}
   end
 
   # Improving one task with Kiro. Keyed by the task's title when it was asked, so
@@ -118,7 +133,8 @@ defmodule FactoryWeb.SpecLive do
      assign(socket,
        step: step,
        # Tasks open as the list once there are some; other steps open on Write until approved.
-       preview: Spec.approved?(spec, step) or (step == "tasks" and Specs.tasks(spec) != []),
+       preview:
+         Spec.approved?(spec, step) or (step == "tasks" and socket.assigns.task_list != []),
        saved: false,
        undo: nil,
        suggest: Map.has_key?(params, "suggest") and step == "tasks" and Spec.open?(spec, step)
@@ -134,7 +150,7 @@ defmodule FactoryWeb.SpecLive do
 
   def handle_event("rename", %{"name" => name}, socket) do
     case Specs.update_spec(socket.assigns.spec, %{name: name}) do
-      {:ok, spec} -> {:noreply, assign(socket, spec: spec, page_title: spec.name)}
+      {:ok, spec} -> {:noreply, socket |> put_spec(spec) |> assign(page_title: spec.name)}
       # A blank name isn't saved; the old one comes back on the next render.
       {:error, _} -> {:noreply, socket}
     end
@@ -162,7 +178,7 @@ defmodule FactoryWeb.SpecLive do
 
   def handle_event("task_select_all", _, socket) do
     shown =
-      for {t, i} <- Enum.with_index(Specs.task_list(socket.assigns.spec)),
+      for {t, i} <- Enum.with_index(socket.assigns.task_list),
           FactoryWeb.TaskList.matches?(t, socket.assigns.filter),
           do: i
 
@@ -213,7 +229,7 @@ defmodule FactoryWeb.SpecLive do
     i = String.to_integer(i)
 
     if socket.assigns.editing == i do
-      old = socket.assigns.spec |> Specs.task_list() |> Enum.at(i)
+      old = Enum.at(socket.assigns.task_list, i)
 
       case Specs.update_task(socket.assigns.spec, i, params) do
         {:error, :blank_title} ->
@@ -235,7 +251,7 @@ defmodule FactoryWeb.SpecLive do
   # discard what Kiro suggests.
 
   def handle_event("improve_open", %{"i" => i}, socket) do
-    case socket.assigns.spec |> Specs.task_list() |> Enum.at(String.to_integer(i)) do
+    case Enum.at(socket.assigns.task_list, String.to_integer(i)) do
       nil ->
         {:noreply, socket}
 
@@ -389,7 +405,7 @@ defmodule FactoryWeb.SpecLive do
       queue_changed(socket, Specs.move_queued(socket.assigns.spec, title, String.to_integer(by)))
 
   def handle_event("queue_all", _, socket) do
-    titles = socket.assigns.spec |> Specs.task_list() |> Enum.map(& &1.title)
+    titles = Enum.map(socket.assigns.task_list, & &1.title)
     queue_changed(socket, Specs.queue_tasks(socket.assigns.spec, titles))
   end
 
@@ -407,7 +423,7 @@ defmodule FactoryWeb.SpecLive do
   def handle_event("plan_read", %{"dir" => dir}, socket) do
     case Specs.plan_questions(socket.assigns.spec, dir) do
       {:ok, spec} ->
-        {:noreply, assign(socket, spec: spec)}
+        {:noreply, put_spec(socket, spec)}
 
       {:error, :no_folder} ->
         {:noreply, put_flash(socket, :error, "There's no folder at #{dir}.")}
@@ -492,7 +508,8 @@ defmodule FactoryWeb.SpecLive do
          {:ok, spec} <- Specs.reset_plan(spec) do
       {:noreply,
        socket
-       |> assign(spec: spec, preview: false)
+       |> put_spec(spec)
+       |> assign(preview: false)
        |> put_flash(
          :info,
          "Added #{length(tasks)} #{if length(tasks) == 1, do: "task", else: "tasks"}."
@@ -505,7 +522,7 @@ defmodule FactoryWeb.SpecLive do
 
   def handle_event("plan_restart", _, socket) do
     {:ok, spec} = Specs.reset_plan(socket.assigns.spec)
-    {:noreply, assign(socket, spec: spec)}
+    {:noreply, put_spec(socket, spec)}
   end
 
   def handle_event("plan_retry", _, socket) do
@@ -532,7 +549,7 @@ defmodule FactoryWeb.SpecLive do
 
   def handle_event("write_missing", _, socket) do
     case Specs.write_missing(socket.assigns.spec) do
-      {:ok, spec} -> {:noreply, assign(socket, spec: spec, activity: [])}
+      {:ok, spec} -> {:noreply, socket |> put_spec(spec) |> assign(activity: [])}
       {:error, :nothing_missing} -> {:noreply, put_flash(socket, :info, "Every part is written.")}
     end
   end
@@ -549,7 +566,7 @@ defmodule FactoryWeb.SpecLive do
 
   def handle_event("review", _, socket) do
     case Specs.review(socket.assigns.spec) do
-      {:ok, spec} -> {:noreply, assign(socket, spec: spec)}
+      {:ok, spec} -> {:noreply, put_spec(socket, spec)}
       {:error, :empty} -> {:noreply, put_flash(socket, :error, "Write something first.")}
       {:error, :running} -> {:noreply, socket}
     end
@@ -575,7 +592,7 @@ defmodule FactoryWeb.SpecLive do
 
     case Specs.approve(spec, step) do
       {:ok, spec} ->
-        socket = assign(socket, spec: spec)
+        socket = put_spec(socket, spec)
 
         case next_step(step) do
           nil -> {:noreply, assign(socket, preview: true)}
@@ -601,7 +618,7 @@ defmodule FactoryWeb.SpecLive do
 
   def handle_event("reopen", _, socket) do
     {:ok, spec} = Specs.reopen(socket.assigns.spec, socket.assigns.step)
-    {:noreply, assign(socket, spec: spec, preview: false)}
+    {:noreply, socket |> put_spec(spec) |> assign(preview: false)}
   end
 
   def handle_event("start", _, socket) do
@@ -633,13 +650,15 @@ defmodule FactoryWeb.SpecLive do
   defp tasks_changed(socket, {:ok, spec}),
     do:
       {:noreply,
-       assign(socket, spec: spec, selected: MapSet.new(), expanded: MapSet.new(), editing: nil)}
+       socket
+       |> put_spec(spec)
+       |> assign(selected: MapSet.new(), expanded: MapSet.new(), editing: nil)}
 
   defp tasks_changed(socket, {:error, :locked}),
     do: {:noreply, put_flash(socket, :error, "Click Edit to change approved tasks.")}
 
   defp queue_changed(socket, {:ok, spec}, opts \\ []) do
-    socket = assign(socket, spec: spec)
+    socket = put_spec(socket, spec)
     {:noreply, if(opts[:clear], do: assign(socket, selected: MapSet.new()), else: socket)}
   end
 
@@ -663,7 +682,7 @@ defmodule FactoryWeb.SpecLive do
   end
 
   defp task_index(socket, title),
-    do: socket.assigns.spec |> Specs.task_list() |> Enum.find_index(&(&1.title == title))
+    do: Enum.find_index(socket.assigns.task_list, &(&1.title == title))
 
   defp update_improve(socket, title, fun) do
     case socket.assigns.improve do
@@ -676,14 +695,14 @@ defmodule FactoryWeb.SpecLive do
     do: assign(socket, improve: Map.delete(socket.assigns.improve, title))
 
   defp selected_titles(socket) do
-    for {t, i} <- Enum.with_index(Specs.task_list(socket.assigns.spec)),
+    for {t, i} <- Enum.with_index(socket.assigns.task_list),
         MapSet.member?(socket.assigns.selected, i),
         do: t.title
   end
 
   defp plan_tasks(socket, answers) do
     case Specs.plan_tasks(socket.assigns.spec, answers) do
-      {:ok, spec} -> {:noreply, assign(socket, spec: spec)}
+      {:ok, spec} -> {:noreply, put_spec(socket, spec)}
       {:error, :running} -> {:noreply, socket}
     end
   end
@@ -722,8 +741,20 @@ defmodule FactoryWeb.SpecLive do
     %{spec: spec, step: step} = socket.assigns
 
     if Spec.open?(spec, step) and not Spec.approved?(spec, step) do
-      {:ok, spec} = Specs.update_spec(spec, %{step => text})
-      assign(socket, spec: spec, saved: true)
+      case Specs.update_spec(spec, %{step => text}) do
+        {:ok, spec} ->
+          socket |> put_spec(spec) |> assign(saved: true)
+
+        {:error, %Ecto.Changeset{}} ->
+          socket
+
+        # The text is saved; a draft run couldn't follow it.
+        {:error, reason} ->
+          socket
+          |> put_spec(Specs.get_spec(spec.id))
+          |> assign(saved: true)
+          |> put_flash(:error, "Saved, but a run couldn't follow the change: #{why(reason)}")
+      end
     else
       socket
     end
@@ -743,8 +774,7 @@ defmodule FactoryWeb.SpecLive do
         open: Spec.open?(assigns.spec, assigns.step),
         approved: Spec.approved?(assigns.spec, assigns.step),
         ready: Spec.current_step(assigns.spec) == "ready",
-        tasks: Specs.tasks(assigns.spec),
-        task_list: if(assigns.step == "tasks", do: Specs.task_list(assigns.spec), else: [])
+        name_form: to_form(%{"name" => assigns.spec.name})
       )
 
     ~H"""
@@ -755,16 +785,23 @@ defmodule FactoryWeb.SpecLive do
       </Layouts.back_link>
 
       <div class="mb-8 flex flex-wrap items-start justify-between gap-4">
-        <form id="spec-name" phx-change="rename" phx-submit="rename" class="min-w-0 flex-1">
-          <input
-            name="name"
-            value={@spec.name}
+        <.form
+          for={@name_form}
+          id="spec-name"
+          phx-change="rename"
+          phx-submit="rename"
+          class="min-w-0 flex-1"
+        >
+          <.input
+            field={@name_form[:name]}
+            id="spec-name-input"
             maxlength="80"
             phx-debounce="500"
             aria-label="Spec name"
             class="-mx-1 w-full rounded-md bg-transparent px-1 text-xl font-semibold tracking-tight outline-none hover:bg-base-200 focus:bg-base-200"
+            wrapper_class="block"
           />
-        </form>
+        </.form>
         <div class="flex items-center gap-2 pt-1">
           <button
             :if={@ready}
@@ -929,4 +966,7 @@ defmodule FactoryWeb.SpecLive do
     </Layouts.app>
     """
   end
+
+  defp why(reason) when is_binary(reason), do: reason
+  defp why(reason), do: inspect(reason)
 end

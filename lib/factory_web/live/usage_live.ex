@@ -43,6 +43,7 @@ defmodule FactoryWeb.UsageLive do
        day: day,
        picked: params["day"] not in [nil, "all"],
        filters: filters,
+       filter_form: to_form(filters),
        view: if(params["view"] == "table", do: "table", else: "chart"),
        days: days,
        totals: sum(days),
@@ -183,38 +184,44 @@ defmodule FactoryWeb.UsageLive do
           </.link>
         </div>
 
-        <form id="usage-filters" phx-change="filter" class="ml-auto flex flex-wrap items-center gap-2">
-          <select
-            name="source"
+        <.form
+          for={@filter_form}
+          id="usage-filters"
+          phx-change="filter"
+          class="ml-auto flex flex-wrap items-center gap-2"
+        >
+          <.input
+            field={@filter_form[:source]}
+            type="select"
+            id="usage-filter-source"
             aria-label="Kind of work"
+            options={source_options()}
             class="select select-sm w-auto"
-          >
-            <option value="" selected={@filters["source"] == ""}>All kinds of work</option>
-            <option
-              :for={{source, label} <- Enum.sort_by(Usage.sources(), &elem(&1, 1))}
-              value={source}
-              selected={@filters["source"] == source}
-            >
-              {label}
-            </option>
-          </select>
-          <select name="type" aria-label="Type of run" class="select select-sm w-auto">
-            <option value="" selected={@filters["type"] == ""}>All runs and specs</option>
-            <option
-              :for={t <- Factory.Runs.Types.all()}
-              value={t.id}
-              selected={@filters["type"] == t.id}
-            >
-              {t.short}
-            </option>
-            <option value="chat" selected={@filters["type"] == "chat"}>Plain chats</option>
-          </select>
-          <select name="sort" aria-label="Sort sessions" class="select select-sm w-auto">
-            <option value="most" selected={@filters["sort"] == "most"}>Most used first</option>
-            <option value="least" selected={@filters["sort"] == "least"}>Least used first</option>
-            <option value="latest" selected={@filters["sort"] == "latest"}>Latest first</option>
-          </select>
-        </form>
+            wrapper_class="contents"
+          />
+          <.input
+            field={@filter_form[:type]}
+            type="select"
+            id="usage-filter-type"
+            aria-label="Type of run"
+            options={type_options()}
+            class="select select-sm w-auto"
+            wrapper_class="contents"
+          />
+          <.input
+            field={@filter_form[:sort]}
+            type="select"
+            id="usage-filter-sort"
+            aria-label="Sort sessions"
+            options={[
+              {"Most used first", "most"},
+              {"Least used first", "least"},
+              {"Latest first", "latest"}
+            ]}
+            class="select select-sm w-auto"
+            wrapper_class="contents"
+          />
+        </.form>
       </div>
 
       <div class="grid grid-cols-2 gap-3 lg:grid-cols-4">
@@ -490,6 +497,17 @@ defmodule FactoryWeb.UsageLive do
       </section>
     </Layouts.app>
     """
+  end
+
+  # The filters' choices, as `{label, value}` for the selects.
+  defp source_options do
+    sources = Usage.sources() |> Enum.sort_by(&elem(&1, 1)) |> Enum.map(fn {s, l} -> {l, s} end)
+    [{"All kinds of work", ""} | sources]
+  end
+
+  defp type_options do
+    types = for t <- Factory.Runs.Types.all(), do: {t.short, t.id}
+    [{"All runs and specs", ""}] ++ types ++ [{"Plain chats", "chat"}]
   end
 
   attr :label, :string, required: true
