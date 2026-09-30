@@ -866,9 +866,15 @@ defmodule FactoryWeb.ChatLive do
 
   def handle_info({:message, _message}, socket), do: {:noreply, socket}
 
-  def handle_info({:agent_stream, %{agent_id: id} = chunk}, socket) do
+  # Only this run's: a chunk sent before the page moved to another run is dropped.
+  def handle_info(
+        {:agent_stream, %{run_id: run_id, agent_id: id} = chunk},
+        %{assigns: %{run: %{id: run_id}}} = socket
+      ) do
     {:noreply, socket |> update(:streaming, &Map.put(&1, id, chunk)) |> derive()}
   end
+
+  def handle_info({:agent_stream, _chunk}, socket), do: {:noreply, socket}
 
   # Re-render messages when the status changes so buttons like "Start run" disappear once used.
   # A new plan's tasks, too: only the latest plan offers to implement.

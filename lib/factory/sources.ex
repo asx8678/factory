@@ -438,10 +438,20 @@ defmodule Factory.Sources do
 
       Enum.reduce_while(steps, :ok, fn args, :ok ->
         case Git.run(args, env, max(deadline - System.monotonic_time(:millisecond), 0)) do
-          {:ok, _, 0} -> {:cont, :ok}
-          {:ok, out, _} -> {:halt, {:error, git_error(out)}}
-          {:error, :timeout} -> {:halt, {:error, "Syncing timed out and was stopped."}}
-          {:error, reason} -> {:halt, {:error, "Couldn't run git: #{inspect(reason)}"}}
+          {:ok, _, 0} ->
+            {:cont, :ok}
+
+          {:ok, out, _} ->
+            {:halt, {:error, git_error(out)}}
+
+          {:error, :timeout} ->
+            {:halt, {:error, "Syncing timed out and was stopped."}}
+
+          {:error, reason} when is_binary(reason) ->
+            {:halt, {:error, "Couldn't run git: #{reason}"}}
+
+          {:error, reason} ->
+            {:halt, {:error, "Couldn't run git: #{inspect(reason)}"}}
         end
       end)
     end

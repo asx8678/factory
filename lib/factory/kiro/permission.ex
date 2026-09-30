@@ -130,14 +130,148 @@ defmodule Factory.Kiro.Permission do
 
   def looking?(command) when is_binary(command) do
     text = String.replace(command, ~r/\s*\d?>\s*&\d|\s*\d?>\s*\/dev\/null/, "")
+    parts = parts(text)
 
     not String.contains?(text, [">", "`", "$(", "<("]) and
-      text
-      |> String.split(~r/&&|\|\||;|\||&|\R/)
-      |> Enum.map(&String.trim/1)
-      |> Enum.reject(&(&1 == ""))
-      |> then(&(&1 != [] and Enum.all?(&1, fn part -> looking_part?(part) end)))
+      parts != [] and Enum.all?(parts, &looking_part?/1)
   end
+
+  # The commands in a chain or pipeline.
+  defp parts(text) do
+    text
+    |> String.split(~r/&&|\|\||;|\||&|\R/)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  @doc """
+  Whether a command runs the project's own code: its tests or a check that builds it
+  (`mix test`, `npm run lint`). In a pull request cloned for review, that code is the
+  author's, so the person is asked first.
+  """
+  def runs_project_code?(nil), do: false
+
+  def runs_project_code?(command) when is_binary(command) do
+    command
+    |> parts()
+    |> Enum.any?(fn part ->
+      words = String.split(part)
+      Enum.any?(@tests, &List.starts_with?(words, &1))
+    end)
+  end
+
+  @doc """
+  Whether a command reads outside `folder`: a path in it (or a folder it moves to)
+  that is absolute, starts at the home folder or climbs out with `..`, and leads
+  somewhere that exists outside the folder. A pattern that only looks like a path
+  (`grep /api/ lib`) exists nowhere, so it doesn't count; a variable (`$HOME`) always
+  does, as it can't be told where it leads.
+  """
+  def reads_outside?(nil, _folder), do: false
+
+  def reads_outside?(command, folder) when is_binary(command) do
+    folder = Path.expand(folder)
+
+    command
+    |> String.split(~r/[\s=:,]+/)
+    |> Enum.map(&String.trim(&1, "\"'"))
+    |> Enum.any?(&outside?(&1, folder))
+  end
+
+  @doc """
+  The files and folders a tool call names (Kiro's reads and searches), from its
+  `locations` and its input.
+  """
+  def paths_of(call) when is_map(call) do
+    input = if is_map(call["rawInput"]), do: call["rawInput"], else: %{}
+    operations = if is_list(input["operations"]), do: input["operations"], else: []
+
+    located =
+      for %{"path" => p} <- List.wrap(call["locations"]), is_binary(p), do: p
+
+    given =
+      for map <- [input | operations],
+          is_map(map),
+          key <- ~w(path file_path filePath dir directory cwd),
+          p = map[key],
+          is_binary(p),
+          do: p
+
+    listed =
+      for map <- [input | operations],
+          is_map(map),
+          p <- List.wrap(map["paths"]),
+          is_binary(p),
+          do: p
+
+    Enum.uniq(located ++ given ++ listed)
+  end
+
+  def paths_of(_call), do: []
+
+  # The paths that lead outside `folder` (relative ones are inside it).
+  defp outside_paths(paths, folder) do
+    folder = Path.expand(folder)
+    Enum.reject(paths, &inside?(Path.expand(&1, folder), folder))
+  end
+
+  @doc """
+  Why the person should say yes first to a request an agent that only reads and checks
+  would otherwise be allowed, or nil. What such an agent reads may be a stranger's pull
+  request, and an injected prompt could steer it, so it asks before it:
+
+    * fetches a web page ("fetch"), which could send what it read anywhere;
+    * runs the project's own code (`mix test`, a build) in a pull request cloned for
+      review (`Factory.Repos.label/1`): that code is the pull request author's;
+    * reads outside `folder`, with a command or with Kiro's own tools (`paths`).
+
+  The reason reads after the agent's name: "Reviewer wants to …".
+  """
+  def ask_first(kind, command, paths, folder)
+
+  def ask_first("fetch", _command, _paths, _folder),
+    do: "wants to fetch a web page. What it has read could go along with the request."
+
+  def ask_first("execute", command, _paths, folder) do
+    cond do
+      Factory.Repos.label(folder) != nil and runs_project_code?(command) ->
+        "wants to run `#{command}` in a pull request cloned for review. " <>
+          "That runs the pull request's own code."
+
+      reads_outside?(command, folder) ->
+        "wants to run `#{command}`, which reads outside the project folder."
+
+      true ->
+        nil
+    end
+  end
+
+  def ask_first(kind, _command, paths, folder) when kind in ["read", "search"] do
+    case outside_paths(paths, folder) do
+      [] -> nil
+      outside -> "wants to read outside the project folder: #{Enum.join(outside, ", ")}."
+    end
+  end
+
+  def ask_first(_kind, _command, _paths, _folder), do: nil
+
+  defp outside?(word, folder) do
+    cond do
+      # `$HOME`, `${HOME}`; not a pattern's `foo$`.
+      Regex.match?(~r/\$[A-Za-z_{]/, word) ->
+        true
+
+      String.starts_with?(word, ["/", "~"]) or String.contains?(word, "..") ->
+        # A glob reads what its folder holds.
+        path = word |> String.replace(~r/[*?\[{].*$/, "") |> Path.expand(folder)
+        path != "" and not inside?(path, folder) and File.exists?(path)
+
+      true ->
+        false
+    end
+  end
+
+  defp inside?(path, folder), do: path == folder or String.starts_with?(path, folder <> "/")
 
   defp looking_part?(part) do
     words = String.split(part)

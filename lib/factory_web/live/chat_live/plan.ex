@@ -125,6 +125,11 @@ defmodule FactoryWeb.ChatLive.Plan do
   def handle_event("plan_inline_cancel", _, socket),
     do: {:noreply, assign(socket, plan_inline: nil)}
 
+  # No plan, nothing to change (a stale page, or an event nobody's page sent).
+  def handle_event(event, _params, %{assigns: %{plan_spec: nil}} = socket)
+      when event in ~w(plan_inline_save plan_save plan_remove plan_use),
+      do: {:noreply, socket}
+
   # Saved by Enter or by leaving the field; only the field that's open counts, so the
   # blur after an Enter doesn't save twice.
   def handle_event("plan_inline_save", %{"i" => i, "part" => part} = params, socket) do
@@ -136,30 +141,30 @@ defmodule FactoryWeb.ChatLive.Plan do
          {:ok, changed} <- inline_change(task, part, value) do
       socket
       |> assign(plan_inline: nil)
-      |> own_change(i, :edit, Specs.edit_plan_task(plan_spec(socket), i, changed))
+      |> own_change(i, :edit, Specs.edit_plan_task(plan_spec(socket), i, changed, task.title))
     else
       _ -> {:noreply, assign(socket, plan_inline: nil)}
     end
   end
 
   def handle_event("plan_save", %{"i" => i, "task" => params}, socket) do
+    i = String.to_integer(i)
+
     socket
     |> assign(plan_editing: nil)
     |> own_change(
-      String.to_integer(i),
+      i,
       :edit,
-      Specs.edit_plan_task(plan_spec(socket), String.to_integer(i), params)
+      Specs.edit_plan_task(plan_spec(socket), i, params, title_at(socket, i))
     )
   end
 
   def handle_event("plan_remove", %{"i" => i}, socket) do
+    i = String.to_integer(i)
+
     socket
     |> assign(plan_editing: nil, plan_asking: nil)
-    |> own_change(
-      String.to_integer(i),
-      :remove,
-      Specs.remove_plan_task(plan_spec(socket), String.to_integer(i))
-    )
+    |> own_change(i, :remove, Specs.remove_plan_task(plan_spec(socket), i, title_at(socket, i)))
   end
 
   # The gold marks on what the planner changed: cleared once they've been read.
@@ -221,7 +226,7 @@ defmodule FactoryWeb.ChatLive.Plan do
            Enum.find_index(socket.assigns.plan_tasks, &(&1.title == title)) do
       socket
       |> update(:plan_improve, &Map.delete(&1, title))
-      |> own_change(i, :edit, Specs.edit_plan_task(plan_spec(socket), i, params))
+      |> own_change(i, :edit, Specs.edit_plan_task(plan_spec(socket), i, params, title))
     else
       _ -> {:noreply, update(socket, :plan_improve, &Map.delete(&1, title))}
     end
@@ -239,6 +244,10 @@ defmodule FactoryWeb.ChatLive.Plan do
 
   def handle_info({:task_improved, title, result}, socket),
     do: {:noreply, update(socket, :plan_improve, &TaskImprove.result(&1, title, result))}
+
+  # The title of the task shown at `i`: an edit or removal goes through only while that
+  # task is still there (the planner may have moved the list on meanwhile).
+  defp title_at(socket, i), do: (Enum.at(socket.assigns.plan_tasks, i) || %{})[:title]
 
   # A task with one line changed in place, as edit_plan_task/3 takes it; :same when
   # nothing changed. An emptied step goes; an empty title or new step changes nothing.

@@ -5,9 +5,11 @@ defmodule Factory.Agents.Agent do
   @statuses ~w(idle running waiting error done)
   @kinds ~w(general orchestrator planner coder tester reviewer researcher writer action)
 
-  # Agents that only look: they read and search the project, never change it.
+  # Agents that only look: they read and search the project, never change it. What they
+  # read may be a stranger's pull request, so fetching a web page is asked about first:
+  # an injected prompt could otherwise send what they read to any address.
   @read_only ~w(planner researcher reviewer)
-  @read_tools ~w(read search think fetch)
+  @read_tools ~w(read search think)
   @all_tools ~w(read search think fetch edit delete move execute other)
 
   schema "agents" do

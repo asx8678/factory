@@ -340,6 +340,34 @@ defmodule Factory.Kiro.Session do
       {nil, _} ->
         {:reply, {:error, :gone}, state}
 
+      # A yes or no to a tool (`ask_permission/4`): only "Yes, this once" allows it.
+      {%{permission: permission} = entry, rest} ->
+        allow? = action == "accept" and content["decision"] == "allow"
+
+        outcome =
+          Kiro.Permission.outcome(permission.options, if(allow?, do: "allow", else: "reject"))
+
+        reply(state, entry.rpc, %{outcome: outcome})
+
+        Runs.update_message_meta(entry.message_id, fn meta ->
+          meta
+          |> put_in(
+            ["elicitation", "status"],
+            if(action == "accept", do: "answered", else: "declined")
+          )
+          |> put_in(["elicitation", "answer"], if(action == "accept", do: content))
+        end)
+
+        state = %{state | elicitations: rest}
+
+        state =
+          if allow? and outcome.outcome == "selected",
+            do: state,
+            else: deny(state, permission.call)
+
+        if state.turn, do: Agents.set_activity(state.turn.agent.id, "running", "Carrying on")
+        {:reply, :ok, state}
+
       {entry, rest} ->
         result =
           if action == "accept",
@@ -444,6 +472,26 @@ defmodule Factory.Kiro.Session do
   # Whoever waited for a job's reply has ended.
   def handle_info({:DOWN, monitor, :process, _pid, _reason}, state),
     do: {:noreply, give_up(state, &(&1.monitor == monitor))}
+
+  # A yes or no nobody gave in time (`ask_permission/4`): Kiro hears it was cancelled.
+  def handle_info({:ask_expired, key}, state) do
+    case Map.pop(state.elicitations, key) do
+      {%{permission: permission} = entry, rest} ->
+        reply(state, entry.rpc, %{outcome: %{outcome: "cancelled"}})
+
+        Runs.update_message_meta(
+          entry.message_id,
+          &put_in(&1, ["elicitation", "status"], "expired")
+        )
+
+        state = deny(%{state | elicitations: rest}, permission.call)
+        if state.turn, do: Agents.set_activity(state.turn.agent.id, "running", "Carrying on")
+        {:noreply, state}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
 
   # The turn's text so far goes to the chat; a timer left from an earlier turn does nothing.
   def handle_info({:flush_stream, id}, %{turn: %Turn{request_id: id}} = state),
@@ -560,14 +608,15 @@ defmodule Factory.Kiro.Session do
         else: %{}
 
     kind = Kiro.Permission.kind(params, known)
+    command = state.turn && Kiro.Permission.command(params, commands(state.turn))
 
     # A planner while it plans, and an agent that only reads and checks (a reviewer,
     # a researcher), may run commands that only look: git log and diff, a search, the
     # tests, a pull request's diff.
     looking? =
-      kind == "execute" and state.turn != nil and
+      kind == "execute" and kind not in allowed and state.turn != nil and
         (state.turn.planning != nil or Agent.read_only?(state.turn.agent)) and
-        Kiro.Permission.looking?(Kiro.Permission.command(params, commands(state.turn)))
+        Kiro.Permission.looking?(command)
 
     wanted =
       if kind in allowed or looking? or
@@ -575,17 +624,31 @@ defmodule Factory.Kiro.Session do
          do: "allow",
          else: "reject"
 
-    outcome = Kiro.Permission.outcome(options, wanted)
-    reply(state, id, %{outcome: outcome})
+    # Some of what one that only reads may do goes to the person first
+    # (`Kiro.Permission.ask_first/4`): a web page, a pull request's own code, a file
+    # outside the project.
+    ask =
+      cond do
+        looking? ->
+          Kiro.Permission.ask_first(kind, command, [], state.workdir)
 
-    if wanted == "allow" and outcome.outcome == "selected" do
-      state
+        state.turn != nil and Agent.read_only?(state.turn.agent) and
+            (kind == "fetch" or (wanted == "allow" and kind in ["read", "search"])) ->
+          Kiro.Permission.ask_first(kind, command, paths(params, state.turn), state.workdir)
+
+        true ->
+          nil
+      end
+
+    if ask do
+      ask_permission(state, id, params, ask)
     else
-      title = get_in(params, ["toolCall", "title"]) || "a tool"
+      outcome = Kiro.Permission.outcome(options, wanted)
+      reply(state, id, %{outcome: outcome})
 
-      state
-      |> update_turn(fn turn -> %{turn | denied: turn.denied ++ [title]} end)
-      |> track_tool(Map.put(params["toolCall"] || %{}, "status", "denied"))
+      if wanted == "allow" and outcome.outcome == "selected",
+        do: state,
+        else: deny(state, params["toolCall"])
     end
   end
 
@@ -685,6 +748,76 @@ defmodule Factory.Kiro.Session do
   end
 
   defp handle_message(_msg, state), do: state
+
+  # A tool the person is asked about: a yes or no in the chat, the same form as a tool's
+  # question, and the answer back to Kiro (`handle_call({:elicitation, …})`). Kiro
+  # waits. With no chat to ask in, it's a no.
+  defp ask_permission(state, id, params, reason) do
+    run = Runs.get_run(state.turn.run_id)
+
+    if run == nil do
+      outcome = Kiro.Permission.outcome(params["options"] || [], "reject")
+      reply(state, id, %{outcome: outcome})
+      deny(state, params["toolCall"])
+    else
+      agent = state.turn.agent
+      key = Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
+
+      schema = %{
+        "type" => "object",
+        "properties" => %{
+          "decision" => %{
+            "type" => "string",
+            "title" => "Let it?",
+            "enum" => ["deny", "allow"],
+            "enumNames" => ["No", "Yes, this once"]
+          }
+        },
+        "required" => ["decision"]
+      }
+
+      message =
+        Runs.post(run, "factory", "#{agent.name} #{reason}",
+          author: agent.name,
+          meta: %{
+            "agent_id" => agent.id,
+            "elicitation" => %{"key" => key, "schema" => schema, "status" => "open"}
+          }
+        )
+
+      Agents.set_activity(agent.id, "waiting", "Waiting for your yes or no")
+
+      # Unanswered by half the turn's time (nobody at the chat while a run goes on), it's
+      # a no, and the agent carries on without it rather than the turn timing out.
+      Process.send_after(self(), {:ask_expired, key}, div(Kiro.config(:prompt_timeout), 2))
+
+      entry = %{
+        rpc: id,
+        message_id: message.id,
+        run_id: run.id,
+        permission: %{options: params["options"] || [], call: params["toolCall"] || %{}}
+      }
+
+      %{state | elicitations: Map.put(state.elicitations, key, entry)}
+    end
+  end
+
+  # A tool that was refused: the turn notes it, and the chat shows it as denied.
+  defp deny(state, call) do
+    title = (call || %{})["title"] || "a tool"
+
+    state
+    |> update_turn(fn turn -> %{turn | denied: turn.denied ++ [title]} end)
+    |> track_tool(Map.put(call || %{}, "status", "denied"))
+  end
+
+  # The files and folders a read or search names: on the request, or on the tool call
+  # Kiro announced before it.
+  defp paths(params, turn) do
+    call = params["toolCall"] || %{}
+    tracked = Enum.find(turn.tools, &(&1.call_id && &1.call_id == call["toolCallId"]))
+    Kiro.Permission.paths_of(call) ++ ((tracked && tracked[:paths]) || [])
+  end
 
   defp error_response({:prompt, id}, error, %{turn: %Turn{request_id: id}} = state),
     do: state |> finish_turn("Kiro returned an error: #{error["message"]}") |> next()
@@ -1219,7 +1352,8 @@ defmodule Factory.Kiro.Session do
     Phoenix.PubSub.broadcast(
       Factory.PubSub,
       "run:#{turn.run_id}",
-      {:agent_stream, %{agent_id: turn.agent.id, name: turn.agent.name, text: turn.text}}
+      {:agent_stream,
+       %{run_id: turn.run_id, agent_id: turn.agent.id, name: turn.agent.name, text: turn.text}}
     )
 
     %{state | turn: %{turn | flush: nil}}
@@ -1315,7 +1449,12 @@ defmodule Factory.Kiro.Session do
 
   defp close_elicitations(state) do
     for {_key, entry} <- state.elicitations do
-      reply(state, entry.rpc, %{action: "cancel"})
+      # A tool waiting for a yes or no is cancelled as ACP has it.
+      reply(
+        state,
+        entry.rpc,
+        if(entry[:permission], do: %{outcome: %{outcome: "cancelled"}}, else: %{action: "cancel"})
+      )
 
       Runs.update_message_meta(
         entry.message_id,

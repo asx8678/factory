@@ -187,22 +187,24 @@ defmodule FactoryWeb.SpecLive do
     {:noreply, assign(socket, expanded: expanded)}
   end
 
-  def handle_event("task_move", %{"i" => i, "by" => by}, socket),
-    do:
-      tasks_changed(
-        socket,
-        Specs.move_task(socket.assigns.spec, String.to_integer(i), String.to_integer(by))
-      )
+  # Each change names the tasks it was made on, so it doesn't land on another task when
+  # the planner has changed the list meanwhile.
+  def handle_event("task_move", %{"i" => i, "by" => by}, socket) do
+    i = String.to_integer(i)
+    spec = socket.assigns.spec
+    tasks_changed(socket, Specs.move_task(spec, i, String.to_integer(by), title_at(socket, i)))
+  end
 
-  def handle_event("task_delete", %{"i" => i}, socket),
-    do: tasks_changed(socket, Specs.delete_tasks(socket.assigns.spec, [String.to_integer(i)]))
+  def handle_event("task_delete", %{"i" => i}, socket) do
+    i = String.to_integer(i)
+    tasks_changed(socket, Specs.delete_tasks(socket.assigns.spec, [i], [title_at(socket, i)]))
+  end
 
-  def handle_event("tasks_delete", _, socket),
-    do:
-      tasks_changed(
-        socket,
-        Specs.delete_tasks(socket.assigns.spec, MapSet.to_list(socket.assigns.selected))
-      )
+  def handle_event("tasks_delete", _, socket) do
+    indices = MapSet.to_list(socket.assigns.selected)
+    titles = Enum.map(indices, &title_at(socket, &1))
+    tasks_changed(socket, Specs.delete_tasks(socket.assigns.spec, indices, titles))
+  end
 
   def handle_event("task_edit", %{"i" => i}, socket),
     do: {:noreply, assign(socket, editing: String.to_integer(i))}
@@ -215,7 +217,7 @@ defmodule FactoryWeb.SpecLive do
     if socket.assigns.editing == i do
       old = socket.assigns.spec |> Specs.task_list() |> Enum.at(i)
 
-      case Specs.update_task(socket.assigns.spec, i, params) do
+      case Specs.update_task(socket.assigns.spec, i, params, old && old.title) do
         {:error, :blank_title} ->
           {:noreply, put_flash(socket, :error, "A task needs a title.")}
 
@@ -267,7 +269,7 @@ defmodule FactoryWeb.SpecLive do
          i when is_integer(i) <- task_index(socket, title) do
       tasks_changed(
         close_improve(socket, title),
-        Specs.update_task(socket.assigns.spec, i, params)
+        Specs.update_task(socket.assigns.spec, i, params, title)
       )
     else
       _ -> {:noreply, close_improve(socket, title)}
@@ -602,8 +604,22 @@ defmodule FactoryWeb.SpecLive do
 
   def handle_event("start", _, socket) do
     case Specs.start_run(socket.assigns.spec) do
-      {:ok, run} -> {:noreply, push_navigate(socket, to: ~p"/chat/#{run.id}")}
-      {:error, _} -> {:noreply, put_flash(socket, :error, "Approve all three steps first.")}
+      {:ok, run} ->
+        {:noreply, push_navigate(socket, to: ~p"/chat/#{run.id}")}
+
+      {:error, :not_approved} ->
+        {:noreply, put_flash(socket, :error, "Approve all three steps first.")}
+
+      {:error, :queue_gone} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "None of the queued tasks are in the spec any more, so the queue was cleared. Queue them again, or start to run them all."
+         )}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Couldn't start a run. Try again.")}
     end
   end
 
@@ -635,6 +651,17 @@ defmodule FactoryWeb.SpecLive do
 
   defp tasks_changed(socket, {:error, :locked}),
     do: {:noreply, put_flash(socket, :error, "Click Edit to change approved tasks.")}
+
+  defp tasks_changed(socket, {:error, :stale}),
+    do:
+      {:noreply,
+       put_flash(socket, :error, "The tasks changed meanwhile. Check the list and try again.")}
+
+  defp tasks_changed(socket, {:error, _}),
+    do: {:noreply, put_flash(socket, :error, "That change couldn't be saved. Try again.")}
+
+  defp title_at(socket, i),
+    do: (socket.assigns.spec |> Specs.task_list() |> Enum.at(i) || %{})[:title]
 
   defp queue_changed(socket, {:ok, spec}, opts \\ []) do
     socket = put_spec(socket, spec)

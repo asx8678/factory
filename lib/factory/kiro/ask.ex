@@ -50,6 +50,7 @@ defmodule Factory.Kiro.Ask do
 
     conn = %{
       port: port,
+      workdir: workdir,
       deadline: deadline,
       allow: opts[:allow] || [],
       mcp: Enum.map(opts[:mcp_servers] || [], & &1.name),
@@ -192,14 +193,31 @@ defmodule Factory.Kiro.Ask do
 
     kind = Kiro.Permission.kind(p, acc.kinds)
 
+    command = Kiro.Permission.command(p, acc.commands)
+
     looking? =
-      kind == "execute" and "look" in conn.allow and
-        Kiro.Permission.looking?(Kiro.Permission.command(p, acc.commands))
+      kind == "execute" and "look" in conn.allow and Kiro.Permission.looking?(command)
+
+    # What a chat would ask the person about first (`Kiro.Permission.ask_first/4`) is a
+    # no here, with nobody to ask: a pull request's own code, a file outside the folder.
+    asks_first? =
+      cond do
+        kind == "execute" and kind not in conn.allow and looking? ->
+          Kiro.Permission.ask_first(kind, command, [], conn.workdir) != nil
+
+        kind in ["read", "search"] and "execute" not in conn.allow ->
+          paths = Kiro.Permission.paths_of(p["toolCall"])
+          Kiro.Permission.ask_first(kind, command, paths, conn.workdir) != nil
+
+        true ->
+          false
+      end
 
     wanted =
-      if kind in conn.allow or looking? or (server && server in conn.mcp),
-        do: "allow",
-        else: "reject"
+      if (kind in conn.allow or looking? or (server != nil and server in conn.mcp)) and
+           not asks_first?,
+         do: "allow",
+         else: "reject"
 
     Wire.send_json(conn.port, %{
       jsonrpc: "2.0",

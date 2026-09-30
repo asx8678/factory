@@ -481,13 +481,22 @@ defmodule Factory.Chat do
 
     [
       done != [] && " Done: #{Enum.join(done, ", ")}.",
-      now && if(p["error"], do: " Stopped at #{now}: #{p["error"]}", else: " Now: #{now}.")
+      stopped(now, p["error"])
     ]
     |> Enum.filter(& &1)
     |> Enum.join()
   end
 
+  # A run paused before it started (Factory restarted while it was queued).
+  defp progress(%Run{progress: %{"error" => error}}) when is_binary(error),
+    do: stopped(nil, error)
+
   defp progress(_run), do: ""
+
+  defp stopped(nil, nil), do: nil
+  defp stopped(nil, error), do: " Stopped: #{error}"
+  defp stopped(now, nil), do: " Now: #{now}."
+  defp stopped(now, error), do: " Stopped at #{now}: #{error}"
 
   defp names(files), do: files |> Enum.map(&elem(&1, 0)) |> Enum.join(", ")
   defp plural([_], word), do: word
