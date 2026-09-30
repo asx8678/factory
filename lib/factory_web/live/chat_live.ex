@@ -31,7 +31,8 @@ defmodule FactoryWeb.ChatLive do
      |> assign(commands: Chat.commands())
      |> assign(workflows: if(connected?(socket), do: Workflows.list(), else: []))
      |> assign(browser: nil, folder_warn: false, to: nil)
-     |> assign(scout: nil, ideas: nil, cloning: nil, clone_error: nil)
+     |> assign(scout: nil, ideas: nil, cloning: nil, clone_error: nil, folder_error: nil)
+     |> assign(review_step: nil)
      |> assign(pick: nil, workflow: nil, planner: nil, graph: nil, agents: [], steps: [])
      |> assign(dir: "", dir_ok: false, base_ids: [])
      |> assign(
@@ -169,6 +170,7 @@ defmodule FactoryWeb.ChatLive do
 
     assign(socket,
       empty: a.count == 0 and a.streaming == %{},
+      review_step: review_step(a),
       spec_count: spec_count(a),
       show_plan: show_plan,
       plan_working: Plan.working(a),
@@ -182,6 +184,21 @@ defmodule FactoryWeb.ChatLive do
           do: s
         )
     )
+  end
+
+  # Review a PR goes in steps: choose the repository (`:source`), see what's worth
+  # reviewing in it (`:analysis`), then the review itself (`:review`, its messages).
+  # Worked out from what's saved, so a reload lands on the same step. The folder new
+  # chats remember isn't a choice: only a review run keeps the repository it's for.
+  defp review_step(a) do
+    cond do
+      a.workflow == nil or Workflows.kind(a.workflow) != "review" -> nil
+      # A chat with one agent is just that chat.
+      a.focus != nil -> nil
+      a.count > 0 -> :review
+      a.run != nil and a.run.kind == "review" and a.dir_ok -> :analysis
+      true -> :source
+    end
   end
 
   # Specs on this run: its base specs, and its own spec once something is written in it.
@@ -215,6 +232,10 @@ defmodule FactoryWeb.ChatLive do
 
     cond do
       not look? ->
+        assign(socket, scout: nil, ideas: nil)
+
+      # Nothing's looked at before the repository is chosen.
+      review? and socket.assigns.review_step != :analysis ->
         assign(socket, scout: nil, ideas: nil)
 
       review? ->
@@ -259,7 +280,13 @@ defmodule FactoryWeb.ChatLive do
         if run, do: Runs.subscribe(run.id)
       end
 
-      assign(socket, cloning: nil, clone_error: nil, browser: nil, folder_warn: false)
+      assign(socket,
+        cloning: nil,
+        clone_error: nil,
+        folder_error: nil,
+        browser: nil,
+        folder_warn: false
+      )
     else
       socket
     end
@@ -447,6 +474,13 @@ defmodule FactoryWeb.ChatLive do
     end
   end
 
+  # Another repository: back to the first step, in a new chat. The one left behind
+  # has no messages, so it's reused for that repository or cleared away later.
+  def handle_event("review_change", _, socket) do
+    if socket.assigns.workflow, do: Workflows.set_current(socket.assigns.workflow)
+    {:noreply, push_navigate(socket, to: ~p"/chat")}
+  end
+
   def handle_event("review_branch", %{"branch" => branch}, socket) do
     with {:ok, %{branches: branches}} <- socket.assigns.scout,
          %{} = b <- Enum.find(branches, &(&1.name == branch)) do
@@ -503,6 +537,11 @@ defmodule FactoryWeb.ChatLive do
   def handle_event(event, params, socket)
       when event in ["browse_go", "browse_hidden", "browse_cancel"],
       do: FolderBrowser.handle_event(event, params, socket)
+
+  # In a review not yet under way, the folder picked is the repository to review.
+  def handle_event("browse_pick", %{"path" => path}, %{assigns: %{review_step: step}} = socket)
+      when step in [:source, :analysis],
+      do: pick_repository(socket, path)
 
   def handle_event("browse_pick", %{"path" => path}, socket) do
     {:noreply,
@@ -762,25 +801,6 @@ defmodule FactoryWeb.ChatLive do
   # of its own with the clone as its folder, so it's there after a reload. The folder
   # picked for new chats stays as it was.
   def handle_async(:clone, {:ok, {:ok, cloned}}, socket) do
-    run =
-      case socket.assigns.run do
-        %{status: "draft"} = run -> run
-        _ -> Runs.unused_review(cloned.dir) || elem(Runs.create_run("Review #{cloned.label}"), 1)
-      end
-
-    {:ok, run} =
-      Runs.update_run(run, %{
-        title: "Review #{cloned.label}",
-        kind: "review",
-        settings:
-          Map.merge(run.settings || %{}, %{
-            "workflow_id" => socket.assigns.workflow.id,
-            "base_spec_ids" => socket.assigns.base_ids,
-            "project_dir" => cloned.dir,
-            "title" => "manual"
-          })
-      })
-
     said =
       if cloned.fresh,
         do: "Cloned #{cloned.label}.",
@@ -790,7 +810,8 @@ defmodule FactoryWeb.ChatLive do
      socket
      |> assign(cloning: nil, clone_error: nil)
      |> put_flash(:info, said)
-     |> push_patch(to: ~p"/chat/#{run.id}")}
+     # A pull request's link: its branch leads what's worth reviewing.
+     |> open_review(cloned.dir, cloned.label, "clone", cloned[:pr_branch])}
   end
 
   def handle_async(:clone, {:ok, {:error, reason}}, socket),
@@ -806,6 +827,56 @@ defmodule FactoryWeb.ChatLive do
   end
 
   def handle_async(:ideas, {:exit, _reason}, socket), do: {:noreply, assign(socket, ideas: [])}
+
+  # A folder picked as the repository to review: its repository (a folder picked inside
+  # one is all of it), or why it won't do.
+  defp pick_repository(socket, path) do
+    case Factory.Scout.repository(path) do
+      {:ok, top} ->
+        Factory.Prefs.remember_project_dir(top)
+        label = Factory.Repos.label(top) || Path.basename(top)
+        source = if Factory.Repos.label(top), do: "clone", else: "local"
+
+        {:noreply,
+         socket
+         |> assign(browser: nil, folder_warn: false, folder_error: nil)
+         |> open_review(top, label, source)}
+
+      {:error, reason} ->
+        {:noreply,
+         assign(socket, browser: nil, folder_error: "#{Path.basename(path)}: #{reason}")}
+    end
+  end
+
+  # The chat becomes a review of the repository in `dir`: a run of its own with the
+  # folder saved, so a reload opens on what's in it (the analysis step). A draft chat
+  # being set up becomes it; else an unused review of that folder, or a new one.
+  # `source` is where it came from ("clone" or "local"); `pr_branch` a pull request's
+  # branch fetched with it, suggested first.
+  defp open_review(socket, dir, label, source, pr_branch \\ nil) do
+    run =
+      case socket.assigns.run do
+        %{status: "draft"} = run -> run
+        _ -> Runs.unused_review(dir) || elem(Runs.create_run("Review #{label}"), 1)
+      end
+
+    {:ok, run} =
+      Runs.update_run(run, %{
+        title: "Review #{label}",
+        kind: "review",
+        settings:
+          Map.merge(run.settings || %{}, %{
+            "workflow_id" => socket.assigns.workflow.id,
+            "base_spec_ids" => socket.assigns.base_ids,
+            "project_dir" => dir,
+            "title" => "manual",
+            "review_source" => source,
+            "review_pr_branch" => pr_branch
+          })
+      })
+
+    push_patch(socket, to: ~p"/chat/#{run.id}")
+  end
 
   # The run's spec, where the plan lives (FactoryWeb.ChatLive.Plan): the plan changed,
   # or Kiro is working on one of its tasks.
@@ -956,7 +1027,13 @@ defmodule FactoryWeb.ChatLive do
       <div id="chat-page" phx-hook="ChatKeys" class="flex h-full flex-col bg-base-100">
         <header class="flex min-h-11 shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-base-300 px-4 py-1.5 sm:px-6">
           <.chat_switcher runs={@runs} run={@run} />
-          <.folder_button dir={@dir} ok={@dir_ok} warn={@folder_warn} locked={!settable?(@run)} />
+          <.folder_button
+            dir={@dir}
+            ok={@dir_ok}
+            warn={@folder_warn}
+            locked={!settable?(@run)}
+            pending={if @review_step == :source, do: "No repository yet"}
+          />
           <.workflow_picker
             workflows={@workflows}
             workflow={@workflow}
@@ -1064,9 +1141,13 @@ defmodule FactoryWeb.ChatLive do
             Jump to latest <.icon name="hero-arrow-down-mini" class="ml-1 size-3" />
           </button>
 
+          <%!-- Room below for the message box, which isn't there while a review's repository is chosen. --%>
           <div
             :if={@empty}
-            class="flex min-h-0 flex-1 items-center justify-center overflow-hidden px-4 pb-40"
+            class={[
+              "flex min-h-0 flex-1 items-center justify-center overflow-hidden px-4",
+              if(@review_step == :source, do: "pb-12", else: "pb-40")
+            ]}
           >
             <.greeting
               focus={@focus}
@@ -1082,10 +1163,17 @@ defmodule FactoryWeb.ChatLive do
               ideas={@ideas}
               cloning={@cloning}
               clone_error={@clone_error}
+              folder_error={@folder_error}
+              review_step={@review_step}
+              run={@run}
             />
           </div>
 
-          <div class="pointer-events-none absolute inset-x-0 bottom-0 bg-linear-to-t from-base-200 from-60% to-transparent px-4 pb-4 pt-10">
+          <%!-- Choosing the repository to review comes before anything is said. --%>
+          <div
+            :if={@review_step != :source}
+            class="pointer-events-none absolute inset-x-0 bottom-0 bg-linear-to-t from-base-200 from-60% to-transparent px-4 pb-4 pt-10"
+          >
             <.composer
               form={@form}
               uploads={@uploads}

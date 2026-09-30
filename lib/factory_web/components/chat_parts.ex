@@ -60,7 +60,29 @@ defmodule FactoryWeb.ChatParts do
   attr :warn, :boolean, required: true
   attr :locked, :boolean, required: true
 
+  attr :pending, :string,
+    default: nil,
+    doc:
+      "what shows while no repository is chosen, when the folder remembered isn't it: " <>
+        "a review's first step"
+
   # Where the agents work: red until a folder is chosen, green once it is.
+  def folder_button(%{pending: pending} = assigns) when is_binary(pending) do
+    ~H"""
+    <button
+      id="folder-button"
+      type="button"
+      phx-click={!@locked && "browse"}
+      disabled={@locked}
+      title="Choose a repository"
+      class="flex max-w-64 items-center gap-1.5 rounded-full border border-dashed border-base-300 px-2.5 py-0.5 text-[13px] text-base-content/60 transition-colors hover:border-base-content/30 hover:text-base-content disabled:cursor-default"
+    >
+      <.icon name="hero-folder-mini" class="size-4 shrink-0 opacity-70" />
+      <span class="truncate">{@pending}</span>
+    </button>
+    """
+  end
+
   def folder_button(assigns) do
     ~H"""
     <button
@@ -379,6 +401,13 @@ defmodule FactoryWeb.ChatParts do
 
   attr :cloning, :string, default: nil, doc: "the repository being cloned, while it is"
   attr :clone_error, :string, default: nil
+  attr :folder_error, :string, default: nil, doc: "why a folder picked for a review won't do"
+
+  attr :review_step, :atom,
+    default: nil,
+    doc: "for Review a PR: :source (choose the repository) or :analysis (what's in it)"
+
+  attr :run, :any, default: nil
 
   attr :scout, :any,
     default: nil,

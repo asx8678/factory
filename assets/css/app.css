@@ -231,6 +231,16 @@ body {
   .drawer-in { animation: none; }
 }
 
+/* A review's steps (choose the repository, then what's in it) come in gently. */
+.step-in { animation: step-in 0.22s ease-out; }
+@keyframes step-in {
+  from { transform: translateY(6px); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .step-in { animation: none; }
+}
+
 /* Code inside running text. Martian Mono is wide and dark next to Instrument Sans,
    so it is narrowed, lightened and set a little smaller, on a faint tint. */
 .code-inline, .md :not(pre) > code {

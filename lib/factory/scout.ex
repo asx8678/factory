@@ -64,6 +64,21 @@ defmodule Factory.Scout do
     end
   end
 
+  @doc """
+  The git repository `dir` is in, for a review of a folder on this computer:
+  `{:ok, top}`, its top folder (a folder picked inside a repository reviews all of
+  it), or `{:error, reason}` when there's none.
+  """
+  def repository(dir) do
+    dir = Path.expand(dir || "")
+
+    with true <- File.dir?(dir) || {:error, "That folder doesn't exist."},
+         {:ok, _} <- repo(dir),
+         {:ok, top} <- git(dir, ~w(rev-parse --show-toplevel)) do
+      {:ok, top}
+    end
+  end
+
   defp repo(dir) do
     case git(dir, ~w(rev-parse --is-inside-work-tree)) do
       {:ok, _} = ok -> ok
