@@ -516,7 +516,7 @@ defmodule FactoryWeb.ChatParts do
         />
       </summary>
       <div class="md border-t border-base-content/10 px-3 py-2">
-        {FactoryWeb.Markdown.render(@message.body)}
+        {FactoryWeb.Markdown.render(FactoryWeb.PlanPanel.report(@message.body))}
       </div>
     </details>
     """

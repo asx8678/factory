@@ -402,7 +402,8 @@ defmodule Factory.Specs do
 
   @doc "The folder Kiro reads when suggesting tasks: the spec's, or the Kiro workspace."
   def project_dir(%SpecDoc{project_dir: dir}) when is_binary(dir) and dir != "", do: dir
-  def project_dir(_spec), do: Factory.Kiro.config(:workspace)
+  # Else the folder picked last in the chat, else Kiro's own workspace.
+  def project_dir(_spec), do: Factory.Prefs.project_dir() || Factory.Kiro.config(:workspace)
 
   @doc "Step 1: Kiro reads the project in `dir` and asks questions, in the background."
   def plan_questions(%SpecDoc{} = spec, dir) do

@@ -34,9 +34,15 @@ defmodule FactoryWeb.PlanPanel do
 
   attr :spec_hint, :boolean, default: false
 
+  attr :before, :list,
+    default: nil,
+    doc:
+      "the plan before the planner last reworked it (FactoryWeb.PlanDiff), to mark what changed"
+
   def panel(assigns) do
     thin = for {t, i} <- Enum.with_index(assigns.tasks, 1), TaskCheck.thin?(t), do: i
-    assigns = assign(assigns, thin: thin)
+    {marks, removed} = FactoryWeb.PlanDiff.diff(assigns.before, assigns.tasks)
+    assigns = assign(assigns, thin: thin, marks: marks, removed: removed)
 
     ~H"""
     <section
@@ -105,63 +111,21 @@ defmodule FactoryWeb.PlanPanel do
         <span class="min-w-0 truncate">{@working}</span>
       </p>
 
-      <details
-        :if={@check && !@checking}
-        id={"chat-plan-check-#{@check.id}"}
-        open
-        phx-mounted={JS.ignore_attributes(["open"])}
-        class="group border-b border-base-content/10 bg-base-content/[0.02]"
-      >
-        <summary class="flex cursor-pointer list-none items-center gap-2 px-3.5 py-2 text-xs [&::-webkit-details-marker]:hidden">
-          <.icon name="hero-magnifying-glass-micro" class="size-3.5 text-base-content/55" />
-          <span class="font-medium">Scope check</span>
-          <span class="text-base-content/45">by {@check.author}</span>
-          <span
-            :if={verdict(@check.body)}
-            id="chat-plan-verdict"
-            class={[
-              "rounded px-1.5 py-px font-medium",
-              verdict_class(verdict(@check.body))
-            ]}
-          >
-            {verdict(@check.body)}
-          </span>
-          <.icon
-            name="hero-chevron-down-micro"
-            class="ml-auto size-3.5 text-base-content/45 transition-transform group-open:rotate-180"
-          />
-        </summary>
-        <div class="max-h-80 overflow-y-auto px-3.5 pb-1">
-          <div class="md">{FactoryWeb.Markdown.render(@check.body)}</div>
-        </div>
-        <div class="flex items-center gap-1.5 px-3.5 pb-2.5 pt-1.5">
-          <button
-            id="chat-plan-check-improve"
-            type="button"
-            phx-click="plan_review"
-            disabled={@working != nil}
-            class="btn btn-primary btn-xs gap-1"
-          >
-            <.icon name="hero-sparkles-micro" class="size-3.5" /> Refine with this
-          </button>
-          <button type="button" phx-click="plan_check_dismiss" class="btn btn-ghost btn-xs">
-            Dismiss
-          </button>
-        </div>
-      </details>
-
       <ol class={[
         "divide-y divide-base-content/[0.07] transition-opacity",
         @working && !@checking && "pointer-events-none opacity-70"
       ]}>
         <li
-          :for={{task, i} <- Enum.with_index(@tasks)}
+          :for={{{task, mark}, i} <- Enum.with_index(Enum.zip(@tasks, @marks))}
           id={"chat-plan-task-#{i}"}
-          class="group px-3.5 py-2.5"
+          class={["group px-3.5 py-2.5", mark && "bg-amber-400/[0.035]"]}
         >
           <.edit_form :if={@editing == i} task={task} i={i} />
           <div :if={@editing != i} class="flex gap-2.5">
-            <span class="w-4 shrink-0 pt-px text-right text-xs tabular-nums text-base-content/40">
+            <span class={[
+              "w-4 shrink-0 pt-px text-right text-xs tabular-nums",
+              if(mark, do: gold(true), else: "text-base-content/40")
+            ]}>
               {i + 1}
             </span>
             <div class="min-w-0 flex-1">
@@ -178,9 +142,22 @@ defmodule FactoryWeb.PlanPanel do
                   data-edit="title"
                   data-i={i}
                   title="Double-click to edit"
-                  class="min-w-0 flex-1 cursor-text text-sm font-medium leading-snug"
+                  class={[
+                    "min-w-0 flex-1 cursor-text text-sm font-medium leading-snug",
+                    gold(part_changed?(mark, :title))
+                  ]}
                 >
                   <TaskList.inline text={task.title} />
+                  <span
+                    :if={mark}
+                    id={"chat-plan-mark-#{i}"}
+                    class={[
+                      "ml-1.5 inline-block rounded bg-amber-400/15 px-1 align-[1px] text-[10px] font-medium",
+                      gold(true)
+                    ]}
+                  >
+                    {if mark.new, do: "New", else: "Updated"}
+                  </span>
                 </p>
                 <.actions i={i} busy={@improve[task.title][:status] == :thinking} />
               </div>
@@ -199,7 +176,10 @@ defmodule FactoryWeb.PlanPanel do
                 data-edit="objective"
                 data-i={i}
                 title="Double-click to edit"
-                class="mt-1 cursor-text text-[13px] leading-snug text-base-content/80"
+                class={[
+                  "mt-1 cursor-text text-[13px] leading-snug",
+                  gold(part_changed?(mark, :objective)) || "text-base-content/80"
+                ]}
               >
                 <TaskList.inline text={task.objective} />
               </p>
@@ -211,7 +191,7 @@ defmodule FactoryWeb.PlanPanel do
                 phx-click="plan_inline"
                 phx-value-i={i}
                 phx-value-part="objective"
-                class="mt-1 flex items-center gap-1 text-xs text-warning/80 hover:text-base-content"
+                class="mt-1 flex items-center gap-1 text-xs text-base-content/45 hover:text-base-content"
               >
                 <.icon name="hero-plus-micro" class="size-3" />
                 Add the objective: what's true when it's done
@@ -234,7 +214,7 @@ defmodule FactoryWeb.PlanPanel do
                     data-edit={"step-#{j}"}
                     data-i={i}
                     title="Double-click to edit; clear it to remove the step"
-                    class="min-w-0 cursor-text"
+                    class={["min-w-0 cursor-text", gold(line_changed?(mark, :steps, j))]}
                   >
                     <TaskList.inline text={d} />
                   </span>
@@ -285,7 +265,7 @@ defmodule FactoryWeb.PlanPanel do
                     data-edit={"check-#{j}"}
                     data-i={i}
                     title="Double-click to edit; clear it to remove the check"
-                    class="min-w-0 cursor-text"
+                    class={["min-w-0 cursor-text", gold(line_changed?(mark, :checks, j))]}
                   >
                     <TaskList.inline text={c} />
                   </span>
@@ -313,7 +293,7 @@ defmodule FactoryWeb.PlanPanel do
                     class={[
                       "flex items-center gap-1 text-xs transition-opacity hover:text-base-content focus:opacity-100",
                       if(TaskList.checks(task) == [],
-                        do: "text-warning/80",
+                        do: "text-base-content/45",
                         else: "text-base-content/40 opacity-0 group-hover:opacity-100"
                       )
                     ]}
@@ -330,7 +310,9 @@ defmodule FactoryWeb.PlanPanel do
                 :if={task[:model] || task.requirements != []}
                 class="mt-2 flex flex-wrap items-center gap-x-3 text-xs text-base-content/45"
               >
-                <TaskList.model_tag model={task[:model]} />
+                <span class={gold(part_changed?(mark, :model))}>
+                  <TaskList.model_tag model={task[:model]} />
+                </span>
                 <span :if={task.requirements != []}>
                   Requirements {Enum.join(task.requirements, ", ")}
                 </span>
@@ -352,11 +334,85 @@ defmodule FactoryWeb.PlanPanel do
       </ol>
 
       <p
+        :if={Enum.any?(@marks) or @removed != []}
+        id="chat-plan-changes"
+        class="flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-base-content/10 px-3.5 py-2 text-xs text-base-content/60"
+      >
+        <span class="size-2 shrink-0 rounded-full bg-amber-400"></span>
+        <span>Gold marks what the planner changed: {changes_summary(@marks, @removed)}</span>
+        <span :for={t <- @removed} class="text-base-content/40 line-through">{t}</span>
+        <button
+          id="chat-plan-changes-clear"
+          type="button"
+          phx-click="plan_changes_clear"
+          class="ml-auto rounded px-1.5 py-0.5 text-base-content/55 hover:bg-base-content/[0.06] hover:text-base-content"
+        >
+          Clear marks
+        </button>
+      </p>
+
+      <%!-- The latest scope check, below the tasks it's about. --%>
+      <details
+        :if={@check && !@checking}
+        id={"chat-plan-check-#{@check.id}"}
+        open
+        phx-mounted={JS.ignore_attributes(["open"])}
+        class="group border-t border-base-content/10 bg-base-content/[0.02]"
+      >
+        <summary class="flex cursor-pointer list-none items-center gap-2 px-3.5 py-2 text-xs [&::-webkit-details-marker]:hidden">
+          <.icon name="hero-magnifying-glass-micro" class="size-3.5 text-base-content/55" />
+          <span class="font-medium">Scope check</span>
+          <span class="text-base-content/45">by {@check.author}</span>
+          <span
+            :if={verdict(@check.body)}
+            id="chat-plan-verdict"
+            class={[
+              "rounded px-1.5 py-px font-medium",
+              verdict_class(verdict(@check.body))
+            ]}
+          >
+            {verdict(@check.body)}
+          </span>
+          <.icon
+            name="hero-chevron-down-micro"
+            class="ml-auto size-3.5 text-base-content/45 transition-transform group-open:rotate-180"
+          />
+        </summary>
+        <div class="max-h-80 overflow-y-auto px-3.5 pb-1">
+          <div class="md">{FactoryWeb.Markdown.render(report(@check.body))}</div>
+        </div>
+        <div class="flex items-center gap-1.5 px-3.5 pb-2.5 pt-1.5">
+          <button
+            id="chat-plan-check-improve"
+            type="button"
+            phx-click="plan_review"
+            disabled={@working != nil}
+            class="btn btn-primary btn-xs gap-1"
+          >
+            <.icon name="hero-sparkles-micro" class="size-3.5" /> Refine with this
+          </button>
+          <button type="button" phx-click="plan_check_dismiss" class="btn btn-ghost btn-xs">
+            Dismiss
+          </button>
+        </div>
+      </details>
+
+      <p
         :if={@spec_hint}
         class="flex items-center gap-2 border-t border-base-content/10 px-3.5 py-2 text-xs text-base-content/55"
       >
-        <.icon name="hero-document-plus-micro" class="size-3.5" />
-        Have a spec or requirements? Add them under Spec and I'll plan again. Or go on without.
+        <.icon name="hero-document-plus-micro" class="size-3.5 shrink-0" />
+        <span class="min-w-0 flex-1">
+          Have a spec or requirements? Add them, then press Refine to plan with them. The tasks stay as they are.
+        </span>
+        <.link
+          :if={@run.spec_id}
+          id="chat-plan-add-spec"
+          navigate={~p"/specs/#{@run.spec_id}"}
+          class="flex h-6 shrink-0 items-center gap-1 rounded-md border border-base-content/15 px-2 font-medium text-base-content/75 transition-colors hover:border-base-content/30 hover:text-base-content"
+        >
+          <.icon name="hero-plus-micro" class="size-3.5" /> Add a spec
+        </.link>
       </p>
 
       <footer class="flex flex-wrap items-center gap-2 border-t border-base-content/10 px-3.5 py-2.5">
@@ -603,6 +659,43 @@ defmodule FactoryWeb.PlanPanel do
       <% end %>
     </div>
     """
+  end
+
+  # Gold, for what the planner changed since the plan was last read.
+  defp gold(true), do: "text-amber-600 dark:text-amber-300"
+  defp gold(_), do: nil
+
+  defp part_changed?(nil, _part), do: false
+  defp part_changed?(%{new: true}, _part), do: true
+  defp part_changed?(mark, part), do: Map.get(mark, part, false)
+
+  defp line_changed?(nil, _part, _j), do: false
+  defp line_changed?(%{new: true}, _part, _j), do: true
+  defp line_changed?(mark, part, j), do: j in Map.get(mark, part, [])
+
+  # "1 new, 2 updated, 1 removed:"
+  defp changes_summary(marks, removed) do
+    new = Enum.count(marks, &match?(%{new: true}, &1))
+    updated = Enum.count(marks, &match?(%{new: false}, &1))
+
+    [
+      new > 0 && "#{new} new",
+      updated > 0 && "#{updated} updated",
+      removed != [] && "#{length(removed)} removed:"
+    ]
+    |> Enum.filter(& &1)
+    |> Enum.join(", ")
+  end
+
+  @doc """
+  A scope check's report from its verdict on: the notes Kiro sometimes writes while it
+  works ("Checking dependencies…") come before the report and aren't part of it.
+  """
+  def report(body) do
+    case Regex.split(~r/^(?=[ \t#>*_-]*Verdict\b)/im, body || "", parts: 2) do
+      [_notes, report] -> report
+      _ -> body || ""
+    end
   end
 
   # The scope check's verdict, from its report's first section (Factory.Specs.Planner

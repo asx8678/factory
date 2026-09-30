@@ -36,7 +36,8 @@ defmodule FactoryWeb.ChatLive do
        plan_improve: %{},
        plan_inline: nil,
        plan_checking: false,
-       plan_check: nil
+       plan_check: nil,
+       plan_before: nil
      )
      |> set_dir("")
      |> load_agents()
@@ -60,7 +61,8 @@ defmodule FactoryWeb.ChatLive do
          |> assign(run: nil, pick: Workflows.picked())
          |> assign(base_ids: [])
          |> load_plan()
-         |> set_dir("")
+         # A new chat works in the folder picked last, until another is picked.
+         |> set_dir(Factory.Prefs.project_dir())
          |> load_agents()
          |> assign(page_title: (focus && focus.name) || "Chat", run: nil, focus: focus, count: 0)
          |> assign(run_usage: %{turns: 0, credits: 0})
@@ -135,8 +137,12 @@ defmodule FactoryWeb.ChatLive do
   defp default_to(agents),
     do: Enum.find(agents, &(&1.kind == "planner")) || List.first(agents) || :factory
 
-  # A run keeps its folder. One that has none yet waits for you to choose it.
-  defp keep_dir(socket, run), do: set_dir(socket, run.settings["project_dir"])
+  # A run keeps its folder. One still being planned that has none yet takes the folder
+  # picked last, like a new chat.
+  defp keep_dir(socket, run) do
+    dir = run.settings["project_dir"] || (settable?(run) && Factory.Prefs.project_dir())
+    set_dir(socket, dir || "")
+  end
 
   defp set_dir(socket, dir) do
     dir = String.trim(dir || "")
@@ -237,6 +243,9 @@ defmodule FactoryWeb.ChatLive do
   # Commands work anywhere; anything for the agents needs the folder they work in.
   def handle_event("send", %{"chat" => %{"body" => body}}, socket) do
     if socket.assigns.dir_ok or String.starts_with?(String.trim(body), "/") do
+      socket =
+        if String.starts_with?(String.trim(body), "/"), do: socket, else: remember_plan(socket)
+
       send_message(socket, body)
     else
       {:noreply,
@@ -417,7 +426,7 @@ defmodule FactoryWeb.ChatLive do
          {:ok, changed} <- inline_change(task, part, value) do
       socket
       |> assign(plan_inline: nil)
-      |> plan_changed(Specs.edit_plan_task(plan_spec(socket), i, changed))
+      |> own_change(i, :edit, Specs.edit_plan_task(plan_spec(socket), i, changed))
     else
       _ -> {:noreply, assign(socket, plan_inline: nil)}
     end
@@ -426,14 +435,26 @@ defmodule FactoryWeb.ChatLive do
   def handle_event("plan_save", %{"i" => i, "task" => params}, socket) do
     socket
     |> assign(plan_editing: nil)
-    |> plan_changed(Specs.edit_plan_task(plan_spec(socket), String.to_integer(i), params))
+    |> own_change(
+      String.to_integer(i),
+      :edit,
+      Specs.edit_plan_task(plan_spec(socket), String.to_integer(i), params)
+    )
   end
 
   def handle_event("plan_remove", %{"i" => i}, socket) do
     socket
     |> assign(plan_editing: nil, plan_asking: nil)
-    |> plan_changed(Specs.remove_plan_task(plan_spec(socket), String.to_integer(i)))
+    |> own_change(
+      String.to_integer(i),
+      :remove,
+      Specs.remove_plan_task(plan_spec(socket), String.to_integer(i))
+    )
   end
+
+  # The gold marks on what the planner changed: cleared once they've been read.
+  def handle_event("plan_changes_clear", _, socket),
+    do: {:noreply, assign(socket, plan_before: nil)}
 
   def handle_event("plan_check_dismiss", _, socket),
     do: {:noreply, assign(socket, plan_check: nil)}
@@ -465,7 +486,7 @@ defmodule FactoryWeb.ChatLive do
     if run && planner && run.status == "draft" do
       findings = socket.assigns.plan_check && socket.assigns.plan_check.body
       Factory.ChatPlanner.start(run, planner, action: :refine, findings: findings)
-      {:noreply, assign(socket, plan_checking: false)}
+      {:noreply, socket |> remember_plan() |> assign(plan_checking: false)}
     else
       {:noreply, put_flash(socket, :error, "This run has no planner to review its plan.")}
     end
@@ -491,7 +512,7 @@ defmodule FactoryWeb.ChatLive do
 
       socket
       |> update(:plan_improve, &Map.delete(&1, title))
-      |> plan_changed(Specs.edit_plan_task(plan_spec(socket), i, params))
+      |> own_change(i, :edit, Specs.edit_plan_task(plan_spec(socket), i, params))
     else
       _ -> {:noreply, update(socket, :plan_improve, &Map.delete(&1, title))}
     end
@@ -597,7 +618,26 @@ defmodule FactoryWeb.ChatLive do
   # work on a task and every change to the plan show here.
   defp load_plan(socket) do
     run = socket.assigns.run
-    spec = run && run.spec_id && Specs.get_spec(run.spec_id)
+
+    {run, spec} =
+      cond do
+        run == nil ->
+          {nil, nil}
+
+        run.spec_id ->
+          {run, Specs.get_spec(run.spec_id)}
+
+        # A plan whose spec was deleted (on the Specs page) comes back from the chat's
+        # own copy of it, so its tasks aren't lost while the chat is being planned.
+        run.status == "draft" and run.tasks != [] ->
+          spec = Specs.for_run(run)
+          {Runs.get_run(run.id), spec}
+
+        true ->
+          {run, nil}
+      end
+
+    socket = assign(socket, run: run)
     old = socket.assigns.plan_sub
 
     if connected?(socket) and old != (spec && spec.id) do
@@ -607,6 +647,7 @@ defmodule FactoryWeb.ChatLive do
 
     assign(socket,
       plan_check: latest_check(run, socket.assigns[:planner]),
+      plan_before: if(old == (spec && spec.id), do: socket.assigns[:plan_before]),
       plan_spec: spec,
       plan_sub: spec && spec.id,
       plan_editing: nil,
@@ -658,6 +699,34 @@ defmodule FactoryWeb.ChatLive do
 
   defp plan_changed(socket, _error),
     do: {:noreply, put_flash(socket, :error, "That task changed meanwhile. Try again.")}
+
+  # The plan as it was before the planner reworks it (FactoryWeb.PlanDiff), so the
+  # panel can mark in gold what it changed. Only a plan that has tasks is kept.
+  defp remember_plan(socket) do
+    case plan_tasks(socket) do
+      [] -> socket
+      tasks -> assign(socket, plan_before: FactoryWeb.PlanDiff.snapshot(tasks))
+    end
+  end
+
+  # A change the person made to task `i`: saved, and taken into the snapshot, so it
+  # isn't marked as the planner's.
+  defp own_change(socket, i, how, {:ok, spec} = result) do
+    after_tasks = spec.tasks |> Kernel.||("") |> Factory.Spec.blocks() |> elem(1)
+
+    before =
+      FactoryWeb.PlanDiff.accept(
+        socket.assigns.plan_before,
+        plan_tasks(socket),
+        after_tasks,
+        i,
+        how
+      )
+
+    socket |> assign(plan_before: before) |> plan_changed(result)
+  end
+
+  defp own_change(socket, _i, _how, result), do: plan_changed(socket, result)
 
   defp ask_kiro(socket, i, instruction) do
     with %{} = spec <- plan_spec(socket),
@@ -1007,6 +1076,7 @@ defmodule FactoryWeb.ChatLive do
                 working={planner_activity(assigns)}
                 checking={@plan_checking}
                 check={@plan_check}
+                before={@plan_before}
                 spec_hint={plan_spec_hint?(assigns)}
               />
             </div>
