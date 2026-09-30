@@ -122,16 +122,21 @@ defmodule FactoryWeb.TaskList do
             end
           ]}
         >
-          <%!-- The task's number; hovering (or selecting) turns it into its checkbox. --%>
+          <%!-- What kind of task it is; hovering (or selecting) turns it into its checkbox. --%>
           <span class="relative mt-px grid size-6 shrink-0 place-items-center">
-            <span class={[
-              "grid size-6 place-items-center rounded-md bg-base-300/60 text-[11px] font-medium tabular-nums text-base-content/60 transition-opacity",
-              if(@count > 0,
-                do: "opacity-0",
-                else: "group-hover:opacity-0 [@media(hover:none)]:opacity-0"
-              )
-            ]}>
-              {i + 1}
+            <span
+              title={elem(kind(task), 0)}
+              class={[
+                "grid size-6 place-items-center rounded-md transition-opacity",
+                elem(kind(task), 2),
+                task.done && "opacity-50",
+                if(@count > 0,
+                  do: "opacity-0",
+                  else: "group-hover:opacity-0 [@media(hover:none)]:opacity-0"
+                )
+              ]}
+            >
+              <.icon name={elem(kind(task), 1)} class="size-3.5" />
             </span>
             <input
               type="checkbox"
@@ -184,10 +189,11 @@ defmodule FactoryWeb.TaskList do
               </ul>
             </button>
 
-            <div
-              :if={task.details != [] or task.requirements != []}
-              class="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-base-content/50"
-            >
+            <div class="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-base-content/50">
+              <span id={"task-kind-#{i}"} class="flex items-center gap-1.5">
+                <span class={["font-medium", kind_text(kind(task))]}>{elem(kind(task), 0)}</span>
+                <span class="tabular-nums text-base-content/45">#{i + 1}</span>
+              </span>
               <button
                 :if={task.details != []}
                 type="button"
@@ -222,8 +228,7 @@ defmodule FactoryWeb.TaskList do
             <.improve_panel :if={@improve[task.title]} task={task} entry={@improve[task.title]} />
           </div>
 
-          <div :if={!(@open and @editing == i)} class="flex shrink-0 items-center gap-1">
-            <Layouts.status_badge :if={task.run_status} status={task.run_status} />
+          <div :if={!(@open and @editing == i)} class="flex shrink-0 items-center gap-1.5">
             <div
               :if={@open}
               class="flex opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100"
@@ -236,34 +241,38 @@ defmodule FactoryWeb.TaskList do
                 label="Improve with Kiro"
                 class="hover:text-info"
               />
+              <span :if={@improve[task.title]} class="size-6"></span>
               <.icon_button
                 event="task_edit"
                 values={%{"phx-value-i" => i}}
                 icon="hero-pencil-square-mini"
                 label="Edit"
               />
-              <.icon_button
-                :if={@editable and i > 0}
-                event="task_move"
-                values={%{"phx-value-i" => i, "phx-value-by" => -1}}
-                icon="hero-arrow-up-mini"
-                label="Move up"
-              />
-              <.icon_button
-                :if={@editable and i < length(@tasks) - 1}
-                event="task_move"
-                values={%{"phx-value-i" => i, "phx-value-by" => 1}}
-                icon="hero-arrow-down-mini"
-                label="Move down"
-              />
-              <.icon_button
-                :if={@editable}
-                event="task_delete"
-                values={%{"phx-value-i" => i, "data-confirm" => "Delete “#{task.title}”?"}}
-                icon="hero-trash-mini"
-                label="Delete"
-                class="hover:text-error"
-              />
+              <%= if @editable do %>
+                <.icon_button
+                  :if={i > 0}
+                  event="task_move"
+                  values={%{"phx-value-i" => i, "phx-value-by" => -1}}
+                  icon="hero-arrow-up-mini"
+                  label="Move up"
+                />
+                <span :if={i == 0} class="size-6"></span>
+                <.icon_button
+                  :if={i < length(@tasks) - 1}
+                  event="task_move"
+                  values={%{"phx-value-i" => i, "phx-value-by" => 1}}
+                  icon="hero-arrow-down-mini"
+                  label="Move down"
+                />
+                <span :if={i == length(@tasks) - 1} class="size-6"></span>
+                <.icon_button
+                  event="task_delete"
+                  values={%{"phx-value-i" => i, "data-confirm" => "Delete “#{task.title}”?"}}
+                  icon="hero-trash-mini"
+                  label="Delete"
+                  class="hover:text-error"
+                />
+              <% end %>
             </div>
             <button
               :if={task.queued}
@@ -283,6 +292,9 @@ defmodule FactoryWeb.TaskList do
             >
               <.icon name="hero-plus-micro" class="size-3.5" /> Queue
             </button>
+            <span :if={task.run_status} class="w-[4.75rem] text-right">
+              <Layouts.status_badge status={task.run_status} />
+            </span>
           </div>
         </li>
       </ol>
@@ -620,14 +632,31 @@ defmodule FactoryWeb.TaskList do
           class="block w-full resize-y rounded-md border border-base-300 bg-base-100 outline-none placeholder:text-base-content/40 focus:border-base-content/30 px-3 py-2 text-[13px] leading-relaxed"
         >{@draft.notes}</textarea>
         <div class="flex flex-wrap items-center gap-2">
-          <button type="submit" name="action" value="refine" class="btn btn-primary btn-sm">
-            <.icon name="hero-sparkles-mini" class="size-4" /> Refine with Kiro
+          <button
+            id="draft-improve"
+            type="submit"
+            name="action"
+            value="refine"
+            disabled={!draft_text?(@draft)}
+            title="Kiro turns what you wrote into a full task"
+            class="btn btn-primary btn-sm"
+          >
+            <.icon name="hero-sparkles-mini" class="size-4" /> Improve with Kiro
           </button>
-          <button type="submit" name="action" value="add" class="btn btn-ghost btn-sm">
+          <button
+            id="draft-add"
+            type="submit"
+            name="action"
+            value="add"
+            disabled={String.trim(@draft.title) == ""}
+            class="btn btn-ghost btn-sm"
+          >
             Add as is
           </button>
-          <span class="text-xs text-base-content/50 sm:ml-auto">
-            Kiro scopes the project and the spec, then writes the task for you to review.
+          <span id="draft-hint" class="text-xs text-base-content/50 sm:ml-auto">
+            {if draft_text?(@draft),
+              do: "Kiro reads your idea and the code, then writes the full task for you to review.",
+              else: "Write your idea in your own words, then let Kiro turn it into a full task."}
           </span>
         </div>
       </form>
@@ -765,6 +794,49 @@ defmodule FactoryWeb.TaskList do
     </button>
     """
   end
+
+  # What a task is, from its title or, when that doesn't say, its first step:
+  # {label, icon, colour classes}, in the colours base specs use (FactoryWeb.SpecParts).
+  # The first that matches wins. Icon names are written out in full so Tailwind's
+  # heroicons plugin sees them.
+  @kinds [
+    {~r/^(verify|check|confirm|typecheck|lint|run|smoke)\b|\btypecheck/i, "Check",
+     "hero-check-badge-mini", "bg-teal-500/12 text-teal-500"},
+    {~r/\btest(s|ing|ed)?\b/i, "Test", "hero-beaker-mini", "bg-success/12 text-success"},
+    {~r/\b(docs?|documentation|readme|changelog|moduledoc|comments?)\b/i, "Docs",
+     "hero-book-open-mini", "bg-fuchsia-500/12 text-fuchsia-500"},
+    {~r/^(fix|repair|resolve)\b|\b(bugs?|crash\w*|regression)\b/i, "Fix", "hero-bug-ant-mini",
+     "bg-orange-500/12 text-orange-500"},
+    {~r/\b(auth\w*|permissions?|secrets?|csrf|xss|sanitiz\w*|encrypt\w*)\b/i, "Security",
+     "hero-shield-check-mini", "bg-error/12 text-error"},
+    {~r/\b(migrations?|schema|database|db|tables?|columns?|seeds?|quer(y|ies))\b/i, "Data",
+     "hero-circle-stack-mini", "bg-warning/15 text-warning"},
+    {~r/\b(api|endpoints?|functions?|helpers?|types?|interfaces?|modules?|exports?)\b/i, "Code",
+     "hero-code-bracket-mini", "bg-indigo-500/12 text-indigo-500"},
+    {~r/\b(ui|buttons?|pages?|screens?|views?|templates?|components?|layouts?|styles?|css|modals?|forms?|icons?|themes?)\b/i,
+     "UI", "hero-swatch-mini", "bg-info/12 text-info"}
+  ]
+
+  @code {"Code", "hero-code-bracket-mini", "bg-indigo-500/12 text-indigo-500"}
+
+  @doc "What kind of task this is: `{label, icon, classes}` (Test, Check, Docs, UI, Code…)."
+  def kind(task) do
+    [task.title, List.first(task.details) || ""]
+    |> Enum.find_value(fn text ->
+      Enum.find_value(@kinds, fn {re, label, icon, classes} ->
+        Regex.match?(re, text) && {label, icon, classes}
+      end)
+    end)
+    |> Kernel.||(@code)
+  end
+
+  # The kind's colour for text alone: its classes without the background.
+  defp kind_text({_label, _icon, classes}),
+    do:
+      classes |> String.split() |> Enum.reject(&String.starts_with?(&1, "bg-")) |> Enum.join(" ")
+
+  # Whether the new task has anything written for Kiro to work from.
+  defp draft_text?(draft), do: String.trim(draft.title <> draft.notes) != ""
 
   attr :text, :string, required: true
 

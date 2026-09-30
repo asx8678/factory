@@ -189,17 +189,27 @@ defmodule Factory.Specs.Planner do
 
     """
     <task-planning step="draft">
-    You are adding one new implementation task to the spec below, for the project in the \
-    current folder. Scope it quickly: read only the few files this task touches (about 5 at \
-    most) to get names, paths and conventions right. Don't change anything and don't run commands.
+    You are turning the person's rough idea into one new implementation task for the \
+    spec below, for the project in the current folder. Don't change anything and don't \
+    run commands.
 
     The person's rough idea for the task:
     #{idea}
 
-    Write it as one small change that can be built and tested on its own. Name the files \
-    or modules it touches and say how to check it works. Use the spec's requirement \
-    numbers it covers. Don't repeat what the spec's existing tasks already do. Wrap code, \
-    paths and commands in `backticks`.
+    Before you write it, take a quick, focused look (about 5 to 8 files):
+    1. Find where the idea lands in the code: the files and functions it changes. Check \
+    the ones the person named exist and are spelled right, and find the real ones where \
+    they're wrong.
+    2. Find the tests that cover that code and how they're written.
+    3. Read the spec's tasks: don't repeat what one already does, and note which task \
+    this one should come after.
+
+    Then write it: a title that says what changes; steps in order, naming the exact \
+    files and functions and what changes in each; a last step that says how to check it's \
+    done (the test to add or run, or what to look at). Keep it one small change that can \
+    be built and tested on its own. Keep to what the person meant: fill in what's \
+    missing, and don't add work they didn't ask for. Use the spec's requirement numbers \
+    it covers. Wrap code, paths and commands in `backticks`.
 
     #{json_shape()}
     </task-planning>
