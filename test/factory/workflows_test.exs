@@ -12,10 +12,11 @@ defmodule Factory.WorkflowsTest do
     assert Enum.map(Workflows.steps(bug), & &1["name"]) == ~w(Investigator Fixer Tester Reviewer)
     refute Workflows.modified?(bug)
 
-    # Each agent hands off to the next and has a starting prompt.
+    # Each agent hands off to the next and has a starting prompt; the Reviewer can
+    # send work back to the Fixer.
     [first | _] = agents = Workflows.ordered_agents(bug.id)
     assert first.prompt =~ "Investigator"
-    assert length(Agents.graph(bug.id).edges) == length(agents) - 1
+    assert length(Agents.graph(bug.id).edges) == length(agents)
 
     # "Other" has no standard workflow; it keeps its built-in default.
     assert Workflows.standard("other") == nil
@@ -49,7 +50,7 @@ defmodule Factory.WorkflowsTest do
     assert Enum.map(Workflows.steps(copy), & &1["name"]) ==
              Enum.map(Workflows.steps(feature), & &1["name"])
 
-    assert length(Agents.graph(copy.id).edges) == 3
+    assert length(Agents.graph(copy.id).edges) == 4
 
     # The copy is separate: changing it leaves the original alone.
     [planner | _] = Workflows.ordered_agents(copy.id)

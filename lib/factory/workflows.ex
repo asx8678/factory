@@ -227,7 +227,10 @@ defmodule Factory.Workflows do
     end)
   end
 
-  @doc "Puts a standard workflow back as it came: its name, agents, prompts and hand-offs."
+  @doc """
+  Puts a standard workflow back as it came: its name, agents, prompts and hand-offs,
+  and the arrow from its reviewer back to the agent that builds.
+  """
   def restore(%Workflow{key: key} = w) when key in @standard do
     stop_sessions(w)
     type = Types.get(key)
@@ -261,9 +264,21 @@ defmodule Factory.Workflows do
   end
 
   # The hand-offs are exactly one chain through the agents in order.
+  # The hand-offs are one chain through the agents in order, plus the review loop.
   defp chain?(workflow_id, agents) do
     pairs = agents |> Enum.map(& &1.id) |> Enum.chunk_every(2, 1, :discard)
+    pairs = if loop = review_loop(agents), do: pairs ++ [loop], else: pairs
     Enum.sort(Enum.map(links(workflow_id), &[&1.source_id, &1.target_id])) == Enum.sort(pairs)
+  end
+
+  # A standard workflow's arrow back: from its reviewer to the agent that builds, so the
+  # reviewer can send work back (`Factory.Engine`). Only with one of each.
+  defp review_loop(agents) do
+    case {Enum.filter(agents, &(&1.kind == "reviewer")),
+          Enum.filter(agents, &(&1.kind == "coder"))} do
+      {[reviewer], [coder]} -> [reviewer.id, coder.id]
+      _ -> nil
+    end
   end
 
   @doc """
@@ -362,6 +377,10 @@ defmodule Factory.Workflows do
 
     for [a, b] <- Enum.chunk_every(agents, 2, 1, :discard),
         do: Agents.link(a.id, b.id, %{source: "bottom", target: "top"})
+
+    # Drawn down the right-hand side, so it doesn't cross the hand-offs.
+    with [reviewer, coder] <- review_loop(agents),
+         do: Agents.link(reviewer, coder, %{source: "right", target: "right"})
 
     :ok
   end

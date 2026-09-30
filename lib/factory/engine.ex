@@ -27,6 +27,9 @@ defmodule Factory.Engine do
   or "Send back: <what to fix>"), and sent back, the work goes again from the earlier
   card with that feedback, up to `max_rounds/0` times.
 
+  A planner card whose run already has its tasks (planned in the chat or on the Spec
+  page) passes them on without asking Kiro to plan again.
+
   Progress is kept on the run (`progress`), so a paused or failed run resumes at the
   step it stopped at. A failed step pauses the run; `/resume` tries it again.
   """
@@ -388,6 +391,28 @@ defmodule Factory.Engine do
         set_activity(card, "error", reason)
         {:error, reason}
     end
+  end
+
+  # A planner step when the run's tasks are already planned (in the chat, or on the
+  # Spec page): the plan goes straight on, without a second planning turn on Kiro.
+  # The agents after it get the spec, approach and tasks, in their prompts.
+  defp do_step(%Run{tasks: [_ | _]} = run, steps, %{kind: "planner"} = step) do
+    next = for s <- steps, step.id in s.after, do: s.name
+    to = if next == [], do: "", else: " to #{Enum.join(next, " and ")}"
+
+    out =
+      "The #{length(run.tasks)} tasks were planned before the run started. " <>
+        "Follow them in order, as the spec gives them."
+
+    Runs.post(
+      run,
+      "factory",
+      "#{step.name}: the tasks were already planned, so it hands them straight#{to}.",
+      meta: meta(step)
+    )
+
+    set_activity(step.agent, "done", nil)
+    {:ok, out, nil}
   end
 
   defp do_step(run, steps, step) do
