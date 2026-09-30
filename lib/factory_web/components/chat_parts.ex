@@ -593,6 +593,11 @@ defmodule FactoryWeb.ChatParts do
       <p :if={@message.meta["unclear"]} class="mt-2 text-sm text-base-content/55">
         Answer below, and I'll make the tasks.
       </p>
+      <.question_form
+        :if={answerable?(@message, @run)}
+        id={"answers-#{@message.id}"}
+        message={@message}
+      />
       <.plan_card
         :if={@message.meta["tasks"] not in [nil, []]}
         id={"plan-#{@message.id}"}
@@ -629,6 +634,62 @@ defmodule FactoryWeb.ChatParts do
         <.icon name="hero-play-mini" class="size-4" /> Start run
       </button>
     </div>
+    """
+  end
+
+  # A planner's questions with options can be answered by picking, while the run is
+  # still being planned.
+  defp answerable?(%{meta: meta}, run) do
+    run != nil and run.status == "draft" and
+      Enum.any?(meta["questions"] || [], &(&1["options"] not in [nil, []]))
+  end
+
+  attr :id, :string, required: true
+  attr :message, :map, required: true
+
+  # The planner's questions as choices: pick one option per question, then send them
+  # all as one message to the planner. Typing an answer in the box works too.
+  def question_form(assigns) do
+    assigns =
+      assign(assigns,
+        questions: Enum.with_index(assigns.message.meta["questions"] || [])
+      )
+
+    ~H"""
+    <form
+      id={@id}
+      phx-submit="answer"
+      class="mt-3 space-y-3 rounded-2xl border border-base-content/10 bg-base-200/40 p-3"
+    >
+      <input type="hidden" name="message_id" value={@message.id} />
+      <fieldset :for={{q, i} <- @questions} :if={q["options"] not in [nil, []]}>
+        <legend class="mb-1.5 text-sm">{i + 1}. {q["question"]}</legend>
+        <div class="flex flex-wrap gap-1.5">
+          <label
+            :for={{option, j} <- Enum.with_index(q["options"])}
+            class="cursor-pointer rounded-full border border-base-content/15 px-3 py-1 text-[13px] transition-colors hover:border-primary/50 has-[input:checked]:border-primary has-[input:checked]:bg-primary/12 has-[input:checked]:text-primary"
+          >
+            <input
+              type="radio"
+              name={"answers[#{i}]"}
+              value={option}
+              checked={j == 0}
+              class="sr-only"
+            />
+            {option}{if j == 0, do: " (recommended)"}
+          </label>
+        </div>
+      </fieldset>
+      <div class="flex items-center gap-3 pt-1">
+        <button
+          type="submit"
+          class="rounded-full bg-primary px-3.5 py-1.5 text-[13px] font-medium text-primary-content transition-opacity hover:opacity-90"
+        >
+          Send answers
+        </button>
+        <span class="text-xs text-base-content/50">Or type your own answer below.</span>
+      </div>
+    </form>
     """
   end
 

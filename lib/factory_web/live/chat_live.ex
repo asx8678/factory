@@ -327,6 +327,29 @@ defmodule FactoryWeb.ChatLive do
     {:noreply, socket}
   end
 
+  # Options picked under a planner's questions: sent to that planner as one message,
+  # each question with its answer.
+  def handle_event("answer", %{"message_id" => id} = params, socket) do
+    message = socket.assigns.run && Repo.get(Message, id)
+    agent = message && message.meta["agent_id"] && Agents.get_agent(message.meta["agent_id"])
+    picked = params["answers"] || %{}
+
+    text =
+      for {q, i} <- Enum.with_index((message && message.meta["questions"]) || []),
+          answer = picked["#{i}"],
+          is_binary(answer) do
+        "#{q["question"]} #{answer}"
+      end
+      |> Enum.join("\n")
+
+    if agent && text != "" && message.run_id == socket.assigns.run.id do
+      Chat.handle(Runs.get_run(socket.assigns.run.id), text, [], to: agent)
+      {:noreply, push_event(socket, "chat:sent", %{})}
+    else
+      {:noreply, socket}
+    end
+  end
+
   def handle_event("use_command", %{"cmd" => cmd}, socket) do
     {:noreply,
      socket |> assign(draft: cmd <> " ") |> push_event("chat:fill", %{text: cmd <> " "})}
