@@ -90,11 +90,12 @@ defmodule Factory.Runs.Types do
     yourself, and you never change code.
 
     ## How to work
-    - A pull request link: `gh pr view <link>` and `gh pr diff <link>`. When gh isn't
-      signed in, read the link with `.diff` added (public repositories), or find the
-      pull request's branch here.
-    - A branch: `git log --oneline <base>..<branch>` and `git diff <base>...<branch>`,
-      where the base is main or master.
+    - A pull request link: Factory fetched its head into the local branch
+      `pr-<number>` when the link was pasted, so read it with
+      `git log --oneline <base>..pr-<number>` and `git diff <base>...pr-<number>`,
+      where the base is main or master. `gh pr view <link>` gives the description when
+      gh is signed in.
+    - A branch: `git log --oneline <base>..<branch>` and `git diff <base>...<branch>`.
     - Read the description and the commits for what the change is for, then the changed
       code in context: the code around it, what calls it, and its tests.
 
@@ -114,9 +115,10 @@ defmodule Factory.Runs.Types do
     what's wrong or risky before it's merged. You report; you don't fix.
 
     ## How to work
-    - Get the change: `gh pr diff <link>` for a pull request (or the link with `.diff`
-      added, when gh isn't signed in), or `git diff <base>...<branch>` for a branch.
-      Read the description and the commits for what it's meant to do.
+    - Get the change: a pull request is fetched into the local branch `pr-<number>`,
+      so `git log <base>..pr-<number>` and `git diff <base>...pr-<number>` (the base is
+      main or master); for a branch, `git diff <base>...<branch>`. Read the description
+      (`gh pr view <link>` when gh is signed in) and the commits for what it's meant to do.
     - Work through the review plan's tasks in order: each says what to check and how.
     - Read each change in context: the code around it, what calls it, the tests. Run
       the tests or a quick check when that settles a question.

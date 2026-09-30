@@ -57,7 +57,7 @@ defmodule Factory.Kiro.Permission do
 
   # Commands that only look, by their first word. git by what it's asked to do.
   @looking ~w(ls cat head tail wc grep egrep fgrep rg ag tree pwd file stat du which echo
-              sort uniq cut diff basename dirname realpath readlink date env printenv)
+              sort uniq cut diff basename dirname realpath readlink date printenv)
   @git ~w(status log diff show ls-files ls-tree grep blame rev-parse describe shortlog)
   @gh %{
     "pr" => ~w(view diff list checks status),
@@ -93,23 +93,41 @@ defmodule Factory.Kiro.Permission do
   changing source (`mix compile`, `cargo check`), or reads a pull request with `gh`. A
   planner may run these while it plans, and so may an agent that only reads and checks.
   Anything that could install, write, move, delete, commit or run other code isn't one,
-  and nor is an unknown command (nil). Commands may be chained or piped when every part
-  only looks; redirecting into a file and substitution (`$(…)`, backticks) never do.
-  """
-  def looking?(nil), do: false
+  and nor is an unknown command (nil). Commands may be chained (`&&`, `||`, `;`, `&`) or
+  piped when every part only looks; redirecting into a file and substitution (`$(…)`,
+  backticks) never do. Every part must start with a bare command name: a path
+  (`/tmp/x/cat`) is refused.
 
-  def looking?(command) when is_binary(command) do
+  `workdir` is the folder the command runs in. In a repository cloned for review
+  (under `Factory.Repos.root/0`) the tests and checks are somebody else's code, so they
+  aren't looking there; the rest still is.
+  """
+  def looking?(command, workdir \\ nil)
+
+  def looking?(nil, _workdir), do: false
+
+  def looking?(command, workdir) when is_binary(command) do
     text = String.replace(command, ~r/\s*\d?>\s*&\d|\s*\d?>\s*\/dev\/null/, "")
+    tests? = not in_review_clone?(workdir)
 
     not String.contains?(text, [">", "`", "$(", "<("]) and
       text
-      |> String.split(~r/&&|\|\||;|\||\R/)
+      |> String.split(~r/&&|\|\||;|\||&|\R/)
       |> Enum.map(&String.trim/1)
       |> Enum.reject(&(&1 == ""))
-      |> then(&(&1 != [] and Enum.all?(&1, fn part -> looking_part?(part) end)))
+      |> then(&(&1 != [] and Enum.all?(&1, fn part -> looking_part?(part, tests?) end)))
   end
 
-  defp looking_part?(part) do
+  # Whether `workdir` is inside the folder review clones go to.
+  defp in_review_clone?(nil), do: false
+
+  defp in_review_clone?(workdir) when is_binary(workdir) do
+    root = Path.expand(Factory.Repos.root())
+    dir = Path.expand(workdir)
+    dir == root or String.starts_with?(dir, root <> "/")
+  end
+
+  defp looking_part?(part, tests?) do
     # Leading VAR=value settings don't change what the command is.
     words = part |> String.split() |> Enum.drop_while(&Regex.match?(~r/^[A-Z_][A-Z0-9_]*=/, &1))
 
@@ -118,26 +136,31 @@ defmodule Factory.Kiro.Permission do
       Enum.any?(words, &String.starts_with?(&1, "--output")) or
         (List.first(words) in ~w(sort tree) and "-o" in words)
 
-    not writes? and looking_words?(words)
+    # The command must be a bare name: a path could be anything, whatever it's called.
+    path? = String.contains?(List.first(words) || "", "/")
+
+    not writes? and not path? and looking_words?(words, tests?)
   end
 
-  defp looking_words?([]), do: false
-  defp looking_words?(["cd" | _]), do: true
-  defp looking_words?(["git", sub | _] = words), do: sub in @git or git_branch_list?(words)
+  defp looking_words?([], _tests?), do: false
+  defp looking_words?(["cd" | _], _tests?), do: true
+
+  defp looking_words?(["git", sub | _] = words, _tests?),
+    do: sub in @git or git_branch_list?(words)
 
   # GitHub's CLI, reading only: never merge, close, comment, review or edit.
-  defp looking_words?(["gh", area, action | _]), do: action in Map.get(@gh, area, [])
+  defp looking_words?(["gh", area, action | _], _tests?), do: action in Map.get(@gh, area, [])
 
-  defp looking_words?(["find" | rest]),
+  defp looking_words?(["find" | rest], _tests?),
     do: not Enum.any?(rest, &(&1 in ~w(-delete -exec -execdir -ok -fprint)))
 
-  defp looking_words?(["sed" | rest]),
+  defp looking_words?(["sed" | rest], _tests?),
     do: not Enum.any?(rest, &String.starts_with?(&1, ["-i", "--in-place"]))
 
-  defp looking_words?([_tool, flag]) when flag in ~w(--version -v -V version), do: true
+  defp looking_words?([_tool, flag], _tests?) when flag in ~w(--version -v -V version), do: true
 
-  defp looking_words?([first | _] = words),
-    do: Path.basename(first) in @looking or Enum.any?(@tests, &List.starts_with?(words, &1))
+  defp looking_words?([first | _] = words, tests?),
+    do: first in @looking or (tests? and Enum.any?(@tests, &List.starts_with?(words, &1)))
 
   # `git branch` only when it lists branches: options only, none that creates, renames,
   # copies, deletes or moves one (a bare name would create it).

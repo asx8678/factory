@@ -310,10 +310,18 @@ defmodule Factory.Engine do
               walk(run, steps, [step | rest])
 
             {:ok, run} ->
-              case send_back(run, steps, step, output) do
-                {:again, run, again} -> walk(run, steps, again)
-                nil -> walk(run, steps, rest)
+              # Paused or cancelled while it verified: nothing more is written.
+              run = Runs.get_run(run.id)
+
+              if run.status == "running" do
+                case send_back(run, steps, step, output) do
+                  {:again, run, again} -> walk(run, steps, again)
+                  nil -> walk(run, steps, rest)
+                end
               end
+
+            :stopped ->
+              nil
           end
 
         {:error, reason} ->
@@ -393,7 +401,8 @@ defmodule Factory.Engine do
   # the chat. Tasks that fail are opened again and the step goes again with what to
   # fix, at most `max_rounds/0` times; after that they stay open and the run carries
   # on. A task the verifier couldn't check (Kiro failed) stays done, and the chat says
-  # so. `config :factory, :verify_tasks, false` switches it off.
+  # so. `config :factory, :verify_tasks, false` switches it off. Pausing or cancelling
+  # the run stops the verifying between tasks (`:stopped`), and nothing is written then.
 
   defp verify_tasks(run, step, output) do
     results = run.progress["verification"] || %{}
@@ -424,32 +433,51 @@ defmodule Factory.Engine do
     )
 
     checked =
-      for task <- todo do
-        block = Factory.Verifier.spec_task(run, task)
+      Enum.reduce_while(todo, [], fn task, checked ->
+        # Pausing or cancelling takes effect between tasks.
+        if Runs.get_run(run.id).status != "running" do
+          {:halt, :stopped}
+        else
+          block = Factory.Verifier.spec_task(run, task)
 
-        result =
-          Factory.Verifier.verify(block, output, dir,
-            model: model,
-            usage: %{source: "verify_task", run_id: run.id, agent_id: step.agent && step.agent.id}
-          )
+          result =
+            Factory.Verifier.verify(block, output, dir,
+              model: model,
+              usage: %{
+                source: "verify_task",
+                run_id: run.id,
+                agent_id: step.agent && step.agent.id
+              }
+            )
 
-        {task, result}
-      end
-
-    set_activity(step.agent, "done", nil)
-
-    record =
-      Map.new(checked, fn {task, result} -> {"#{task.id}", verification(result, model)} end)
+          {:cont, [{task, result} | checked]}
+        end
+      end)
 
     run = Runs.get_run(run.id)
-    progress = Map.update(run.progress, "verification", record, &Map.merge(&1, record))
-    {:ok, run} = Runs.update_run(run, %{progress: progress})
 
-    for {task, result} <- checked, do: say_verified(run, step, task, result, name)
+    cond do
+      checked == :stopped or run.status != "running" ->
+        # The tasks stay done; they're checked again when the run resumes.
+        set_activity(step.agent, "idle", nil)
+        :stopped
 
-    case for({task, {:ok, %{passed: false} = r}} <- checked, do: {task, r}) do
-      [] -> {:ok, run}
-      failed -> verify_failed(run, step, failed)
+      true ->
+        checked = Enum.reverse(checked)
+        set_activity(step.agent, "done", nil)
+
+        record =
+          Map.new(checked, fn {task, result} -> {"#{task.id}", verification(result, model)} end)
+
+        progress = Map.update(run.progress, "verification", record, &Map.merge(&1, record))
+        {:ok, run} = Runs.update_run(run, %{progress: progress})
+
+        for {task, result} <- checked, do: say_verified(run, step, task, result, name)
+
+        case for({task, {:ok, %{passed: false} = r}} <- checked, do: {task, r}) do
+          [] -> {:ok, run}
+          failed -> verify_failed(run, step, failed)
+        end
     end
   end
 
@@ -617,31 +645,14 @@ defmodule Factory.Engine do
 
     # On the agent's own Kiro session, which posts the reply to the chat and keeps the
     # conversation for a later pass. The prompt carries its sources and instructions.
-    result =
-      Kiro.run_step(step.agent, run.id, prompt.ask,
-        brief: {prompt.brief, "#{run.id}:" <> Factory.Context.sha256(prompt.brief)},
-        source: "run_step",
-        model: model(run, step),
-        context: false,
-        activity: "Working on “#{run.title}”",
-        step: %{
-          id: step.id,
-          tasks: marks_tasks?(run, step),
-          verdict: Map.get(step, :loops, []) != []
-        }
-      )
+    activity = "Working on “#{run.title}”"
+    opts = step_opts(run, step, prompt, model(run, step), activity, marks_tasks?(run, step))
+    result = Kiro.run_step(step.agent, run.id, prompt.ask, opts)
 
     case result do
       {:ok, reply} ->
         set_activity(step.agent, "done", nil)
-
-        {:ok, reply,
-         %{
-           "tokens" => prompt.tokens,
-           "bytes" => prompt.bytes,
-           "sha256" => prompt.sha256,
-           "omitted_bytes" => prompt.omitted_bytes
-         }}
+        {:ok, reply, sent(prompt)}
 
       {:error, reason} ->
         set_activity(step.agent, "error", reason)
@@ -682,17 +693,11 @@ defmodule Factory.Engine do
           set_activity(step.agent, "running", activity)
           prompt = fit_prompt(run, steps, step, {task, block})
 
-          case Kiro.run_step(step.agent, run.id, prompt.ask,
-                 brief: {prompt.brief, "#{run.id}:" <> Factory.Context.sha256(prompt.brief)},
-                 source: "run_step",
-                 model: model,
-                 context: false,
-                 activity: activity,
-                 step: %{
-                   id: step.id,
-                   tasks: true,
-                   verdict: Map.get(step, :loops, []) != []
-                 }
+          case Kiro.run_step(
+                 step.agent,
+                 run.id,
+                 prompt.ask,
+                 step_opts(run, step, prompt, model, activity, true)
                ) do
             {:ok, reply} -> {:cont, {[reply | outs], sent(prompt)}}
             {:error, reason} -> {:halt, {:error, reason}}
@@ -747,6 +752,21 @@ defmodule Factory.Engine do
       else: model(run, step)
   end
 
+  # A run step's options for `Factory.Kiro.run_step/4`: the brief (the same for every
+  # pass of this step, so the session isn't sent it twice), the model, and the step
+  # Factory's run tools act on. `tasks?` is whether this step marks tasks done.
+  defp step_opts(run, step, prompt, model, activity, tasks?) do
+    [
+      brief: {prompt.brief, "#{run.id}:" <> Factory.Context.sha256(prompt.brief)},
+      source: "run_step",
+      model: model,
+      context: false,
+      activity: activity,
+      step: %{id: step.id, tasks: tasks?, verdict: Map.get(step, :loops, []) != []}
+    ]
+  end
+
+  # What was sent, for the run's progress (`"prompts"`).
   defp sent(prompt) do
     %{
       "tokens" => prompt.tokens,

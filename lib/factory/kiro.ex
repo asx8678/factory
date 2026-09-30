@@ -83,14 +83,46 @@ defmodule Factory.Kiro do
   @doc "Folder Kiro works in for a run's chat: the run's project folder, else the default workspace."
   def workdir(run), do: blank_to_nil(run && run.settings["project_dir"]) || config(:workspace)
 
-  @doc "Queues a message for the agent's session, starting it if needed. The reply is posted to the run."
+  @doc """
+  Queues a message for the agent's session, starting it if needed. The reply is posted
+  to the run. `{:ok, ref}`, a reference for `cancel/2`; `{:error, :busy}` when the
+  session works in another folder; `{:error, reason}` when Kiro couldn't start.
+  """
   def prompt(agent, run_id, text) do
     dir = workdir(Factory.Runs.get_run(run_id))
     key = session_key(agent)
 
     locked(key, fn ->
-      with {:ok, pid} <- ensure_session(key, dir), do: Session.prompt(pid, agent, run_id, text)
+      with {:ok, pid} <- ensure_session(key, dir),
+           do: safe(fn -> Session.prompt(pid, agent, run_id, text) end)
     end)
+  end
+
+  @doc """
+  Withdraws a message `prompt/3` or `run_step/4` queued for the agent (its `ref`): see
+  `Factory.Kiro.Session.cancel/2`. `{:error, :gone}` when it has ended, or the session
+  with it.
+  """
+  def cancel(agent, ref) do
+    case whereis(session_key(agent)) do
+      nil -> {:error, :gone}
+      pid -> safe(fn -> Session.cancel(pid, ref) end, {:error, :gone})
+    end
+  end
+
+  @doc "Cancels the chat `run_id`'s messages, queued or in progress, in every session."
+  def cancel_run(run_id) do
+    for pid <- sessions(), do: safe(fn -> Session.cancel_run(pid, run_id) end)
+    :ok
+  end
+
+  # Every session running: the registry's entries under a session key (`session_key/1`),
+  # not the tuple keys other modules lock with (`Factory.Engine`, `FactoryWeb.Mcp`).
+  defp sessions do
+    Factory.Kiro.Registry
+    |> Registry.select([{{:"$1", :"$2", :_}, [], [{{:"$1", :"$2"}}]}])
+    |> Enum.reject(fn {key, _pid} -> is_tuple(key) end)
+    |> Enum.map(fn {_key, pid} -> pid end)
   end
 
   @doc """
@@ -115,12 +147,12 @@ defmodule Factory.Kiro do
     queued =
       locked(key, fn ->
         with {:ok, pid} <- ensure_session(key, dir),
-             :ok <- Session.prompt(pid, agent, run_id, text, opts),
-             do: {:ok, pid}
+             {:ok, job} <- safe(fn -> Session.prompt(pid, agent, run_id, text, opts) end),
+             do: {:ok, pid, job}
       end)
 
     case queued do
-      {:ok, pid} ->
+      {:ok, pid, job} ->
         monitor = Process.monitor(pid)
         wait = 2 * config(:prompt_timeout) + 60_000
 
@@ -139,6 +171,8 @@ defmodule Factory.Kiro do
         after
           wait ->
             Process.demonitor(monitor, [:flush])
+            # The job is withdrawn, so the session doesn't answer into the void later.
+            safe(fn -> Session.cancel(pid, job) end)
             {:error, "#{agent.name} didn't answer within #{div(wait, 60_000)} minutes."}
         end
 
@@ -149,6 +183,9 @@ defmodule Factory.Kiro do
         {:error,
          "#{agent.name}'s Kiro session is working in another project folder. " <>
            "Try again when it's idle."}
+
+      {:error, reason} when is_binary(reason) ->
+        {:error, "Couldn't start Kiro for #{agent.name}: #{reason}"}
 
       {:error, reason} ->
         {:error, "Couldn't start Kiro for #{agent.name}: #{inspect(reason)}"}
@@ -174,7 +211,8 @@ defmodule Factory.Kiro do
         {:ok, pid}
 
       [{pid, _elsewhere}] ->
-        if Session.idle?(pid) do
+        # A session that stopped between the lookup and the call counts as idle.
+        if safe(fn -> Session.idle?(pid) end, true) do
           stop_session(key)
           start(key, dir)
         else
@@ -183,7 +221,24 @@ defmodule Factory.Kiro do
     end
   end
 
+  # Checked before the session starts, so a missing folder or kiro-cli is an error the
+  # caller gets, not a session that starts and stops (the same checks as the session's).
   defp start(key, dir) do
+    if dir == config(:workspace), do: File.mkdir_p(dir)
+
+    cond do
+      not File.dir?(dir) ->
+        {:error, "The workspace folder #{dir} doesn't exist."}
+
+      not File.exists?(config(:cli)) ->
+        {:error, "kiro-cli wasn't found at #{config(:cli)}."}
+
+      true ->
+        start_child(key, dir)
+    end
+  end
+
+  defp start_child(key, dir) do
     case DynamicSupervisor.start_child(Factory.Kiro.Supervisor, {Session, {key, dir}}) do
       {:ok, pid} ->
         {:ok, pid}
@@ -196,6 +251,13 @@ defmodule Factory.Kiro do
       other ->
         other
     end
+  end
+
+  # A call to a session that stops meanwhile mustn't take the caller (a LiveView) down.
+  defp safe(fun, on_exit \\ {:error, "The Kiro session stopped."}) do
+    fun.()
+  catch
+    :exit, _ -> on_exit
   end
 
   def whereis(key) do
@@ -232,7 +294,7 @@ defmodule Factory.Kiro do
   def compact(agent, run_id \\ nil) do
     case whereis(session_key(agent)) do
       nil -> {:error, :no_session}
-      pid -> Session.compact(pid, run_id)
+      pid -> safe(fn -> Session.compact(pid, run_id) end, {:error, :no_session})
     end
   end
 
@@ -243,10 +305,9 @@ defmodule Factory.Kiro do
   def answer_elicitation(agent, key, action, content \\ %{}) do
     case whereis(session_key(agent)) do
       nil -> {:error, :gone}
-      pid -> Session.answer_elicitation(pid, key, action, content)
+      pid ->
+        safe(fn -> Session.answer_elicitation(pid, key, action, content) end, {:error, :gone})
     end
-  catch
-    :exit, _ -> {:error, :gone}
   end
 
   @doc "Sends the agent's prompt again before its next message, e.g. after it was edited."

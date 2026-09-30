@@ -11,6 +11,7 @@ defmodule Factory.Kiro.Catalog do
   """
   require Logger
   alias Factory.{Kiro, Prefs}
+  alias Factory.Kiro.RPC
 
   @key {__MODULE__, :catalog}
   @timeout 30_000
@@ -88,19 +89,10 @@ defmodule Factory.Kiro.Catalog do
     port = Kiro.open_port(workdir, "catalog.log")
 
     try do
-      send_json(port, %{
-        id: 1,
-        method: "initialize",
-        params: %{protocolVersion: 1, clientCapabilities: %{}}
-      })
+      RPC.request(port, 1, "initialize", %{protocolVersion: 1, clientCapabilities: %{}})
 
       with {:ok, _} <- await(port, 1, ""),
-           :ok <-
-             send_json(port, %{
-               id: 2,
-               method: "session/new",
-               params: %{cwd: workdir, mcpServers: []}
-             }),
+           :ok <- RPC.request(port, 2, "session/new", %{cwd: workdir, mcpServers: []}),
            {:ok, result} <- await(port, 2, "") do
         options =
           for %{"id" => id, "options" => opts} <- List.wrap(result["configOptions"]),
@@ -125,13 +117,8 @@ defmodule Factory.Kiro.Catalog do
     rescue
       e -> {:error, Exception.message(e)}
     after
-      if Port.info(port), do: Port.close(port)
+      RPC.close_port(port)
     end
-  end
-
-  defp send_json(port, msg) do
-    Port.command(port, JSON.encode!(Map.put(msg, :jsonrpc, "2.0")) <> "\n")
-    :ok
   end
 
   # Waits for the reply to request `id`, gathering lines split by the port.
@@ -141,9 +128,9 @@ defmodule Factory.Kiro.Catalog do
         await(port, id, partial <> chunk)
 
       {^port, {:data, {:eol, chunk}}} ->
-        case JSON.decode(partial <> chunk) do
+        case RPC.decode(partial <> chunk) do
           {:ok, %{"id" => ^id, "result" => result}} -> {:ok, result}
-          {:ok, %{"id" => ^id, "error" => error}} -> {:error, error["message"] || inspect(error)}
+          {:ok, %{"id" => ^id, "error" => error}} -> {:error, RPC.error_message(error)}
           _ -> await(port, id, "")
         end
 
