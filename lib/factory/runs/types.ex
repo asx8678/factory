@@ -8,7 +8,7 @@ defmodule Factory.Runs.Types do
 
   A workflow step is `%{"kind" => agent kind, "name" => name, "does" => what it does}`;
   the kinds are `Factory.Agents.Agent.kinds/0`. A step with its own instructions has
-  `"prompt"` too; the others start from their kind's (`FactoryWeb.AgentKinds`).
+  `"prompt"` too; the others start from their kind's (`Factory.Agents.Kinds`).
   """
 
   @types [

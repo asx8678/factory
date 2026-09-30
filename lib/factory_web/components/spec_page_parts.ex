@@ -103,7 +103,6 @@ defmodule FactoryWeb.SpecPageParts do
   end
 
   attr :spec, Spec, required: true
-  attr :title, :string, default: "Kiro review"
 
   @doc """
   Kiro's review of the whole spec: score, verdict, checks (worst first) and what to
@@ -124,7 +123,7 @@ defmodule FactoryWeb.SpecPageParts do
     ~H"""
     <section id="review" class="border-b border-base-300 pb-8">
       <div class="flex items-center justify-between gap-3">
-        <h2 class="font-medium">{@title}</h2>
+        <h2 class="font-medium">Kiro review</h2>
         <button
           :if={@status in ["done", "error"]}
           phx-click="review"
@@ -245,7 +244,7 @@ defmodule FactoryWeb.SpecPageParts do
         </.link>
         <span
           :if={!Spec.open?(@spec, step)}
-          title={"Approve the #{String.downcase(step_label(prev_step(step)))} first"}
+          title={"Approve the #{String.downcase(step_label(Spec.step_before(step)))} first"}
           class={[
             "flex items-center gap-2 rounded-md px-2 py-1 text-base-content/40",
             @step == step && "bg-base-200"
@@ -296,14 +295,6 @@ defmodule FactoryWeb.SpecPageParts do
   def tab_class(true), do: "bg-base-100 font-medium shadow-sm"
 
   def tab_class(false), do: "text-base-content/60 hover:text-base-content"
-
-  defp prev_step("requirements"), do: "overview"
-
-  defp prev_step("design"), do: "requirements"
-
-  defp prev_step("tasks"), do: "design"
-
-  defp prev_step(_), do: "overview"
 
   def reopen_confirm(spec, step) do
     later = Spec.steps() |> Enum.drop_while(&(&1 != step)) |> tl()

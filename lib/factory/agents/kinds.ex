@@ -1,8 +1,7 @@
 defmodule Factory.Agents.Kinds do
   @moduledoc """
   Label, icon and prompt template for each agent kind (see `Factory.Agents.Agent.kinds/0`).
-  Keep in step with the icon map in assets/svelte/AgentNode.svelte. The web layer reaches
-  these through `FactoryWeb.AgentKinds`.
+  Keep in step with the icon map in assets/svelte/AgentNode.svelte.
   """
 
   @kinds [

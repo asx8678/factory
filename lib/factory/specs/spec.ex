@@ -39,6 +39,17 @@ defmodule Factory.Specs.Spec do
 
   def steps, do: @steps
 
+  @doc "The step after `step`, or nil after the last."
+  def step_after(step), do: neighbour(step, 1)
+
+  @doc "The step before `step`, or nil before the first."
+  def step_before(step), do: neighbour(step, -1)
+
+  defp neighbour(step, offset) do
+    i = Enum.find_index(@steps, &(&1 == step)) + offset
+    if i >= 0, do: Enum.at(@steps, i)
+  end
+
   def changeset(spec, attrs) do
     spec
     |> cast(attrs, [:name, :kind, :overview, :requirements, :design, :tasks])

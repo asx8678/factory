@@ -30,7 +30,6 @@ import {Markdown, copy} from "./hooks/markdown"
 import {PromptEditor} from "./hooks/prompt_editor"
 import {QuestionKeys} from "./hooks/question_keys"
 import {AutoDismiss} from "./hooks/auto_dismiss"
-import {NumberKeys} from "./hooks/number_keys"
 import {DropText} from "./hooks/drop_text"
 import {ChatKeys} from "./hooks/chat_keys"
 
@@ -38,7 +37,7 @@ const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks, Flow, ChatInput, ChatScroll, Markdown, PromptEditor, AutoDismiss, QuestionKeys, NumberKeys, DropText, ChatKeys},
+  hooks: {...colocatedHooks, Flow, ChatInput, ChatScroll, Markdown, PromptEditor, AutoDismiss, QuestionKeys, DropText, ChatKeys},
 })
 
 // Show progress bar on live navigation and form submits

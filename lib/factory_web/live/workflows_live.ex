@@ -7,8 +7,9 @@ defmodule FactoryWeb.WorkflowsLive do
   """
   use FactoryWeb, :live_view
   import FactoryWeb.WorkflowParts
-  alias Factory.{Actions, Agents, FileBrowser, Kiro, Sources, Workflows}
+  alias Factory.{Actions, Agents, Kiro, Sources, Workflows}
   alias Factory.Agents.Agent
+  alias FactoryWeb.FolderBrowser
 
   # Model and mode are switched per message, and prompt edits are re-sent, so only these
   # need a fresh session: its folder, or which session the agent talks in.
@@ -597,24 +598,22 @@ defmodule FactoryWeb.WorkflowsLive do
      |> refresh()}
   end
 
-  # The folder browser: picking a path for a source's folder or file field.
+  # The folder browser (FactoryWeb.FolderBrowser): picking a path for a source's folder
+  # or file field.
 
   def handle_event("browse_open", %{"field" => field, "mode" => mode}, socket)
       when mode in ["dir", "file", "json", "any"] do
     current = form_params(socket.assigns.source_form)["config"][field]
-    browser = %{field: field, mode: mode, hidden: false, listing: nil, error: nil}
-    {:noreply, assign(socket, browser: browse(browser, FileBrowser.start_dir(current)))}
+    {:noreply, FolderBrowser.open(socket, current, %{field: field, mode: mode})}
   end
 
   def handle_event("browse_go", %{"path" => path}, socket),
-    do: {:noreply, update(socket, :browser, &browse(&1, path))}
+    do: {:noreply, FolderBrowser.go(socket, path)}
 
-  def handle_event("browse_hidden", _, socket) do
-    browser = %{socket.assigns.browser | hidden: !socket.assigns.browser.hidden}
-    {:noreply, assign(socket, browser: browse(browser, browser.listing && browser.listing.dir))}
-  end
+  def handle_event("browse_hidden", _, socket),
+    do: {:noreply, FolderBrowser.toggle_hidden(socket)}
 
-  def handle_event("browse_cancel", _, socket), do: {:noreply, assign(socket, browser: nil)}
+  def handle_event("browse_cancel", _, socket), do: {:noreply, FolderBrowser.close(socket)}
 
   # The chosen path fills the field; a source without a name is named after it.
   def handle_event("browse_pick", %{"path" => path}, socket) do
@@ -627,7 +626,7 @@ defmodule FactoryWeb.WorkflowsLive do
         do: Map.put(params, "name", path |> Path.basename() |> Path.rootname()),
         else: params
 
-    socket = assign(socket, browser: nil)
+    socket = FolderBrowser.close(socket)
     handle_event("source_validate", %{"source" => params}, socket)
   end
 
@@ -746,22 +745,6 @@ defmodule FactoryWeb.WorkflowsLive do
 
   def handle_event("close", _, socket),
     do: {:noreply, push_patch(socket, to: ~p"/workflows/#{socket.assigns.workflow.id}")}
-
-  defp browse(browser, dir) do
-    case FileBrowser.list(dir || System.user_home!(),
-           files: browser.mode != "dir",
-           ext:
-             case browser.mode do
-               "json" -> [".json"]
-               "any" -> :any
-               _ -> nil
-             end,
-           hidden: browser.hidden
-         ) do
-      {:ok, listing} -> %{browser | listing: listing, error: nil}
-      {:error, reason} -> %{browser | error: reason}
-    end
-  end
 
   # What the source form holds now, typed or not.
   defp form_params(form) do
@@ -1015,7 +998,6 @@ defmodule FactoryWeb.WorkflowsLive do
           workflow={@workflow}
           workflows={@workflows}
           naming={@naming}
-          sources={@sources}
         />
         <FactoryWeb.SourceParts.window
           :if={@sources_view}

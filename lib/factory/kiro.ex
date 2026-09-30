@@ -192,16 +192,6 @@ defmodule Factory.Kiro do
     end
   end
 
-  @doc """
-  The agent's session, working in `dir`, started if needed. A session working in another
-  folder (a chat on another project) starts again in `dir` once it's idle; until then
-  `{:error, :busy}`.
-  """
-  def ensure_started(agent, dir) do
-    key = session_key(agent)
-    locked(key, fn -> ensure_session(key, dir) end)
-  end
-
   defp ensure_session(key, dir) do
     case Registry.lookup(Factory.Kiro.Registry, key) do
       [] ->

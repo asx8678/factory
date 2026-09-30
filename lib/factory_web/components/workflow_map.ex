@@ -274,7 +274,6 @@ defmodule FactoryWeb.WorkflowMap do
     doc: "the id of the step to ring, e.g. the agent the chat is with"
 
   attr :link, :any, default: nil, doc: "`fn step -> path | nil` for a step's card to open"
-  attr :patch, :boolean, default: false, doc: "open links with a patch rather than a navigate"
 
   @doc "The workflow drawn small. Wrap it in something that scrolls sideways."
   def map(assigns) do
@@ -309,7 +308,6 @@ defmodule FactoryWeb.WorkflowMap do
         state={Map.get(@states, node.step.id, :pending)}
         focus={@focus == node.step.id}
         href={@link && @link.(node.step)}
-        patch={@patch}
       />
     </div>
     """
@@ -333,7 +331,6 @@ defmodule FactoryWeb.WorkflowMap do
   attr :state, :atom, required: true
   attr :focus, :boolean, required: true
   attr :href, :string, default: nil
-  attr :patch, :boolean, required: true
 
   defp card(assigns) do
     %{node: node, state: state} = assigns
@@ -357,17 +354,7 @@ defmodule FactoryWeb.WorkflowMap do
 
     ~H"""
     <.link
-      :if={@href && @patch}
-      id={@id}
-      patch={@href}
-      class={@class}
-      style={@style}
-      title={@title}
-    >
-      <.card_body node={@node} state={@state} />
-    </.link>
-    <.link
-      :if={@href && !@patch}
+      :if={@href}
       id={@id}
       navigate={@href}
       class={@class}

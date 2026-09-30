@@ -286,7 +286,6 @@ body {
   background: color-mix(in oklab, var(--color-base-content) 7%, transparent);
 }
 .launcher-kbd + .launcher-kbd { margin-left: 0.2rem; }
-.workflow-card:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
 .task-card-selected {
   --task-bg: color-mix(in oklab, var(--color-primary) 7%, var(--color-base-100));
 }

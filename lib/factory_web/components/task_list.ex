@@ -838,7 +838,7 @@ defmodule FactoryWeb.TaskList do
   end
 
   @doc "A task's checks (its `Verify:` lines); none for a task written before it had them."
-  def checks(task), do: Map.get(task, :verify) || []
+  def checks(task), do: task.verify
 
   # What opening a task shows, for its toggle: "3 steps · 2 checks".
   defp parts_count(task) do

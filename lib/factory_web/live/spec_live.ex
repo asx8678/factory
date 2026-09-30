@@ -594,7 +594,7 @@ defmodule FactoryWeb.SpecLive do
       {:ok, spec} ->
         socket = put_spec(socket, spec)
 
-        case next_step(step) do
+        case Spec.step_after(step) do
           nil -> {:noreply, assign(socket, preview: true)}
           next -> {:noreply, push_patch(socket, to: ~p"/specs/#{spec.id}?step=#{next}")}
         end
@@ -759,11 +759,6 @@ defmodule FactoryWeb.SpecLive do
       socket
     end
   end
-
-  defp next_step("overview"), do: "requirements"
-  defp next_step("requirements"), do: "design"
-  defp next_step("design"), do: "tasks"
-  defp next_step("tasks"), do: nil
 
   defp text(spec, step), do: Map.fetch!(spec, String.to_existing_atom(step))
 

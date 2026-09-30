@@ -38,10 +38,6 @@ defmodule FactoryWeb.Layouts do
     default: 0,
     doc: "queued and running runs for the header, from FactoryWeb.ActiveRuns"
 
-  attr :current_scope, :map,
-    default: nil,
-    doc: "the current [scope](https://phoenix.hexdocs.pm/scopes.html)"
-
   slot :inner_block, required: true
 
   @menu [
@@ -143,12 +139,11 @@ defmodule FactoryWeb.Layouts do
   end
 
   attr :status, :string, required: true
-  attr :dot, :boolean, default: true
 
   def status_badge(assigns) do
     ~H"""
     <span class={["inline-flex items-center gap-1.5 text-[13px]", status_text(@status)]}>
-      <span :if={@dot} class="size-1.5 rounded-full bg-current"></span>
+      <span class="size-1.5 rounded-full bg-current"></span>
       {status_label(@status)}
     </span>
     """
@@ -171,11 +166,11 @@ defmodule FactoryWeb.Layouts do
 
   def status_label(status), do: Map.get(@labels, status, "Idle")
 
-  def status_text(s) when s in ["running", "queued"], do: "text-info"
-  def status_text(s) when s in ["done", "verified"], do: "text-success"
-  def status_text(s) when s in ["waiting", "paused"], do: "text-warning"
-  def status_text("error"), do: "text-error"
-  def status_text(_), do: "text-base-content/50"
+  defp status_text(s) when s in ["running", "queued"], do: "text-info"
+  defp status_text(s) when s in ["done", "verified"], do: "text-success"
+  defp status_text(s) when s in ["waiting", "paused"], do: "text-warning"
+  defp status_text("error"), do: "text-error"
+  defp status_text(_), do: "text-base-content/50"
 
   @doc """
   The colour of a status dot: for the statuses above, and for the states of a run's

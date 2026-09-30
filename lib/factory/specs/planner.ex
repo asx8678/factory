@@ -131,15 +131,8 @@ defmodule Factory.Specs.Planner do
   titles of tasks they're added to): a repeat gets a count, "Add the form (2)". A run
   finds its tasks by title, so titles must be unique.
   """
-  def unique_titles(tasks, taken \\ []) do
-    tasks
-    |> Enum.reduce({[], taken}, fn task, {done, taken} ->
-      title = Factory.Spec.unique_title(task["title"], taken)
-      {[Map.put(task, "title", title) | done], [title | taken]}
-    end)
-    |> elem(0)
-    |> Enum.reverse()
-  end
+  def unique_titles(tasks, taken \\ []),
+    do: Factory.Spec.rename_duplicates(tasks, taken, & &1["title"], &Map.put(&1, "title", &2))
 
   @doc "Prompt for turn 1: read the project, then ask questions."
   def questions_prompt(files) do

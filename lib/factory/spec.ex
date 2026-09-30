@@ -249,12 +249,20 @@ defmodule Factory.Spec do
   The blocks with duplicate titles renamed (`unique_title/2`), earlier ones keeping
   theirs; `taken` are titles already in use (tasks the blocks are added to).
   """
-  def unique_titles(blocks, taken \\ []) do
-    blocks
-    |> Enum.reduce({[], taken}, fn block, {done, taken} ->
-      title = unique_title(block.title, taken)
-      block = if title == block.title, do: block, else: edit_block(block, %{title: title})
-      {[block | done], [title | taken]}
+  def unique_titles(blocks, taken \\ []),
+    do: rename_duplicates(blocks, taken, & &1.title, &edit_block(&1, %{title: &2}))
+
+  @doc """
+  `unique_titles/2` for any shape: `title` reads an item's title and `rename` gives it a
+  new one (`Factory.Specs.Planner.unique_titles/2` uses it for its string-keyed tasks).
+  """
+  def rename_duplicates(items, taken, title, rename) do
+    items
+    |> Enum.reduce({[], taken}, fn item, {done, taken} ->
+      was = title.(item)
+      now = unique_title(was, taken)
+      item = if now == was, do: item, else: rename.(item, now)
+      {[item | done], [now | taken]}
     end)
     |> elem(0)
     |> Enum.reverse()

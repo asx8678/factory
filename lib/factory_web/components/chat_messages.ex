@@ -195,7 +195,7 @@ defmodule FactoryWeb.ChatMessages do
           title="Kiro credits this reply used"
         >
           <.icon name="hero-bolt-mini" class="size-3.5" />
-          {FactoryWeb.Usage.credits(@meta["credits"])} credits
+          {FactoryWeb.UsageMeter.credits(@meta["credits"])} credits
         </span>
         <span :if={@meta["ms"]} class="flex items-center gap-1" title="Time Kiro took">
           <.icon name="hero-clock-mini" class="size-3.5" />

@@ -1054,7 +1054,7 @@ defmodule Factory.Specs do
       "title" => task.title,
       "objective" => Map.get(task, :objective) || "",
       "details" => Enum.join(task.details, "\n"),
-      "verify" => Enum.join(Map.get(task, :verify) || [], "\n"),
+      "verify" => Enum.join(task.verify, "\n"),
       "agent" => Map.get(task, :agent) || "",
       "model" => Map.get(task, :model) || "",
       "requirements" => Enum.join(task.requirements, ", ")

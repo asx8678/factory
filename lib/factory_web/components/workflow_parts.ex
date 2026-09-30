@@ -7,7 +7,7 @@ defmodule FactoryWeb.WorkflowParts do
   use FactoryWeb, :html
   import FactoryWeb.RunParts, only: [type_icon: 2]
   alias Factory.{Kiro, Workflows}
-  alias Factory.Agents.{Agent, Workflow}
+  alias Factory.Agents.{Agent, Kinds, Workflow}
 
   def agent_path(%Agent{workflow_id: wid, id: id}), do: ~p"/workflows/#{wid}/agents/#{id}"
 
@@ -20,7 +20,7 @@ defmodule FactoryWeb.WorkflowParts do
 
     # The agent's own role first in the Templates menu.
     kinds =
-      Enum.sort_by(FactoryWeb.AgentKinds.all(), fn {kind, _, _} -> kind != assigns.agent.kind end)
+      Enum.sort_by(Kinds.all(), fn {kind, _, _} -> kind != assigns.agent.kind end)
 
     assigns =
       assign(assigns,
@@ -48,7 +48,7 @@ defmodule FactoryWeb.WorkflowParts do
         class="flex h-full max-h-[760px] w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-base-content/10 bg-surface shadow-2xl"
       >
         <header class="flex h-14 shrink-0 items-center gap-2 border-b border-base-content/10 pl-4 pr-3">
-          <.icon name={FactoryWeb.AgentKinds.icon(@agent.kind)} class="size-4 shrink-0 opacity-60" />
+          <.icon name={Kinds.icon(@agent.kind)} class="size-4 shrink-0 opacity-60" />
           <p class="min-w-0 truncate text-xs">
             <span class="text-base-content/60">{@agent.name}</span>
             <span class="mx-1 text-base-content/30">/</span>
@@ -80,7 +80,7 @@ defmodule FactoryWeb.WorkflowParts do
                   phx-click={
                     JS.dispatch("factory:fill",
                       to: "#context-prompt",
-                      detail: %{text: FactoryWeb.AgentKinds.template(kind, @agent.name)}
+                      detail: %{text: Kinds.template(kind, @agent.name)}
                     )
                     |> JS.remove_attribute("open", to: "#prompt-templates")
                   }
@@ -98,7 +98,7 @@ defmodule FactoryWeb.WorkflowParts do
                       </span>
                     </span>
                     <span class="block text-[11px] text-base-content/50">
-                      {FactoryWeb.AgentKinds.blurb(kind)}
+                      {Kinds.blurb(kind)}
                     </span>
                   </span>
                 </button>
@@ -154,13 +154,13 @@ defmodule FactoryWeb.WorkflowParts do
                 phx-click={
                   JS.dispatch("factory:fill",
                     to: "#context-prompt",
-                    detail: %{text: FactoryWeb.AgentKinds.template(@agent.kind, @agent.name)}
+                    detail: %{text: Kinds.template(@agent.kind, @agent.name)}
                   )
                 }
                 class="pointer-events-auto mt-4 inline-flex items-center gap-1.5 rounded-lg border border-base-content/15 bg-base-100 px-3 py-1.5 text-xs hover:bg-base-content/[0.06]"
               >
-                <.icon name={FactoryWeb.AgentKinds.icon(@agent.kind)} class="size-4 opacity-70" />
-                Start from the {FactoryWeb.AgentKinds.label(@agent.kind)} template
+                <.icon name={Kinds.icon(@agent.kind)} class="size-4 opacity-70" />
+                Start from the {Kinds.label(@agent.kind)} template
               </button>
               <p class="mt-2 text-[11px] text-base-content/40">or just start typing</p>
             </div>
@@ -231,7 +231,6 @@ defmodule FactoryWeb.WorkflowParts do
   attr :workflow, :map, required: true
   attr :workflows, :list, required: true
   attr :naming, :string, default: nil
-  attr :sources, :list, default: []
 
   # Above the canvas: which workflow this is, a menu to pick another, and what to do with it.
   def workflow_bar(assigns) do
@@ -558,7 +557,7 @@ defmodule FactoryWeb.WorkflowParts do
         <div class="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-3.5">
           <div class="flex items-center gap-2">
             <.icon
-              name={FactoryWeb.AgentKinds.icon(@selected.kind)}
+              name={Kinds.icon(@selected.kind)}
               class="size-5 shrink-0 text-base-content/60"
             />
             <input
@@ -607,7 +606,7 @@ defmodule FactoryWeb.WorkflowParts do
             <.prop label="Role">
               <.plain_select
                 field={@form[:kind]}
-                options={for {k, l, _} <- FactoryWeb.AgentKinds.all(), do: {l, k}}
+                options={for {k, l, _} <- Kinds.all(), do: {l, k}}
               />
             </.prop>
             <.prop label="Model">
@@ -658,7 +657,7 @@ defmodule FactoryWeb.WorkflowParts do
                   </span>
                   <span class="flex items-center gap-1" title="Kiro credits used">
                     <.icon name="hero-bolt-mini" class="size-4 opacity-50" />
-                    {FactoryWeb.Usage.credits(@selected.usage["credits"])} credits
+                    {FactoryWeb.UsageMeter.credits(@selected.usage["credits"])} credits
                   </span>
                 </div>
                 <div
