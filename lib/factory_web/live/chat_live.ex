@@ -26,7 +26,7 @@ defmodule FactoryWeb.ChatLive do
      |> assign(message_ids: [], earlier?: false, history?: false)
      |> assign(commands: Chat.commands())
      |> assign(workflows: Workflows.list(), browser: nil, folder_warn: false, to: nil)
-     |> assign(scout: nil)
+     |> assign(scout: nil, ideas: nil)
      |> assign(pick: Workflows.picked())
      |> assign(base_ids: [])
      |> assign(
@@ -140,20 +140,28 @@ defmodule FactoryWeb.ChatLive do
   defp default_to(agents),
     do: Enum.find(agents, &(&1.kind == "planner")) || List.first(agents) || :factory
 
-  # Review a PR: what there is to review in the chat's folder, read from git in the
-  # background (Factory.Scout), for a new chat to offer.
+  # A new chat looks at its folder in the background (Factory.Scout): for a review, what
+  # there is to review; otherwise what there is to pick up (unfinished work, notes in the
+  # code), for its suggestions.
   defp scout(socket) do
     review? = Workflows.kind(socket.assigns.workflow) == "review"
     fresh? = socket.assigns[:count] in [nil, 0]
+    look? = connected?(socket) and fresh? and socket.assigns.dir_ok
+    dir = Path.expand(socket.assigns.dir || "")
 
-    if connected?(socket) and review? and fresh? and socket.assigns.dir_ok do
-      dir = Path.expand(socket.assigns.dir)
+    cond do
+      not look? ->
+        assign(socket, scout: nil, ideas: nil)
 
-      socket
-      |> assign(scout: :loading)
-      |> start_async(:scout, fn -> {dir, Factory.Scout.scout(dir)} end)
-    else
-      assign(socket, scout: nil)
+      review? ->
+        socket
+        |> assign(scout: :loading, ideas: nil)
+        |> start_async(:scout, fn -> {dir, Factory.Scout.scout(dir)} end)
+
+      true ->
+        socket
+        |> assign(scout: nil)
+        |> start_async(:ideas, fn -> {dir, Factory.Scout.ideas(dir)} end)
     end
   end
 
@@ -940,6 +948,14 @@ defmodule FactoryWeb.ChatLive do
   def handle_async(:scout, {:exit, _reason}, socket),
     do: {:noreply, assign(socket, scout: {:error, "Couldn't read the folder's branches."})}
 
+  def handle_async(:ideas, {:ok, {dir, ideas}}, socket) do
+    if socket.assigns.dir_ok and Path.expand(socket.assigns.dir) == dir,
+      do: {:noreply, assign(socket, ideas: ideas)},
+      else: {:noreply, socket}
+  end
+
+  def handle_async(:ideas, {:exit, _reason}, socket), do: {:noreply, assign(socket, ideas: [])}
+
   def handle_info({:spec_updated, %{id: id} = spec}, %{assigns: %{plan_sub: id}} = socket),
     do: {:noreply, assign(socket, plan_spec: spec)}
 
@@ -1215,6 +1231,7 @@ defmodule FactoryWeb.ChatLive do
               chain={for st <- @steps, st.kind != "action", do: st.name}
               last_run={last_run(@runs, @run)}
               scout={@scout}
+              ideas={@ideas}
             />
           </div>
 

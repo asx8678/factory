@@ -370,6 +370,10 @@ defmodule FactoryWeb.ChatParts do
   attr :chain, :list, default: []
   attr :last_run, :any, default: nil
 
+  attr :ideas, :any,
+    default: nil,
+    doc: "what there is to pick up in the folder (Factory.Scout.ideas/2), or nil while it looks"
+
   attr :scout, :any,
     default: nil,
     doc: "what there is to review in the folder (Factory.Scout): nil, :loading or a result"
@@ -542,14 +546,30 @@ defmodule FactoryWeb.ChatParts do
         the code, asks about anything unclear, and lists the tasks for you to refine.
       </p>
 
-      <div :if={examples(@workflow) != []} id="examples" class="mt-4 flex flex-wrap gap-1.5">
+      <div
+        :if={suggestions(@ideas, @workflow) != []}
+        id="examples"
+        class="mt-4 flex flex-wrap gap-1.5"
+      >
         <button
-          :for={ex <- examples(@workflow)}
+          :for={idea <- suggestions(@ideas, @workflow)}
           type="button"
-          phx-click={JS.dispatch("factory:fill", to: "#chat-input", detail: %{text: ex})}
-          class="rounded-full border border-base-300 px-3 py-1 text-[13px] text-base-content/70 transition-colors hover:border-primary/40 hover:bg-primary/[0.05] hover:text-base-content"
+          title={idea.text}
+          phx-click={JS.dispatch("factory:fill", to: "#chat-input", detail: %{text: idea.text})}
+          class={[
+            "flex max-w-full items-center gap-1.5 rounded-full border px-3 py-1 text-[13px] transition-colors hover:border-primary/40 hover:bg-primary/[0.05] hover:text-base-content",
+            if(idea.here,
+              do: "border-primary/25 text-base-content/85",
+              else: "border-base-300 text-base-content/70"
+            )
+          ]}
         >
-          {ex}
+          <.icon
+            :if={idea.here}
+            name="hero-code-bracket-micro"
+            class="size-3.5 shrink-0 text-primary/80"
+          />
+          <span class="truncate">{idea.label}</span>
         </button>
       </div>
 
@@ -1520,20 +1540,21 @@ defmodule FactoryWeb.ChatParts do
   defp upload_error(err), do: to_string(err)
 
   # Starting points for the message box, by the kind of job the workflow does.
-  @examples %{
+  # Ways to start that suit any project, when the folder has nothing of its own to
+  # suggest (or to fill the row after what it has).
+  @starters %{
     "feature" => [
-      "Add a dark mode toggle to the settings page",
-      "Let users export the list as CSV",
-      "Add search with filters to the main list"
+      "Suggest the three most useful improvements to this project",
+      "Add tests where the code has none",
+      "Make the README explain how to set up and run the project"
     ],
     "bug" => [
-      "Saving the form logs the user out",
-      "The page crashes when the list is empty",
-      "Dates show in the wrong time zone"
+      "Run the tests and fix what fails",
+      "Fix the warnings the build prints",
+      "Find errors the code swallows and handle them"
     ],
     "issue" => [
-      "Resolve this issue: (paste the link or the text)",
-      "Triage the open issue about slow page loads"
+      "Resolve this issue: (paste the link or the text)"
     ],
     "deps" => [
       "Update all dependencies to their latest minor versions",
@@ -1542,7 +1563,18 @@ defmodule FactoryWeb.ChatParts do
     ]
   }
 
-  defp examples(workflow), do: Map.get(@examples, Workflows.kind(workflow), [])
+  # A new chat's suggestions: what the folder has to pick up (Factory.Scout.ideas/2),
+  # marked as from the code, then starters for the kind of job, four at most. Starters
+  # for building are only offered to the workflows that build; the others keep theirs.
+  defp suggestions(ideas, workflow) do
+    kind = Workflows.kind(workflow)
+    here = for i <- ideas || [], do: Map.put(i, :here, true)
+
+    starters =
+      for text <- Map.get(@starters, kind, []), do: %{label: text, text: text, here: false}
+
+    Enum.take(if(kind in ["feature", "bug", "other"], do: here, else: []) ++ starters, 4)
+  end
 
   # What the scout found worth reviewing: the branch that's checked out first (when it
   # isn't the base), then the open pull requests, then the other branches with work

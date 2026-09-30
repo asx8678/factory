@@ -75,12 +75,22 @@ defmodule Factory.Kiro.Permission do
     ~w(python -m pytest),
     ~w(python3 -m pytest),
     ~w(go test),
-    ~w(cargo test)
+    ~w(cargo test),
+    # Checks: they build or lint, and change no source.
+    ~w(mix compile),
+    ~w(mix format --check-formatted),
+    ~w(mix credo),
+    ~w(cargo check),
+    ~w(go vet),
+    ~w(npx tsc --noEmit),
+    ~w(npm run lint),
+    ~w(npm run typecheck)
   ]
 
   @doc """
   Whether a shell command only looks: it reads files or the project's history, lists or
-  searches, prints a version, runs the tests, or reads a pull request with `gh`. A
+  searches, prints a version, runs the tests or a check that builds or lints without
+  changing source (`mix compile`, `cargo check`), or reads a pull request with `gh`. A
   planner may run these while it plans, and so may an agent that only reads and checks.
   Anything that could install, write, move, delete, commit or run other code isn't one,
   and nor is an unknown command (nil). Commands may be chained or piped when every part

@@ -67,6 +67,125 @@ defmodule Factory.Scout do
     end
   end
 
+  # Build output and dependencies aren't work anyone left unfinished.
+  @generated ~w(_build/ deps/ node_modules/ dist/ build/ target/ .elixir_ls/ .next/ tmp/ coverage/)
+
+  @doc """
+  What there is to pick up in a project, read from git for a new chat to suggest
+  (`%{label:, text:}`, the words for its chip and what it puts in the message box), at
+  most `limit`: unfinished work first (uncommitted changes, a branch ahead of the
+  base), then TODO and FIXME notes in the code. Empty for a folder that isn't a git
+  repository, or has nothing to pick up.
+  """
+  def ideas(dir, limit \\ 4) do
+    dir = Path.expand(dir || "")
+
+    with true <- File.dir?(dir),
+         {:ok, _} <- repo(dir) do
+      (changes_idea(dir) ++ branch_idea(dir) ++ notes_ideas(dir)) |> Enum.take(limit)
+    else
+      _ -> []
+    end
+  end
+
+  defp changes_idea(dir) do
+    files =
+      case git(dir, ~w(status --porcelain)) do
+        {:ok, out} ->
+          for line <- String.split(out, "\n", trim: true),
+              file = changed_file(line),
+              not String.starts_with?(file, @generated),
+              do: file
+
+        _ ->
+          []
+      end
+
+    case files do
+      [] ->
+        []
+
+      [file] ->
+        [
+          %{
+            label: "Finish the changes in #{file}",
+            text: "Finish the uncommitted changes in `#{file}`."
+          }
+        ]
+
+      [file | rest] ->
+        [
+          %{
+            label: "Finish the changes in #{file} and #{length(rest)} more",
+            text:
+              "Finish the uncommitted changes in `#{file}` and #{length(rest)} more " <>
+                "#{if length(rest) == 1, do: "file", else: "files"}."
+          }
+        ]
+    end
+  end
+
+  defp branch_idea(dir) do
+    with current when is_binary(current) <- current(dir),
+         base when is_binary(base) and base != current <- base(dir),
+         {ahead, _} when is_integer(ahead) and ahead > 0 <- ahead_behind(dir, base, current),
+         {:ok, subject} <- git(dir, ["log", "-1", "--format=%s"]) do
+      [
+        %{
+          label: "Carry on with #{current}",
+          text:
+            "Carry on with the `#{current}` branch (#{ahead} " <>
+              "#{if ahead == 1, do: "commit", else: "commits"} ahead of `#{base}`, the latest " <>
+              "“#{subject}”): see what's left to do and finish it."
+        }
+      ]
+    else
+      _ -> []
+    end
+  end
+
+  # The file a `git status --porcelain` line is about: "M lib/a.ex", "R old -> new".
+  defp changed_file(line) do
+    path =
+      case Regex.run(~r/^\s*\S{1,2}\s+(.+)$/, line) do
+        [_, path] -> path
+        _ -> line
+      end
+
+    path |> String.split(" -> ") |> List.last() |> String.trim() |> String.trim("\"")
+  end
+
+  # TODO, FIXME and HACK notes in files git tracks, one per file.
+  defp notes_ideas(dir) do
+    case git(dir, ["grep", "-n", "-I", "-E", "-m", "1", "(TODO|FIXME|HACK)[:( ]"]) do
+      {:ok, out} ->
+        for line <- String.split(out, "\n", trim: true),
+            [file, number, text] <- [String.split(line, ":", parts: 3)],
+            not String.starts_with?(file, @generated),
+            note = clean_note(text),
+            note != "" do
+          place = "#{file}:#{number}"
+
+          %{
+            label: "#{String.slice(note, 0, 60)}#{if String.length(note) > 60, do: "…"}",
+            text: "Resolve the note in `#{place}`: “#{note}”."
+          }
+        end
+        |> Enum.take(3)
+
+      _ ->
+        []
+    end
+  end
+
+  # The note itself: "# TODO: handle the empty list" is "TODO: handle the empty list".
+  defp clean_note(text) do
+    case Regex.run(~r/\b((TODO|FIXME|HACK)\b.*)$/, text) do
+      [_, note | _] -> note |> String.trim() |> String.trim_trailing("*/") |> String.trim()
+      _ -> ""
+    end
+  end
+
   defp current(dir) do
     case git(dir, ~w(branch --show-current)) do
       {:ok, ""} -> nil
