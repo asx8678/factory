@@ -645,8 +645,8 @@ defmodule FactoryWeb.ChatParts do
                 name={"fields[#{f.name}]"}
                 options={Enum.zip(f.options, f.labels)}
                 checked={f.default || hd(f.options)}
+                own={f.other && "fields[#{f.other}]"}
               />
-              <.own_answer :if={f.other} name={"fields[#{f.other}]"} />
             <% f.type == "boolean" -> %>
               <.option_list
                 name={"fields[#{f.name}]"}
@@ -681,44 +681,60 @@ defmodule FactoryWeb.ChatParts do
         </button>
       </.question_foot>
     </form>
+    <div
+      :if={@e["status"] == "answered"}
+      id={@id}
+      class="mt-3 rounded-xl border border-base-content/10 px-3.5 py-2.5 text-[13px]"
+    >
+      <p class="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-base-content/60">
+        <.icon name="hero-check-circle-mini" class="size-4 text-success" /> You answered
+      </p>
+      <ol class="space-y-2">
+        <li :for={{question, answer} <- answers(@e["answer"], @e["schema"])} class="leading-snug">
+          <p class="text-xs text-base-content/50">{elem(split_question(question), 0)}</p>
+          <p class="mt-0.5">{answer}</p>
+        </li>
+      </ol>
+    </div>
     <p
-      :if={@e["status"] != "open"}
+      :if={@e["status"] not in ["open", "answered"]}
       id={@id}
       class="mt-2 text-xs text-base-content/55"
     >
-      <%= case @e["status"] do %>
-        <% "answered" -> %>
-          <.icon name="hero-check-mini" class="size-4 text-success" />
-          You answered: {answer_text(@e["answer"], @e["schema"])}
-        <% "declined" -> %>
-          You declined to answer.
-        <% _ -> %>
-          No longer waiting: the turn ended before an answer.
-      <% end %>
+      {if @e["status"] == "declined",
+        do: "You declined to answer.",
+        else: "No longer waiting: the turn ended before an answer."}
     </p>
     """
   end
 
-  # Each answer under its question's title, or its field name when it has none.
-  defp answer_text(answer, schema) when is_map(answer) do
+  # Each answer with its question's title, or its field name when it has none: the
+  # option picked, with the answer of your own written beside it.
+  defp answers(answer, schema) when is_map(answer) do
     props = (schema || %{})["properties"] || %{}
 
     answer
     |> Enum.reject(fn {k, _} -> own_answer_field?(k, props) end)
     |> Enum.sort_by(&natural(elem(&1, 0)))
-    |> Enum.map_join("; ", fn {k, v} ->
-      # The option picked, with the answer of your own written beside it.
+    |> Enum.map(fn {k, v} ->
+      # "Different content (please describe)" reads as "Different content".
+      v =
+        case option_label(v) do
+          {words, "please" <> _} -> words
+          _ -> v
+        end
+
       v =
         [v, answer[k <> "_other"]]
         |> Enum.map(&String.trim(to_string(&1 || "")))
         |> Enum.reject(&(&1 == ""))
         |> Enum.join(": ")
 
-      "#{get_in(props, [k, "title"]) || humanize(k)} #{v}"
+      {get_in(props, [k, "title"]) || humanize(k), v}
     end)
   end
 
-  defp answer_text(_answer, _schema), do: ""
+  defp answers(_answer, _schema), do: []
 
   defp humanize(name), do: name |> to_string() |> String.replace("_", " ") |> String.capitalize()
 
@@ -755,8 +771,8 @@ defmodule FactoryWeb.ChatParts do
             name={"answers[#{i}]"}
             options={Enum.map(q["options"], &{&1, &1})}
             checked={hd(q["options"])}
+            own={"others[#{i}]"}
           />
-          <.own_answer name={"others[#{i}]"} />
         </.question_row>
       </ol>
       <.question_foot note="Your answers go to the planner as one message.">
@@ -793,12 +809,7 @@ defmodule FactoryWeb.ChatParts do
   # One question, numbered like a plan's tasks: its first sentence in bold, the rest
   # under it, then how to answer.
   defp question_row(assigns) do
-    {title, rest} =
-      case Regex.run(~r/\A(.+?\?)\s+(\S.*)\z/s, String.trim(assigns.question || "")) do
-        [_, title, rest] -> {title, rest}
-        _ -> {assigns.question, nil}
-      end
-
+    {title, rest} = split_question(assigns.question)
     assigns = assign(assigns, title: title, rest: rest)
 
     ~H"""
@@ -820,44 +831,78 @@ defmodule FactoryWeb.ChatParts do
   attr :options, :list, required: true, doc: "[{value, label}]"
   attr :checked, :any, default: nil
   attr :recommend, :boolean, default: true, doc: "whether the first option is the recommended one"
+  attr :own, :string, default: nil, doc: "the field for an answer of your own, as the last row"
 
-  # A question's options, one per line; the first is the one the agent recommends.
+  # A question's options as one list, a row each; the first is the one the agent
+  # recommends. What an option says in brackets ("please specify", a path) is shown
+  # lighter, after it. An answer of your own is the list's last row.
   defp option_list(assigns) do
     ~H"""
-    <div class="space-y-1">
+    <div class="divide-y divide-base-content/[0.07] overflow-hidden rounded-lg border border-base-content/10">
       <label
         :for={{{value, label}, j} <- Enum.with_index(@options)}
-        class="flex cursor-pointer items-start gap-2.5 rounded-lg border border-base-content/10 px-2.5 py-1.5 text-[13px] leading-snug transition-colors hover:border-base-content/25 has-[input:checked]:border-primary/50 has-[input:checked]:bg-primary/[0.07]"
+        class="group/opt flex cursor-pointer items-center gap-2.5 px-3 py-2 text-[13px] leading-snug transition-colors hover:bg-base-content/[0.03] has-[input:checked]:bg-primary/[0.08]"
       >
         <input
           type="radio"
           name={@name}
           value={value}
           checked={to_string(value) == to_string(@checked)}
-          class="radio radio-primary radio-xs mt-px shrink-0"
+          class="peer sr-only"
         />
-        <span class="min-w-0 flex-1">{label}</span>
-        <span :if={@recommend and j == 0} class="shrink-0 text-[11px] text-base-content/45">
-          Recommended
+        <span class="size-3.5 shrink-0 rounded-full border border-base-content/30 transition-all peer-checked:border-[4px] peer-checked:border-primary peer-focus-visible:ring-2 peer-focus-visible:ring-primary/40"></span>
+        <span class="min-w-0 flex-1">
+          <span class="text-base-content/85 group-has-[input:checked]/opt:text-base-content">
+            {elem(option_label(label), 0)}
+          </span>
+          <span :if={elem(option_label(label), 1)} class="ml-1 text-base-content/45">
+            {elem(option_label(label), 1)}
+          </span>
+          <span
+            :if={@recommend and j == 0}
+            class="ml-1.5 inline-block rounded bg-primary/10 px-1.5 align-[1px] text-[10.5px] font-medium text-primary"
+          >
+            Recommended
+          </span>
         </span>
+        <.icon
+          name="hero-check-mini"
+          class="size-4 shrink-0 text-primary opacity-0 transition-opacity group-has-[input:checked]/opt:opacity-100"
+        />
+      </label>
+      <label
+        :if={@own}
+        class="flex items-center gap-2.5 px-3 py-1.5 focus-within:bg-base-content/[0.03]"
+      >
+        <.icon name="hero-pencil-square-micro" class="size-3.5 shrink-0 text-base-content/35" />
+        <input
+          type="text"
+          name={@own}
+          autocomplete="off"
+          placeholder="Add details, or write your own answer"
+          class="h-6 min-w-0 flex-1 bg-transparent text-[13px] outline-none placeholder:text-base-content/35"
+        />
       </label>
     </div>
     """
   end
 
-  attr :name, :string, required: true
+  # A question's first sentence, and the rest of it: "Where does it go? The invoices
+  # page is the obvious place…"
+  defp split_question(question) do
+    case Regex.run(~r/\A(.+?\?)\s+(\S.*)\z/s, String.trim(question || "")) do
+      [_, title, rest] -> {title, rest}
+      _ -> {question, nil}
+    end
+  end
 
-  # An answer of your own, or the details an option asks for ("please specify").
-  defp own_answer(assigns) do
-    ~H"""
-    <input
-      type="text"
-      name={@name}
-      autocomplete="off"
-      placeholder="Or write your own answer, or the details an option asks for"
-      class="mt-1.5 h-8 w-full rounded-md border border-base-content/15 bg-base-100 px-2.5 text-[13px] outline-none placeholder:text-base-content/35 focus:border-primary/50"
-    />
-    """
+  # An option's words, and what it says in brackets at the end, shown lighter:
+  # "Supplementary documentation (please specify what)".
+  defp option_label(label) do
+    case Regex.run(~r/\A(.+?)\s*\(([^()]+)\)\s*\z/, to_string(label)) do
+      [_, words, aside] -> {words, aside}
+      _ -> {label, nil}
+    end
   end
 
   attr :note, :string, required: true
