@@ -59,8 +59,11 @@ defmodule FactoryWeb.MCPTest do
     signed_at = System.system_time(:second) - 3 * 86_400
     old = &Phoenix.Token.sign(FactoryWeb.Endpoint, "factory run tools", &1, signed_at: signed_at)
 
-    assert Factory.RunTools.token?(old.(%{session: 1}))
-    assert length(Factory.RunTools.tools(old.(%{session: 1}))) == 3
+    # A coder's session: a planner's would get the plan tools too, and on a new test
+    # database the setup's planner can have any id, 1 included.
+    {:ok, coder} = Agents.create_agent(%{name: "Coder", kind: "coder"})
+    assert Factory.RunTools.token?(old.(%{session: coder.id}))
+    assert length(Factory.RunTools.tools(old.(%{session: coder.id}))) == 3
 
     refute Factory.RunTools.token?(
              old.(%{run_id: 1, step_id: "agent-1", tasks: true, verdict: false})

@@ -593,7 +593,26 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
     """
   end
 
+  # Scope and Refine are written for a plan of work to build. A review's plan and an
+  # investigation's are checks, so they're told how to read that first.
+  defp instructions(mode, job, agents)
+       when mode in [:scope, :refine] and job in ["review", "incident"],
+       do: checks_note(job) <> "\n\n" <> instructions(mode, agents)
+
   defp instructions(mode, _job, agents), do: instructions(mode, agents)
+
+  defp checks_note("review"),
+    do:
+      "This plan is a review: its tasks are checks of a change, not changes to build. Read " <>
+        "\"built\" as \"checked\" below, and judge whether the checks cover the change's " <>
+        "risks, in the order a careful reviewer would take them. Nothing in it may edit code."
+
+  defp checks_note("incident"),
+    do:
+      "This plan is an investigation: its tasks are checks that confirm or rule out causes, " <>
+        "not changes to build. Read \"built\" as \"checked\" below, and judge whether the " <>
+        "checks cover the likely causes, with what the person gave and the mode and track the " <>
+        "approach states. Nothing in it may edit code."
 
   defp instructions(nil, agents) do
     """

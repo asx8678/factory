@@ -262,13 +262,29 @@ defmodule Factory.Engine do
 
     case result do
       {:ok, {%Run{} = run, steps}} ->
-        walk(run, steps, Enum.reject(steps, &(&1.id in run.progress["done"])))
+        resume(run, steps, Enum.reject(steps, &(&1.id in run.progress["done"])))
 
       {:ok, {:invalid_workflow, reason}} ->
         {:error, reason}
 
       other ->
         other
+    end
+  end
+
+  # A run paused while it checked a step's tasks finishes those checks first, even when
+  # that step was the last to build: the tasks it hadn't checked don't stay unchecked.
+  defp resume(run, steps, rest) do
+    case run.progress["verifying"] && Enum.find(steps, &(&1.id == run.progress["verifying"])) do
+      nil ->
+        walk(run, steps, rest)
+
+      step ->
+        case verify_tasks(run, step, run.progress["outputs"][step.id] || "") do
+          {:again, run} -> walk(run, steps, [step | rest])
+          {:ok, run} -> walk(run, steps, rest)
+          :stopped -> nil
+        end
     end
   end
 
@@ -476,7 +492,22 @@ defmodule Factory.Engine do
            ),
          else: []
 
-    if todo == [], do: {:ok, run}, else: verify_each(run, step, output, todo)
+    if todo == [] do
+      {:ok, run}
+    else
+      # Marked while it checks, so a run paused meanwhile finishes the checks on resume.
+      {:ok, run} = Runs.update_run(run, %{progress: Map.put(run.progress, "verifying", step.id)})
+
+      case verify_each(run, step, output, todo) do
+        :stopped ->
+          :stopped
+
+        {outcome, run} ->
+          run = Runs.get_run(run.id)
+          {:ok, run} = Runs.update_run(run, %{progress: Map.delete(run.progress, "verifying")})
+          {outcome, run}
+      end
+    end
   end
 
   defp verify_each(run, step, output, todo) do

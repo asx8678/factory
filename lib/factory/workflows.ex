@@ -33,6 +33,22 @@ defmodule Factory.Workflows do
 
   def get(id), do: Repo.get(Workflow, id)
 
+  @doc """
+  Which workflows start their runs with each base spec, `%{spec_id => [workflow name]}`:
+  the names and spec ids only, for the Specs page.
+  """
+  def base_spec_use do
+    Repo.all(
+      from w in Workflow,
+        where: fragment("cardinality(?) > 0", w.base_spec_ids),
+        order_by: w.name,
+        select: {w.name, w.base_spec_ids}
+    )
+    |> Enum.reduce(%{}, fn {name, ids}, acc ->
+      Enum.reduce(ids, acc, fn id, acc -> Map.update(acc, id, [name], &(&1 ++ [name])) end)
+    end)
+  end
+
   @doc "The kind of job a run on this workflow is (see `Factory.Runs.Types`): its key, or \"other\"."
   def kind(%Workflow{key: key}) when key in @standard, do: key
   def kind(%Workflow{}), do: "other"

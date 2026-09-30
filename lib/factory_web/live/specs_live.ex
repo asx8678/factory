@@ -565,11 +565,7 @@ defmodule FactoryWeb.SpecsLive do
   defp review_cell(assigns), do: ~H[<span class="text-base-content/40">–</span>]
 
   # The workflows each base spec is in: `%{spec id => [workflow name]}`.
-  defp used_in do
-    for w <- Factory.Workflows.list(), id <- w.base_spec_ids, reduce: %{} do
-      acc -> Map.update(acc, id, [w.name], &(&1 ++ [w.name]))
-    end
-  end
+  defp used_in, do: Factory.Workflows.base_spec_use()
 
   # A file dropped in the base spec window becomes its text, and names it if unnamed.
   defp base_file(:base_file, entry, socket) do
