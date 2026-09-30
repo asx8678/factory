@@ -76,16 +76,35 @@ Verified on Kiro 2.26 (30 Sep 2026): after a run finished, the planner added a t
 `get_plan` + `add_tasks` and `/run` built only that task; Spec page suggestions arrived
 3 at a time (20 in 40 s).
 
+## Asking the person mid-turn (MCP elicitation)
+
+- Kiro 2.26 forwards a tool's `elicitation/create` to its ACP client as
+  `_kiro/mcp/elicitation` (`{sessionId, toolCallId, elicitation: {mode: "form",
+  message, requestedSchema}}`) and takes `{action: "accept" | "decline" | "cancel",
+  content}` back; it waited at least 150 s for an answer. It declares elicitation
+  (form and url) when it connects to an MCP server.
+- `Factory.Kiro.Session` posts the question to the run's chat as a form from its schema
+  and waits; the chat's answer goes back through `Factory.Kiro.answer_elicitation/4`.
+  Open questions are cancelled when the turn ends. `Factory.Kiro.Ask` cancels them.
+- `FactoryWeb.MCP` can elicit too: a tool returning `{:elicit, request, then}` gets an
+  SSE answer carrying `elicitation/create`; the answer Kiro posts back is routed to it
+  through `Factory.Kiro.Registry`. The planner's `ask_user` in a session turn uses it,
+  falling back to questions after the turn.
+- Only form mode is handled; a `url` elicitation is cancelled.
+
+## Also done
+
+- Drafts plan on the planner's own session (`Factory.ChatPlanner`), with the generation
+  guard in the plan tools and the spec files sent as a brief; a one-off `Kiro.ask` when
+  that session is busy in another folder. On Kiro 2.26 a follow-up cost 0.20 credits,
+  against 0.35 one-off.
+- The message box hint follows the agent that plans the run.
+- Two intermittent test failures fixed: tests clearing the `:context` settings, and the
+  unboxed spec concurrency test running beside async tests.
+
 ## Open
 
-1. **MCP elicitation** for mid-turn questions is untried: Kiro supports it, but it holds
-   the turn open while the person answers. The chat's question choices cover the
-   common case.
-2. **Draft planning still uses a fresh `Kiro.ask`** per message (it's what guards against
-   a replaced request with `planner_generation`). The planner's session now has the
-   tools, so drafts could move onto it for context and cost; the generation guard would
-   have to move with it.
-3. **The chat's message box** says "Describe a change…" only for planner-kind agents;
-   an Investigator or Auditor that plans a draft shows "Message Investigator…".
-4. `test/factory/runs_test.exs` "pruning removes stale empty chats" failed once in a
-   full run and not in eight others; cause not found.
+- A Kiro session's MCP tools load after `session/new` answers; a message sent at once
+  may reach the model before they're listed. Factory's first messages have worked in
+  practice (the agent reads files first), but nothing waits for the tools.
+- URL-mode elicitation (open a link, then carry on) isn't handled.
