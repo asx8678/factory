@@ -3,7 +3,7 @@ defmodule Factory.Workflows do
   Named workflows: each a set of agents and the hand-offs between them.
 
   The standard workflows match the jobs on the start screen (build a feature, fix a
-  bug, resolve an issue, update dependencies). They're created from
+  bug, resolve an issue, update dependencies, review a pull request). They're created from
   `Factory.Runs.Types` when first needed, can be changed like any other, and can be
   restored to their default. Custom workflows are made new or cloned.
 
@@ -15,7 +15,7 @@ defmodule Factory.Workflows do
   alias Factory.Agents.{Agent, Link, Workflow}
   alias Factory.Runs.{Run, Types}
 
-  @standard ~w(feature bug issue deps)
+  @standard ~w(feature bug issue deps review)
 
   @doc "The run types that have a standard workflow."
   def standard_keys, do: @standard
@@ -385,7 +385,8 @@ defmodule Factory.Workflows do
     :ok
   end
 
-  defp prompt(step), do: FactoryWeb.AgentKinds.template(step["kind"], step["name"])
+  defp prompt(step),
+    do: step["prompt"] || FactoryWeb.AgentKinds.template(step["kind"], step["name"])
 
   defp stop_sessions(%Workflow{id: id}) do
     for a <- Agents.list_agents(id), do: Kiro.stop(a.id)

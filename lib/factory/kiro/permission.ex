@@ -59,6 +59,12 @@ defmodule Factory.Kiro.Permission do
   @looking ~w(ls cat head tail wc grep egrep fgrep rg ag tree pwd file stat du which echo
               sort uniq cut diff basename dirname realpath readlink date env printenv)
   @git ~w(status log diff show ls-files ls-tree grep blame rev-parse describe shortlog)
+  @gh %{
+    "pr" => ~w(view diff list checks status),
+    "issue" => ~w(view list status),
+    "repo" => ~w(view),
+    "run" => ~w(view list)
+  }
   @tests [
     ~w(mix test),
     ~w(npm test),
@@ -74,7 +80,8 @@ defmodule Factory.Kiro.Permission do
 
   @doc """
   Whether a shell command only looks: it reads files or the project's history, lists or
-  searches, prints a version, or runs the tests. A planner may run these while it plans.
+  searches, prints a version, runs the tests, or reads a pull request with `gh`. A
+  planner may run these while it plans, and so may an agent that only reads and checks.
   Anything that could install, write, move, delete, commit or run other code isn't one,
   and nor is an unknown command (nil). Commands may be chained or piped when every part
   only looks; redirecting into a file and substitution (`$(…)`, backticks) never do.
@@ -108,6 +115,9 @@ defmodule Factory.Kiro.Permission do
   defp looking_words?(["cd" | _]), do: true
   defp looking_words?(["git", sub | _] = words), do: sub in @git or git_branch_list?(words)
 
+  # GitHub's CLI, reading only: never merge, close, comment, review or edit.
+  defp looking_words?(["gh", area, action | _]), do: action in Map.get(@gh, area, [])
+
   defp looking_words?(["find" | rest]),
     do: not Enum.any?(rest, &(&1 in ~w(-delete -exec -execdir -ok -fprint)))
 
@@ -119,9 +129,17 @@ defmodule Factory.Kiro.Permission do
   defp looking_words?([first | _] = words),
     do: Path.basename(first) in @looking or Enum.any?(@tests, &List.starts_with?(words, &1))
 
-  # `git branch` only when it lists branches.
-  defp git_branch_list?(["git", "branch" | args]),
-    do: Enum.all?(args, &(&1 in ~w(-a -r -v -vv --list --all --remotes --show-current)))
+  # `git branch` only when it lists branches: options only, none that creates, renames,
+  # copies, deletes or moves one (a bare name would create it).
+  defp git_branch_list?(["git", "branch" | args]) do
+    changes =
+      ~w(-d -D -m -M -c -C -f -t -u --delete --move --copy --force --track --set-upstream-to --unset-upstream --edit-description)
+
+    Enum.all?(args, fn arg ->
+      String.starts_with?(arg, "-") and
+        not Enum.any?(changes, &(arg == &1 or String.starts_with?(arg, &1 <> "=")))
+    end)
+  end
 
   defp git_branch_list?(_words), do: false
 

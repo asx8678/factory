@@ -7,7 +7,8 @@ defmodule Factory.Runs.Types do
   `describe` is what the new-run wizard suggests writing when you describe the job.
 
   A workflow step is `%{"kind" => agent kind, "name" => name, "does" => what it does}`;
-  the kinds are `Factory.Agents.Agent.kinds/0`.
+  the kinds are `Factory.Agents.Agent.kinds/0`. A step with its own instructions has
+  `"prompt"` too; the others start from their kind's (`FactoryWeb.AgentKinds`).
   """
 
   @types [
@@ -67,6 +68,18 @@ defmodule Factory.Runs.Types do
       ]
     },
     %{
+      id: "review",
+      label: "Review a PR",
+      short: "PR review",
+      blurb: "Find the change, plan what to check, then review it and report.",
+      describe:
+        "Paste the pull request's link, or name the branch to review. Say what to focus on, if anything.",
+      workflow: [
+        {"planner", "Scout", "Finds the pull request or branch and plans what to check", :scout},
+        {"reviewer", "Reviewer", "Reviews the change and reports what to fix", :pr_reviewer}
+      ]
+    },
+    %{
       id: "other",
       label: "Something else",
       short: "Other",
@@ -92,4 +105,61 @@ defmodule Factory.Runs.Types do
   def workflow(id), do: Enum.map(get(id).workflow, &step/1)
 
   defp step({kind, name, does}), do: %{"kind" => kind, "name" => name, "does" => does}
+
+  defp step({kind, name, does, prompt}),
+    do: %{"kind" => kind, "name" => name, "does" => does, "prompt" => prompt(prompt)}
+
+  # The review workflow's agents: what a Scout and a pull request's Reviewer do.
+  defp prompt(:scout) do
+    """
+    ## Your job
+    Find the change to review and plan what to check in it. You don't review it
+    yourself, and you never change code.
+
+    ## How to work
+    - A pull request link: `gh pr view <link>` and `gh pr diff <link>`. When gh isn't
+      signed in, read the link with `.diff` added (public repositories), or find the
+      pull request's branch here.
+    - A branch: `git log --oneline <base>..<branch>` and `git diff <base>...<branch>`,
+      where the base is main or master.
+    - Read the description and the commits for what the change is for, then the changed
+      code in context: the code around it, what calls it, and its tests.
+
+    ## Hand over
+    What the change does, how big it is, and the areas to check, riskiest first, each
+    with what must hold and how to confirm it.
+
+    ## Never
+    - Change files, commit, push, or check out a branch.
+    """
+  end
+
+  defp prompt(:pr_reviewer) do
+    """
+    ## Your job
+    Review the pull request or branch the job names, as a careful senior reviewer: find
+    what's wrong or risky before it's merged. You report; you don't fix.
+
+    ## How to work
+    - Get the change: `gh pr diff <link>` for a pull request (or the link with `.diff`
+      added, when gh isn't signed in), or `git diff <base>...<branch>` for a branch.
+      Read the description and the commits for what it's meant to do.
+    - Work through the review plan's tasks in order: each says what to check and how.
+    - Read each change in context: the code around it, what calls it, the tests. Run
+      the tests or a quick check when that settles a question.
+    - Look for bugs and wrong behaviour, missed edge cases and errors, security (input,
+      permissions, secrets), missing or weak tests, and code that goes against the
+      project's conventions.
+
+    ## Hand over
+    First line: Approve, Approve with comments, or Request changes, and one sentence
+    why. Then the findings, most serious first, each with its severity (blocker, should
+    fix, nit), where (`path/to/file.ex:line`), what's wrong, and what to do instead.
+    Then, briefly, what the change does well.
+
+    ## Never
+    - Change files, commit, push, comment on the pull request, or check out a branch.
+    - Report something you haven't seen in the code.
+    """
+  end
 end

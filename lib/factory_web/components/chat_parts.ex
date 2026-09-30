@@ -10,18 +10,32 @@ defmodule FactoryWeb.ChatParts do
 
   # Before the run starts, a message to the agent that plans it (or to Factory, which
   # passes it on) is planned into tasks: the box says so.
-  def placeholder(agent, run, planner \\ nil)
+  def placeholder(agent, run, planner \\ nil, job \\ nil)
 
-  def placeholder(nil, run, planner) do
-    if planner && settable?(run),
-      do: "Describe a change for #{planner.name} to plan, or type / for commands",
-      else: "Message the factory, or type / for commands"
+  def placeholder(nil, run, planner, job) do
+    cond do
+      planner && settable?(run) && job == "review" ->
+        "Paste a pull request's link or name a branch for #{planner.name}, or type / for commands"
+
+      planner && settable?(run) ->
+        "Describe a change for #{planner.name} to plan, or type / for commands"
+
+      true ->
+        "Message the factory, or type / for commands"
+    end
   end
 
-  def placeholder(agent, run, planner) do
-    if planner && planner.id == agent.id && settable?(run),
-      do: "Describe a change, e.g. add an export button to the invoices page…",
-      else: "Message #{agent.name}…"
+  def placeholder(agent, run, planner, job) do
+    cond do
+      planner && planner.id == agent.id && settable?(run) && job == "review" ->
+        "Paste a pull request's link, or name the branch to review…"
+
+      planner && planner.id == agent.id && settable?(run) ->
+        "Describe a change, e.g. add an export button to the invoices page…"
+
+      true ->
+        "Message #{agent.name}…"
+    end
   end
 
   # The agent a message goes to, or nil for the factory.
@@ -356,9 +370,163 @@ defmodule FactoryWeb.ChatParts do
   attr :chain, :list, default: []
   attr :last_run, :any, default: nil
 
+  attr :scout, :any,
+    default: nil,
+    doc: "what there is to review in the folder (Factory.Scout): nil, :loading or a result"
+
   # A new chat: three quick steps, then describe the change and the planner plans it.
   # Set up (a folder is chosen): what the run is, in a small table you can change in
   # place, and the two ways to plan it. Left-aligned with the message box it leads to.
+  # Review a PR, set up: a pull request's link, or a branch from the folder, the one
+  # it's on first. Each starts the review as a message to the Scout.
+  def greeting(%{focus: nil, dir_ok: true, workflow: %{key: "review"}} = assigns) do
+    assigns = assign(assigns, picks: review_picks(assigns.scout))
+
+    ~H"""
+    <div id="chat-review" class="relative w-full max-w-3xl px-1">
+      <p class="text-xs font-medium text-base-content/45">
+        Review · {Calendar.strftime(Date.utc_today(), "%-d %b")}
+      </p>
+      <h1 class="mt-1 text-2xl font-semibold leading-tight tracking-tight">
+        What should we review in <span class="text-primary">{Path.basename(@dir)}</span>?
+      </h1>
+      <p class="mt-2 text-base-content/60">
+        Paste a pull request's link, or pick a branch. The Scout finds the change and plans
+        what to check; the Reviewer then reports what to fix.
+      </p>
+
+      <form
+        id="review-pr-form"
+        phx-submit="review_pr"
+        class="mt-5 flex items-center gap-2 rounded-xl border border-base-300 bg-base-100 py-1.5 pl-3 pr-1.5 transition-colors focus-within:border-primary/50"
+      >
+        <.icon name="hero-link-mini" class="size-4 shrink-0 text-base-content/45" />
+        <input
+          name="url"
+          autocomplete="off"
+          placeholder="https://github.com/owner/repo/pull/123"
+          class="h-7 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-base-content/35"
+        />
+        <button class="btn btn-primary btn-sm">Review</button>
+      </form>
+
+      <section id="review-scout" class="mt-3 rounded-xl border border-base-300">
+        <header class="flex items-center gap-2 border-b border-base-content/10 px-3.5 py-2">
+          <.icon name="hero-code-bracket-square-mini" class="size-4 shrink-0 text-base-content/50" />
+          <h2 class="min-w-0 flex-1 truncate text-xs font-medium text-base-content/70">
+            <%= case @scout do %>
+              <% {:ok, %{current: current, base: base}} when is_binary(current) -> %>
+                On <span class="font-mono text-base-content">{current}</span>
+                <span :if={base && base != current} class="font-normal text-base-content/50">
+                  · compared with {base}
+                </span>
+              <% {:ok, _} -> %>
+                Branches here
+              <% _ -> %>
+                Worth reviewing here
+            <% end %>
+          </h2>
+          <button
+            id="scout-again"
+            type="button"
+            phx-click="scout_again"
+            title="Look at the branches again"
+            class="grid size-6 shrink-0 place-items-center rounded-md text-base-content/45 hover:bg-base-content/[0.06] hover:text-base-content"
+          >
+            <.icon
+              name="hero-arrow-path-micro"
+              class={["size-3.5", @scout == :loading && "animate-spin"]}
+            />
+          </button>
+        </header>
+
+        <p :if={@scout == :loading} class="px-3.5 py-3 text-[13px] text-base-content/55">
+          Looking at the branches…
+        </p>
+        <p :if={match?({:error, _}, @scout)} class="px-3.5 py-3 text-[13px] text-base-content/60">
+          {elem(@scout, 1)} Paste a pull request's link above instead.
+        </p>
+
+        <ol :if={@picks != []} class="divide-y divide-base-content/[0.07]">
+          <li :for={pick <- @picks} class="flex items-center gap-3 px-3.5 py-2.5">
+            <.icon
+              name={
+                case pick.kind do
+                  :pr -> "hero-arrow-top-right-on-square-micro"
+                  :changes -> "hero-pencil-square-micro"
+                  :recent -> "hero-clock-micro"
+                  _ -> "hero-arrows-right-left-micro"
+                end
+              }
+              class="size-3.5 shrink-0 text-base-content/40"
+            />
+            <div class="min-w-0 flex-1">
+              <p class="flex min-w-0 items-center gap-1.5 text-sm">
+                <span class={["truncate", pick.kind == :branch && "font-mono text-[13px]"]}>
+                  {pick.label}
+                </span>
+                <span
+                  :if={pick[:current]}
+                  class="shrink-0 rounded bg-primary/10 px-1.5 text-[10.5px] font-medium text-primary"
+                >
+                  checked out
+                </span>
+                <span :if={pick[:ahead]} class="shrink-0 text-xs text-base-content/50">
+                  {pick.ahead} ahead
+                </span>
+              </p>
+              <p class="truncate text-xs text-base-content/50">
+                {pick.detail}<span :if={pick.at}> · {Layouts.ago(pick.at)}</span>
+              </p>
+            </div>
+            <button
+              :if={pick.kind == :branch}
+              type="button"
+              phx-click="review_branch"
+              phx-value-branch={pick.value}
+              class="btn btn-ghost btn-sm shrink-0"
+            >
+              Review
+            </button>
+            <button
+              :if={pick.kind == :pr}
+              type="button"
+              phx-click="review_pr"
+              phx-value-url={pick.value}
+              class="btn btn-ghost btn-sm shrink-0"
+            >
+              Review
+            </button>
+            <button
+              :if={pick.kind in [:changes, :recent]}
+              type="button"
+              phx-click="review_local"
+              phx-value-what={pick.kind}
+              class="btn btn-ghost btn-sm shrink-0"
+            >
+              Review
+            </button>
+          </li>
+        </ol>
+
+        <p
+          :if={match?({:ok, _}, @scout) and @picks == []}
+          class="px-3.5 py-3 text-[13px] text-base-content/60"
+        >
+          Nothing to review here yet: no commits or changes. Paste a pull request's link above.
+        </p>
+
+        <p
+          :if={scout_notes(@scout) != []}
+          class="border-t border-base-content/10 px-3.5 py-2 text-xs text-base-content/50"
+        >
+          {Enum.join(scout_notes(@scout), " ")}
+        </p>
+      </section>
+    </div>
+    """
+  end
+
   def greeting(%{focus: nil, dir_ok: true} = assigns) do
     ~H"""
     <div id="chat-ready" class="relative w-full max-w-3xl px-1">
@@ -414,7 +582,9 @@ defmodule FactoryWeb.ChatParts do
     ~H"""
     <div id="chat-start" class="mb-8 w-full max-w-xl">
       <h1 class="text-center text-2xl font-semibold tracking-tight">
-        What should we build?
+        {if Workflows.kind(@workflow) == "review",
+          do: "What should we review?",
+          else: "What should we build?"}
       </h1>
       <p class="mt-3 text-center text-base-content/60">
         Describe the change and {if is_map(@to), do: @to.name, else: "the planner"} turns it into tasks.
@@ -1151,6 +1321,7 @@ defmodule FactoryWeb.ChatParts do
     default: nil,
     doc: "the agent that plans the run (Factory.Chat.planner_for/1)"
 
+  attr :job, :string, default: nil, doc: "the workflow's kind (Factory.Workflows.kind/1)"
   attr :glow, :boolean, default: false
 
   # Rounded card: attachments, the message, then a toolbar with attach, recipient and send.
@@ -1230,7 +1401,7 @@ defmodule FactoryWeb.ChatParts do
           phx-hook="ChatInput"
           phx-debounce="100"
           rows="1"
-          placeholder={placeholder(recipient(@focus, @to), @run, @planner)}
+          placeholder={placeholder(recipient(@focus, @to), @run, @planner, @job)}
           class="block max-h-[240px] min-h-[40px] w-full resize-none bg-transparent px-4 pb-1 pt-3 text-[14px] leading-6 outline-none placeholder:text-base-content/40 focus-visible:outline-none"
           aria-label="Message"
         ></textarea>
@@ -1372,6 +1543,72 @@ defmodule FactoryWeb.ChatParts do
   }
 
   defp examples(workflow), do: Map.get(@examples, Workflows.kind(workflow), [])
+
+  # What the scout found worth reviewing: the branch that's checked out first (when it
+  # isn't the base), then the open pull requests, then the other branches with work
+  # beyond the base, latest first.
+  defp review_picks({:ok, scout}) do
+    branch = fn b ->
+      %{
+        kind: :branch,
+        value: b.name,
+        label: b.name,
+        current: b.current,
+        ahead: b.ahead,
+        detail: b.subject,
+        at: b.at
+      }
+    end
+
+    worth = Enum.filter(scout.branches, &(&1.name != scout.base and (&1.ahead || 1) > 0))
+    {current, others} = Enum.split_with(worth, & &1.current)
+
+    prs =
+      for p <- scout.prs || [] do
+        %{kind: :pr, value: p.url, label: "##{p.number} #{p.title}", detail: p.branch, at: p.at}
+      end
+
+    changes =
+      if scout.dirty > 0,
+        do: [
+          %{
+            kind: :changes,
+            value: "",
+            label: "Uncommitted changes",
+            detail:
+              "#{scout.dirty} #{if scout.dirty == 1, do: "file", else: "files"} changed on #{scout.current || "this branch"}",
+            at: nil
+          }
+        ],
+        else: []
+
+    # On the base, or a branch with nothing beyond it: its latest commits are the work.
+    recent =
+      case scout.recent do
+        [latest | _] = commits when current == [] ->
+          [
+            %{
+              kind: :recent,
+              value: "#{length(commits)}",
+              label: "Latest commits on #{scout.current || "this branch"}",
+              detail: "#{length(commits)} commits, the latest “#{latest.subject}”",
+              at: latest.at
+            }
+          ]
+
+        _ ->
+          []
+      end
+
+    Enum.map(current, branch) ++ changes ++ prs ++ recent ++ Enum.map(others, branch)
+  end
+
+  defp review_picks(_scout), do: []
+
+  # Why pull requests aren't listed, when they aren't.
+  defp scout_notes({:ok, %{prs_note: note}}) when is_binary(note), do: [note]
+
+  defp scout_notes(_scout), do: []
 
   # The run worked on last, other than this one: one that has started or has tasks.
   def last_run(runs, current) do

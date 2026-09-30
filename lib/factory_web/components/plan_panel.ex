@@ -34,6 +34,10 @@ defmodule FactoryWeb.PlanPanel do
 
   attr :spec_hint, :boolean, default: false
 
+  attr :job, :string,
+    default: nil,
+    doc: "the workflow's kind: a review's plan is started, not implemented"
+
   attr :before, :list,
     default: nil,
     doc:
@@ -416,7 +420,9 @@ defmodule FactoryWeb.PlanPanel do
       </p>
 
       <footer class="flex flex-wrap items-center gap-2 border-t border-base-content/10 px-3.5 py-2.5">
-        <span class="mr-auto text-sm">Implement this plan?</span>
+        <span class="mr-auto text-sm">
+          {if @job == "review", do: "Start the review?", else: "Implement this plan?"}
+        </span>
         <button
           type="button"
           phx-click={JS.focus(to: "#chat-input")}
@@ -431,7 +437,8 @@ defmodule FactoryWeb.PlanPanel do
           phx-value-action="start"
           class="btn btn-primary btn-sm"
         >
-          <.icon name="hero-play-micro" class="size-3.5" /> Yes, implement
+          <.icon name="hero-play-micro" class="size-3.5" />
+          {if @job == "review", do: "Yes, review", else: "Yes, implement"}
         </button>
       </footer>
     </section>

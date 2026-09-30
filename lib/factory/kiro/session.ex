@@ -475,10 +475,12 @@ defmodule Factory.Kiro.Session do
 
     kind = Kiro.Permission.kind(params, known)
 
-    # While it plans, a planner may run commands that only look (git log, a search,
-    # the tests): it reads how the project works before it plans.
+    # A planner while it plans, and an agent that only reads and checks (a reviewer,
+    # a researcher), may run commands that only look: git log and diff, a search, the
+    # tests, a pull request's diff.
     looking? =
-      kind == "execute" and state.turn != nil and state.turn.planning != nil and
+      kind == "execute" and state.turn != nil and
+        (state.turn.planning != nil or Agent.read_only?(state.turn.agent)) and
         Kiro.Permission.looking?(Kiro.Permission.command(params, commands(state.turn)))
 
     wanted =

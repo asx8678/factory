@@ -386,10 +386,10 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
   `chat_prompt/5` in two parts for a planner's own Kiro session: `{brief, ask}`, the
   spec files and the rest. The session sends the brief only when it hasn't yet.
   """
-  def chat_prompt_parts(name, requests, files, current, action \\ nil),
+  def chat_prompt_parts(name, requests, files, current, action \\ nil, job \\ nil),
     do:
       {spec_text(files),
-       name |> chat_prompt(requests, [], current, action) |> String.trim_trailing()}
+       name |> chat_prompt(requests, [], current, action, job) |> String.trim_trailing()}
 
   @doc """
   Prompt for planning in a chat: the planner reads the project, rethinks how the
@@ -403,8 +403,12 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
   nothing; `%{mode: :refine, thin: [line], findings: text | nil}` reworks the plan,
   acting on a scope check's `findings`. `thin` is what Factory's own rules found
   missing in tasks (`Factory.Specs.TaskCheck`), one line per task.
+
+  `job` is the kind of workflow the chat plans for (`Factory.Workflows.kind/1`): for
+  "review", the planner (the Scout) finds a pull request or branch and plans what to
+  check in it, not changes to make.
   """
-  def chat_prompt(name, requests, files, current, action \\ nil) do
+  def chat_prompt(name, requests, files, current, action \\ nil, job \\ nil) do
     asked = requests |> Enum.with_index(1) |> Enum.map_join("\n\n", fn {r, i} -> "#{i}. #{r}" end)
 
     current =
@@ -416,10 +420,9 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
 
     """
     <task-planning step="#{step(mode)}">
-    You are #{name}, the planner in a software factory. The person is chatting with you \
-    about a change to the project in the current folder. #{looking_rule()}
+    You are #{name}, the planner in a software factory. #{about(job)} #{looking_rule()}
 
-    #{String.trim(instructions(mode))}
+    #{String.trim(instructions(mode, job))}
 
     The plan so far:
     #{current}
@@ -437,9 +440,60 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
     """
   end
 
+  defp about("review"),
+    do:
+      "The person wants a change to the project in the current folder reviewed: a pull " <>
+        "request, or a branch."
+
+  defp about(_job),
+    do: "The person is chatting with you about a change to the project in the current folder."
+
   defp step(nil), do: "chat"
   defp step(:scope), do: "scope-check"
   defp step(:refine), do: "refine"
+
+  defp instructions(nil, "review") do
+    """
+    Plan the review the way a careful senior reviewer would, in this order:
+
+    1. Find the change. The latest message names it:
+       - A pull request link: `gh pr view <link>` for its title, description, base and \
+    branch, and `gh pr diff <link>` for the change. When gh isn't signed in, read the \
+    link with `.diff` added (public repositories), or find the pull request's branch \
+    here with `git branch -a`.
+       - A branch: `git log --oneline <base>..<branch>` and `git diff --stat \
+    <base>...<branch>`, then `git diff <base>...<branch>`, where the base is main or \
+    master.
+       - Uncommitted changes: `git status` and `git diff --stat`, then `git diff`.
+       - The latest commits on a branch: `git log --oneline -<n>` and `git diff \
+    <oldest>~1..<newest>`.
+       - Neither, or you can't find it: call ask_user, offering the branches with the \
+    latest work (`git branch --sort=-committerdate`) and asking for a link.
+    2. Work out what it's for: the description, the commit messages, any issue it names.
+    3. Read the changed code in context: the code around each change, what calls it, \
+    and the tests that cover it, and the project's own rules (README, AGENTS.md, \
+    CLAUDE.md).
+    4. Write the review plan with the factory tools: create_plan with a one-sentence \
+    summary of what the change does and the approach (base and branch, how many files, \
+    and where the risk is), then add_tasks, one task per area to check, riskiest \
+    first. You plan checks, not changes: nothing in the plan edits code.
+       - title: what to check, e.g. "Check the token refresh in lib/auth/session.ex".
+       - objective: what must hold for that part to be right.
+       - details: what to look at, file by file, and what could be wrong there.
+       - verify: how the reviewer confirms it: a test to run, a case to trace through \
+    the code, a command and what it must show.
+       - model: #{model_guide()}
+       Cover correctness, edge cases and errors, security (input, permissions, secrets), \
+    tests for the change, and fit with the project's conventions. A small change is one \
+    or two tasks.
+    5. Check it: call get_plan and read it as the reviewer who'll follow it.
+
+    End with a short reply to the person, 2 to 4 sentences: what the change is, how big, \
+    and where you'd look hardest. Don't list the tasks: Factory shows them.
+    """
+  end
+
+  defp instructions(mode, _job), do: instructions(mode)
 
   defp instructions(nil) do
     """
