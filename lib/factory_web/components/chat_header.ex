@@ -28,7 +28,7 @@ defmodule FactoryWeb.ChatHeader do
           do: "border-success/40 bg-success/[0.07] hover:border-success/70",
           else: "border-error/50 bg-error/[0.08] text-error hover:border-error"
         ),
-        @warn && !@ok && "animate-pulse ring-2 ring-error/40"
+        @warn && !@ok && "animate-pulse ring-2 ring-error/40 motion-reduce:animate-none"
       ]}
     >
       <span class={["size-2 shrink-0 rounded-full", if(@ok, do: "bg-success", else: "bg-error")]}></span>
@@ -167,6 +167,7 @@ defmodule FactoryWeb.ChatHeader do
         id="agent-all"
         patch={chat_path(@run, nil)}
         title="Show every agent's messages"
+        aria-label="Show every agent's messages"
         class="mr-0.5 grid size-5 shrink-0 place-items-center rounded text-base-content/50 hover:bg-base-content/[0.06] hover:text-base-content"
       >
         <.icon name="hero-x-mark-micro" class="size-3.5" />
@@ -190,6 +191,7 @@ defmodule FactoryWeb.ChatHeader do
           ]}
         >
           <span class={["size-1.5 shrink-0 rounded-full", Layouts.status_dot(@states[step.id])]}></span>
+          <span class="sr-only">{Layouts.status_dot_label(@states[step.id])}:</span>
           {step.name}
           <span
             :if={FactoryWeb.Usage.level(step.agent.usage["context_pct"]) in ["mid", "high"]}

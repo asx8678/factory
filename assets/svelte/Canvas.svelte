@@ -10,7 +10,8 @@
     ConnectionMode,
     useSvelteFlow,
   } from "@xyflow/svelte"
-  import { setContext } from "svelte"
+  import { onDestroy, setContext } from "svelte"
+  import { menuKeys } from "../js/menu_keys.js"
   import AgentNode from "./AgentNode.svelte"
   import SourcesCard from "./SourcesCard.svelte"
   import SourceNode from "./SourceNode.svelte"
@@ -112,6 +113,9 @@
   let edges = $state.raw(toEdges(graph))
   let container
   let reconnecting = null
+  // Fits the view a moment after Arrange, once the cards have moved.
+  let fitTimer
+  onDestroy(() => clearTimeout(fitTimer))
 
   // Preserve local selection, measurements and positions while dragging.
   export function setGraph(g) {
@@ -168,7 +172,8 @@
     const at = (n) => ({ id: n.id, x: n.position.x, y: n.position.y })
     push("move", { nodes: placed.map(at) })
     if (stacked.length) push("move_sources", { nodes: stacked.map(at) })
-    setTimeout(() => fitView({ padding: 0.3, maxZoom: 1.1, duration: 300 }), 50)
+    clearTimeout(fitTimer)
+    fitTimer = setTimeout(() => fitView({ padding: 0.3, maxZoom: 1.1, duration: 300 }), 50)
   }
 
   // A source (either end) attaches to an agent; two agents hand off; two sources don't connect.
@@ -350,8 +355,10 @@
       class="absolute z-50 w-56 rounded-xl border border-base-content/10 bg-surface p-1 shadow-xl"
       style={`left: ${picker.x}px; top: ${picker.y}px`}
       role="menu"
+      aria-labelledby="attach-picker-title"
+      {@attach menuKeys(() => (picker = null))}
     >
-      <p class="px-2.5 pb-1 pt-1.5 text-[11px] text-base-content/55">Attach “{picker.name}” to</p>
+      <p id="attach-picker-title" class="px-2.5 pb-1 pt-1.5 text-[11px] text-base-content/55">Attach “{picker.name}” to</p>
       {#each picker.agents as a (a.id)}
         <button
           type="button"
@@ -367,6 +374,7 @@
       {/each}
       <button
         type="button"
+        role="menuitem"
         class="mt-0.5 w-full rounded-lg px-2.5 py-1 text-left text-xs text-base-content/50 hover:text-base-content"
         onclick={() => (picker = null)}
       >

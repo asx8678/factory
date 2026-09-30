@@ -1321,6 +1321,9 @@ defmodule FactoryWeb.ChatLive do
               id="messages"
               phx-update="stream"
               phx-hook="ChatScroll"
+              role="log"
+              aria-live="polite"
+              aria-relevant="additions"
               data-history={to_string(@history?)}
               class="mx-auto flex max-w-3xl flex-col gap-5 px-5 pt-6"
             >
@@ -1350,7 +1353,14 @@ defmodule FactoryWeb.ChatLive do
                 spec_hint={@plan_spec_hint?}
               />
             </div>
-            <div :if={@live != []} class="mx-auto flex max-w-3xl flex-col gap-5 px-5 pt-5">
+            <div
+              :if={@live != []}
+              id="live-replies"
+              role="log"
+              aria-live="polite"
+              aria-relevant="additions"
+              class="mx-auto flex max-w-3xl flex-col gap-5 px-5 pt-5"
+            >
               <.agent_reply :for={s <- @live} name={s.name} body={s.text} live />
             </div>
             <%!-- Room to scroll the last message above the floating message box. --%>

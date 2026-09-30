@@ -46,13 +46,16 @@
       <div class="truncate text-[10px] opacity-55">Action</div>
     </div>
     {#if data.status === "running"}
-      <span class="loading loading-spinner loading-xs text-info"></span>
+      <span class="loading loading-spinner loading-xs text-info" role="status" aria-label="Running"></span>
     {:else if data.status === "error"}
       <span class="size-1.5 shrink-0 rounded-full bg-error" title={data.activity}></span>
+      <span class="sr-only">Failed</span>
     {:else if data.status === "done"}
       <span class="hero-check-micro size-3.5 text-success" title={data.activity}></span>
+      <span class="sr-only">Done</span>
     {:else if missing.length}
       <span class="size-1.5 shrink-0 rounded-full bg-warning"></span>
+      <span class="sr-only">Needs setting up</span>
     {/if}
   </div>
 

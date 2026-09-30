@@ -275,8 +275,16 @@ body {
 .edge-prompt-chip { max-width: 11rem; height: 1.5rem; padding: 0 0.55rem; border-radius: 999px; font-size: 11px; font-weight: 500; }
 .edge-prompt-add:hover, .edge-prompt-chip:hover { filter: brightness(1.08); }
 .edge-prompt-add:focus-visible, .edge-prompt-chip:focus-visible { outline: 2px solid var(--color-info); outline-offset: 3px; }
+/* The + stays in the page for the keyboard; quiet until the arrow is hovered or selected. */
+.edge-prompt-add.is-quiet { opacity: 0; pointer-events: none; animation: none; }
+.edge-prompt-add.is-quiet:focus-visible { opacity: 1; }
 @keyframes edge-pop { from { transform: scale(0.6); opacity: 0; } }
-@media (prefers-reduced-motion: reduce) { .edge-prompt-add { animation: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .edge-prompt-add { animation: none; }
+  /* Moving dashes on arrows out of a busy agent, and daisyUI's spinners, stand still. */
+  .svelte-flow__edge.animated path { animation: none; }
+  .loading { animation: none; }
+}
 
 /* A key to press, e.g. the number that picks a workflow. */
 .launcher-kbd {

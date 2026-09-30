@@ -41,10 +41,15 @@ defmodule FactoryWeb.SuggestTasks do
       role="dialog"
       aria-modal="true"
       aria-labelledby="suggest-title"
+      phx-mounted={JS.push_focus() |> JS.focus_first(to: "#suggest-dialog")}
+      phx-remove={JS.pop_focus()}
     >
       <div class="absolute inset-0" phx-click="close_suggest" aria-hidden="true"></div>
 
-      <div class="relative flex max-h-full min-h-[min(34rem,100%)] w-full max-w-4xl flex-col overflow-hidden rounded-xl border border-base-300 bg-base-100 shadow-2xl">
+      <.focus_wrap
+        id="suggest-dialog"
+        class="relative flex max-h-full min-h-[min(34rem,100%)] w-full max-w-4xl flex-col overflow-hidden rounded-xl border border-base-300 bg-base-100 shadow-2xl"
+      >
         <header class="flex flex-wrap items-center gap-x-6 gap-y-3 border-b border-base-300 px-5 py-4 sm:px-6">
           <h2 id="suggest-title" class="text-lg font-semibold tracking-tight">
             Suggest tasks with Kiro
@@ -103,7 +108,7 @@ defmodule FactoryWeb.SuggestTasks do
         </.working>
         <.failed_writing :if={@status == "error" and @plan["failed"] == "writing"} plan={@plan} />
         <.choose :if={@status == "tasks"} {assigns} />
-      </div>
+      </.focus_wrap>
     </div>
     """
   end
@@ -171,7 +176,7 @@ defmodule FactoryWeb.SuggestTasks do
   defp working(assigns) do
     ~H"""
     <div class="flex flex-1 flex-col items-center justify-center gap-2 px-6 py-16 text-center">
-      <span class="loading loading-spinner loading-md text-info"></span>
+      <span class="loading loading-spinner loading-md text-info" role="status" aria-label="Working"></span>
       <h3 class="mt-2 font-medium">{@title}</h3>
       <p class="max-w-md text-sm text-base-content/75">{render_slot(@inner_block)}</p>
       <ul class="mt-4 w-full max-w-md space-y-1 text-left font-mono text-[12px]">
@@ -332,6 +337,7 @@ defmodule FactoryWeb.SuggestTasks do
               <input
                 name={"other[#{@key}]"}
                 value={@others[@key]}
+                aria-label="Your own answer"
                 placeholder="Something else: write your own answer"
                 phx-debounce="300"
                 class="min-w-0 flex-1 bg-transparent outline-none placeholder:text-base-content/50"

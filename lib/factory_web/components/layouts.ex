@@ -53,6 +53,12 @@ defmodule FactoryWeb.Layouts do
     assigns = assign(assigns, menu: @menu)
 
     ~H"""
+    <a
+      href="#main"
+      class="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-2 focus:z-50 focus:rounded-md focus:bg-base-100 focus:px-3 focus:py-1.5 focus:text-sm focus:font-medium focus:shadow-lg"
+    >
+      Skip to content
+    </a>
     <header class="sticky top-0 z-30 border-b border-base-300 bg-base-100/85 backdrop-blur">
       <div class="mx-auto flex h-11 max-w-7xl items-stretch gap-3 px-4 sm:gap-5 sm:px-6">
         <.link
@@ -106,10 +112,10 @@ defmodule FactoryWeb.Layouts do
       </div>
     </header>
 
-    <main :if={@full} class="h-[calc(100dvh-2.75rem)] overflow-hidden">
+    <main :if={@full} id="main" class="h-[calc(100dvh-2.75rem)] overflow-hidden">
       {render_slot(@inner_block)}
     </main>
-    <main :if={!@full} class="mx-auto max-w-7xl px-4 py-6 sm:px-6">
+    <main :if={!@full} id="main" class="mx-auto max-w-7xl px-4 py-6 sm:px-6">
       {render_slot(@inner_block)}
     </main>
 
@@ -176,7 +182,8 @@ defmodule FactoryWeb.Layouts do
   The colour of a status dot: for the statuses above, and for the states of a run's
   steps (`FactoryWeb.WorkflowMap.states/2`), whose busy dot pulses.
   """
-  def status_dot(:busy), do: "bg-info animate-pulse"
+  def status_dot(:busy), do: "bg-info animate-pulse motion-reduce:animate-none"
+
   def status_dot(state) when is_atom(state) and not is_nil(state),
     do: status_dot(Atom.to_string(state))
 
@@ -185,6 +192,18 @@ defmodule FactoryWeb.Layouts do
   def status_dot(s) when s in ["waiting", "paused"], do: "bg-warning"
   def status_dot("error"), do: "bg-error"
   def status_dot(_), do: "bg-base-content/30"
+
+  @doc """
+  What a status dot's colour says, in words, for readers who don't see the colour
+  (put it beside the dot in a `sr-only` span). Takes the same values as `status_dot/1`.
+  """
+  def status_dot_label(:busy), do: "Busy"
+
+  def status_dot_label(state) when is_atom(state) and not is_nil(state),
+    do: status_dot_label(Atom.to_string(state))
+
+  def status_dot_label(s) when is_binary(s), do: status_label(s)
+  def status_dot_label(_), do: "Not started"
 
   @doc "How long ago a time was. The server doesn't know the viewer's time zone, so no clock times."
   def ago(time) do

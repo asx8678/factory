@@ -221,7 +221,8 @@ defmodule FactoryWeb.ChatQuestions do
         {@who} has {if @count == 1, do: "a question", else: "#{@count} questions"}
       </h3>
       <span :if={@waiting} class="flex shrink-0 items-center gap-1.5 text-xs text-primary">
-        <span class="size-1.5 animate-pulse rounded-full bg-primary"></span> Waiting for you
+        <span class="size-1.5 animate-pulse rounded-full bg-primary motion-reduce:animate-none"></span>
+        Waiting for you
       </span>
     </header>
     """
@@ -307,6 +308,7 @@ defmodule FactoryWeb.ChatQuestions do
           type="text"
           name={@own}
           autocomplete="off"
+          aria-label="Your own answer"
           placeholder="Add details, or write your own answer"
           class="h-6 min-w-0 flex-1 bg-transparent text-[13px] outline-none placeholder:text-base-content/35"
         />

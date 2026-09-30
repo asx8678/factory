@@ -1,6 +1,7 @@
 // The prompt editor's text box: grows with its content (the window scrolls, so the
 // line numbers beside it stay aligned), and ⌘S / Ctrl+S / ⌘↵ save.
-// With data-drop, a .md or .txt file dropped on it replaces its text.
+// With data-drop, a .md or .txt file dropped on it replaces its text. With
+// data-autofocus, it takes the focus when it appears, cursor at the end.
 import {acceptDrops} from "./drop_text"
 
 export const PromptEditor = {
@@ -31,8 +32,10 @@ export const PromptEditor = {
       })
     }
     this.resize()
-    this.el.focus()
-    this.el.setSelectionRange(this.el.value.length, this.el.value.length)
+    if (this.el.dataset.autofocus !== undefined) {
+      this.el.focus()
+      this.el.setSelectionRange(this.el.value.length, this.el.value.length)
+    }
   },
   updated() {
     this.resize()

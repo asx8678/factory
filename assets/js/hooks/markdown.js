@@ -43,10 +43,12 @@ export const Markdown = {
 }
 
 export function copy(text, button) {
-  navigator.clipboard?.writeText(text).then(() => {
+  const label = button?.textContent
+  const say = (word) => {
     if (!button) return
-    const label = button.textContent
-    button.textContent = "Copied"
+    button.textContent = word
     setTimeout(() => (button.textContent = label), 1500)
-  })
+  }
+  if (!navigator.clipboard) return say("Copy failed")
+  navigator.clipboard.writeText(text).then(() => say("Copied"), () => say("Copy failed"))
 }

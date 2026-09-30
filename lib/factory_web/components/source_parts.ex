@@ -136,7 +136,7 @@ defmodule FactoryWeb.SourceParts do
             >
               <.icon
                 name="hero-arrow-path-mini"
-                class={["size-4", s.status == "syncing" && "animate-spin"]}
+                class={["size-4", s.status == "syncing" && "animate-spin motion-reduce:animate-none"]}
               />
             </button>
             <button
@@ -383,6 +383,7 @@ defmodule FactoryWeb.SourceParts do
               <textarea
                 name="source[content]"
                 rows="6"
+                aria-label="Text"
                 phx-debounce="400"
                 placeholder={
                   if kind == "meta_index",

@@ -58,13 +58,16 @@
       <div class="truncate text-[10px] opacity-55">{data.label}</div>
     </div>
     {#if data.status === "syncing"}
-      <span class="loading loading-spinner loading-xs text-info"></span>
+      <span class="loading loading-spinner loading-xs text-info" role="status" aria-label="Syncing"></span>
     {:else if data.status === "error"}
       <span class="size-1.5 shrink-0 rounded-full bg-error"></span>
+      <span class="sr-only">Needs attention</span>
     {:else if data.attached === 0 || !data.enabled}
       <span class="size-1.5 shrink-0 rounded-full bg-warning"></span>
+      <span class="sr-only">{data.enabled ? "Not attached" : "Off"}</span>
     {:else}
       <span class="size-1.5 shrink-0 rounded-full bg-success"></span>
+      <span class="sr-only">Attached</span>
     {/if}
   </div>
 

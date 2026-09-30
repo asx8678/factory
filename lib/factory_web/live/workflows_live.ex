@@ -1019,14 +1019,19 @@ defmodule FactoryWeb.WorkflowsLive do
           class="fixed inset-0 z-50 grid place-items-center bg-base-content/25 p-4 backdrop-blur-[2px]"
           role="dialog"
           aria-modal="true"
-          aria-label="Base specs"
+          aria-labelledby="workflow-base-title"
           phx-window-keydown="wf_base_close"
           phx-key="Escape"
+          phx-mounted={JS.push_focus() |> JS.focus_first(to: "#workflow-base-dialog")}
+          phx-remove={JS.pop_focus()}
         >
           <div class="absolute inset-0" phx-click="wf_base_close" aria-hidden="true"></div>
-          <div class="relative flex max-h-full w-full max-w-lg flex-col overflow-hidden rounded-xl border border-base-300 bg-base-100 shadow-2xl">
+          <.focus_wrap
+            id="workflow-base-dialog"
+            class="relative flex max-h-full w-full max-w-lg flex-col overflow-hidden rounded-xl border border-base-300 bg-base-100 shadow-2xl"
+          >
             <header class="border-b border-base-300 px-5 py-4">
-              <h2 class="font-semibold">Base specs for {@workflow.name}</h2>
+              <h2 id="workflow-base-title" class="font-semibold">Base specs for {@workflow.name}</h2>
               <p class="text-sm text-base-content/55">
                 Every run on this workflow starts with these. A run can still add or leave
                 out any of them in its chat.
@@ -1051,7 +1056,7 @@ defmodule FactoryWeb.WorkflowsLive do
                 Done
               </button>
             </footer>
-          </div>
+          </.focus_wrap>
         </div>
         <div class="flex min-h-0 flex-1">
           <div

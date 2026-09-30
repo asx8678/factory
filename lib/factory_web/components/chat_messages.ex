@@ -179,10 +179,10 @@ defmodule FactoryWeb.ChatMessages do
         {FactoryWeb.Markdown.render(@body)}
       </div>
       <div :if={!@id and @body != ""} class="md">{FactoryWeb.Markdown.render(@body)}</div>
-      <span :if={@live} class="mt-2 inline-flex gap-1" aria-label="Writing">
-        <span class="size-1.5 animate-bounce rounded-full bg-base-content/40 [animation-delay:-0.3s]"></span>
-        <span class="size-1.5 animate-bounce rounded-full bg-base-content/40 [animation-delay:-0.15s]"></span>
-        <span class="size-1.5 animate-bounce rounded-full bg-base-content/40"></span>
+      <span :if={@live} class="mt-2 inline-flex gap-1" role="status" aria-label="Writing">
+        <span class="size-1.5 animate-bounce rounded-full bg-base-content/40 [animation-delay:-0.3s] motion-reduce:animate-none"></span>
+        <span class="size-1.5 animate-bounce rounded-full bg-base-content/40 [animation-delay:-0.15s] motion-reduce:animate-none"></span>
+        <span class="size-1.5 animate-bounce rounded-full bg-base-content/40 motion-reduce:animate-none"></span>
       </span>
       <%!-- Usage is always shown; Copy appears on hover. --%>
       <div

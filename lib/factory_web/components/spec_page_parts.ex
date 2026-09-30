@@ -583,6 +583,7 @@ defmodule FactoryWeb.SpecPageParts do
           data-drop
           phx-debounce="600"
           spellcheck="false"
+          aria-label={"#{String.capitalize(@step)} text"}
           placeholder={placeholder(@step)}
           class="block min-h-[26rem] w-full resize-none rounded-lg border border-base-300 bg-base-100 px-4 py-3 font-mono text-[12px] leading-relaxed outline-none placeholder:text-base-content/40 focus:border-base-content/30"
           wrapper_class="block"

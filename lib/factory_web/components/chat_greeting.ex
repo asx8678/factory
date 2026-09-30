@@ -138,11 +138,12 @@ defmodule FactoryWeb.ChatGreeting do
             type="button"
             phx-click="scout_again"
             title="Look at the branches again"
+            aria-label="Look at the branches again"
             class="grid size-6 shrink-0 place-items-center rounded-md text-base-content/45 hover:bg-base-content/[0.06] hover:text-base-content"
           >
             <.icon
               name="hero-arrow-path-micro"
-              class={["size-3.5", @scout == :loading && "animate-spin"]}
+              class={["size-3.5", @scout == :loading && "animate-spin motion-reduce:animate-none"]}
             />
           </button>
         </header>

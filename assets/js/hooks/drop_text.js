@@ -1,6 +1,6 @@
 // Text boxes you can drop files on. `acceptDrops` wires the drag-and-drop: the box gets
-// `drop-active` while a file hovers, files `accept` turns down (or over 2 MB) push
-// `drop_rejected`, and the rest are read and handed to `apply` as text. `one: true`
+// `drop-active` while a file hovers, files `accept` turns down (or over 2 MB, or that
+// can't be read) push `drop_rejected`, and the rest are read and handed to `apply` as text. `one: true`
 // looks only at the first file dropped.
 const MAX = 2_000_000
 
@@ -29,7 +29,11 @@ export function acceptDrops(hook, {accept, apply, one = false}) {
         hook.pushEvent("drop_rejected", { name: file.name })
         continue
       }
-      texts.push(await file.text())
+      try {
+        texts.push(await file.text())
+      } catch {
+        hook.pushEvent("drop_rejected", { name: file.name })
+      }
     }
     if (texts.length === 0) return
     apply(texts, files)

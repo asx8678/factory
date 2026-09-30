@@ -1,6 +1,7 @@
 <script>
   import { Handle, Position } from "@xyflow/svelte"
   import { getContext } from "svelte"
+  import { menuKeys } from "../js/menu_keys.js"
 
   let { id, data, selected, isConnectable } = $props()
   const { push, readonly } = getContext("factory")
@@ -118,7 +119,12 @@
         </button>
       {/if}
       {#if roleMenu}
-        <div class="nodrag nowheel absolute left-0 top-11 z-50 w-48 rounded-xl border border-base-content/10 bg-surface p-1 shadow-xl" role="menu">
+        <div
+          class="nodrag nowheel absolute left-0 top-11 z-50 w-48 rounded-xl border border-base-content/10 bg-surface p-1 shadow-xl"
+          role="menu"
+          aria-label="Role"
+          {@attach menuKeys(() => (roleMenu = false))}
+        >
           {#each roles as [kind, label]}
             <button
               type="button"
@@ -148,12 +154,13 @@
 
   {#if usage}
     <div class="mt-3 flex items-center gap-3 px-3 text-[11px] tabular-nums">
-      <div class="group/ctx flex min-w-0 flex-1 items-center gap-2" title={contextTip}>
+      <div class="group/ctx relative flex min-w-0 flex-1 items-center gap-2" title={contextTip}>
         {#if !readonly && contextPct != null && data.live}
+          <!-- Laid over the indicator, shown while hovering it or when the button has the focus. -->
           <button
             type="button"
             title="Compact context: Kiro summarizes the conversation so it takes less room"
-            class="nodrag -my-1 -ml-1 hidden h-6 flex-1 items-center justify-center gap-1 rounded-md bg-error/10 px-1.5 font-medium text-error hover:bg-error/20 group-hover/ctx:flex"
+            class="nodrag pointer-events-none absolute -inset-x-1 inset-y-0 my-auto flex h-6 items-center justify-center gap-1 rounded-md bg-error/10 px-1.5 font-medium text-error opacity-0 hover:bg-error/20 focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover/ctx:pointer-events-auto group-hover/ctx:opacity-100"
             onclick={(e) => {
               e.stopPropagation()
               push("compact", { id })
@@ -163,14 +170,14 @@
             Compact
           </button>
         {/if}
-        <span class={["opacity-50", contextPct != null && !readonly && data.live && "group-hover/ctx:hidden"]}>Context</span>
-        <!-- While hovering, the Compact button takes the place of the whole indicator. -->
-        <div class={["h-1 min-w-8 flex-1 overflow-hidden rounded-full bg-base-content/10", contextPct != null && !readonly && data.live && "group-hover/ctx:hidden"]}>
+        <span class={["opacity-50", contextPct != null && !readonly && data.live && "group-hover/ctx:invisible group-focus-within/ctx:invisible"]}>Context</span>
+        <!-- While hovering (or with the Compact button focused), Compact takes the place of the whole indicator. -->
+        <div class={["h-1 min-w-8 flex-1 overflow-hidden rounded-full bg-base-content/10", contextPct != null && !readonly && data.live && "group-hover/ctx:invisible group-focus-within/ctx:invisible"]}>
           {#if contextPct != null}
             <div class={["h-full rounded-full", contextColor]} style={`width: ${Math.max(contextPct, 2)}%`}></div>
           {/if}
         </div>
-        <span class={["shrink-0 opacity-70", contextPct != null && !readonly && data.live && "group-hover/ctx:hidden"]}>{contextPct == null ? "–" : fmtPct(contextPct)}</span>
+        <span class={["shrink-0 opacity-70", contextPct != null && !readonly && data.live && "group-hover/ctx:invisible group-focus-within/ctx:invisible"]}>{contextPct == null ? "–" : fmtPct(contextPct)}</span>
       </div>
       <span class="flex items-center gap-1 opacity-70" title={`${data.usage.turns} ${data.usage.turns === 1 ? "turn" : "turns"} with Kiro`}>
         <span class="hero-arrow-path-rounded-square-mini size-3.5 opacity-70"></span>{data.usage.turns}
@@ -190,10 +197,11 @@
     </span>
     <span class={["min-w-0 flex-1 truncate", tone[data.status] ?? "opacity-60"]} title={status}>{status}</span>
     {#if !readonly}
-      <!-- Hidden with visibility (not display) so it keeps its space and nothing shifts on hover. -->
+      <!-- Hidden with visibility (not display) so it keeps its space and nothing shifts on hover,
+           and shows while the card is hovered or anything on it has the focus. -->
       <button
         type="button"
-        class="nodrag invisible shrink-0 rounded-md px-2 py-1 font-medium hover:bg-base-content/[0.06] group-hover:visible"
+        class="nodrag invisible shrink-0 rounded-md px-2 py-1 font-medium hover:bg-base-content/[0.06] focus-visible:visible group-hover:visible group-focus-within:visible"
         onclick={(e) => {
           e.stopPropagation()
           push("chat", { id })

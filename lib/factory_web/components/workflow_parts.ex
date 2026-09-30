@@ -36,165 +36,174 @@ defmodule FactoryWeb.WorkflowParts do
     <div
       id="context-editor"
       class="absolute inset-0 z-40 flex items-center justify-center bg-black/50 p-3 sm:p-6"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="context-editor-title"
       phx-window-keydown={!@dirty && @close}
       phx-key="Escape"
+      phx-mounted={JS.push_focus() |> JS.focus(to: "#context-prompt")}
+      phx-remove={JS.pop_focus()}
     >
-      <.form
-        for={@form}
-        id="context-form"
-        phx-change="context_change"
-        phx-submit="save_context"
-        phx-click-away={!@dirty && @close}
-        class="flex h-full max-h-[760px] w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-base-content/10 bg-surface shadow-2xl"
-      >
-        <header class="flex h-14 shrink-0 items-center gap-2 border-b border-base-content/10 pl-4 pr-3">
-          <.icon name={Kinds.icon(@agent.kind)} class="size-4 shrink-0 opacity-60" />
-          <p class="min-w-0 truncate text-xs">
-            <span class="text-base-content/60">{@agent.name}</span>
-            <span class="mx-1 text-base-content/30">/</span>
-            <span class="font-semibold">Prompt</span>
-          </p>
-          <span
-            :if={@dirty}
-            class="flex shrink-0 items-center gap-1.5 text-xs text-base-content/50"
-          >
-            <span class="size-1.5 rounded-full bg-amber-300/80"></span> Unsaved
-          </span>
-
-          <div class="ml-auto flex shrink-0 items-center gap-1.5">
-            <details
-              id="prompt-templates"
-              class="relative"
-              phx-click-away={JS.remove_attribute("open", to: "#prompt-templates")}
+      <.focus_wrap id="context-dialog" class="flex h-full max-h-[760px] w-full max-w-3xl">
+        <.form
+          for={@form}
+          id="context-form"
+          phx-change="context_change"
+          phx-submit="save_context"
+          phx-click-away={!@dirty && @close}
+          class="flex h-full w-full flex-col overflow-hidden rounded-xl border border-base-content/10 bg-surface shadow-2xl"
+        >
+          <header class="flex h-14 shrink-0 items-center gap-2 border-b border-base-content/10 pl-4 pr-3">
+            <.icon name={Kinds.icon(@agent.kind)} class="size-4 shrink-0 opacity-60" />
+            <p id="context-editor-title" class="min-w-0 truncate text-xs">
+              <span class="text-base-content/60">{@agent.name}</span>
+              <span class="mx-1 text-base-content/30">/</span>
+              <span class="font-semibold">Prompt</span>
+            </p>
+            <span
+              :if={@dirty}
+              class="flex shrink-0 items-center gap-1.5 text-xs text-base-content/50"
             >
-              <summary class="flex h-8 cursor-pointer list-none items-center gap-1 rounded-lg px-2.5 text-xs text-base-content/70 hover:bg-base-content/[0.06] hover:text-base-content">
-                Templates <.icon name="hero-chevron-down-mini" class="size-4 opacity-60" />
-              </summary>
-              <div class="absolute right-0 z-10 mt-1 w-72 rounded-xl border border-base-content/10 bg-surface p-1 shadow-xl">
-                <p class="px-3 pb-1 pt-2 text-xs text-base-content/45">
-                  Replaces the current text
+              <span class="size-1.5 rounded-full bg-amber-300/80"></span> Unsaved
+            </span>
+
+            <div class="ml-auto flex shrink-0 items-center gap-1.5">
+              <details
+                id="prompt-templates"
+                class="relative"
+                phx-click-away={JS.remove_attribute("open", to: "#prompt-templates")}
+              >
+                <summary class="flex h-8 cursor-pointer list-none items-center gap-1 rounded-lg px-2.5 text-xs text-base-content/70 hover:bg-base-content/[0.06] hover:text-base-content">
+                  Templates <.icon name="hero-chevron-down-mini" class="size-4 opacity-60" />
+                </summary>
+                <div class="absolute right-0 z-10 mt-1 w-72 rounded-xl border border-base-content/10 bg-surface p-1 shadow-xl">
+                  <p class="px-3 pb-1 pt-2 text-xs text-base-content/45">
+                    Replaces the current text
+                  </p>
+                  <button
+                    :for={{kind, label, icon} <- @kinds}
+                    type="button"
+                    phx-click={
+                      JS.dispatch("factory:fill",
+                        to: "#context-prompt",
+                        detail: %{text: Kinds.template(kind, @agent.name)}
+                      )
+                      |> JS.remove_attribute("open", to: "#prompt-templates")
+                    }
+                    class="flex w-full items-start gap-2.5 rounded-lg px-3 py-2 text-left hover:bg-base-content/[0.06]"
+                  >
+                    <.icon name={icon} class="mt-0.5 size-4 shrink-0 opacity-60" />
+                    <span class="min-w-0 flex-1">
+                      <span class="flex items-center gap-1.5 text-[13px]">
+                        {label}
+                        <span
+                          :if={kind == @agent.kind}
+                          class="rounded bg-base-200 px-1 text-[10px] text-base-content/55"
+                        >
+                          this agent
+                        </span>
+                      </span>
+                      <span class="block text-[11px] text-base-content/50">
+                        {Kinds.blurb(kind)}
+                      </span>
+                    </span>
+                  </button>
+                </div>
+              </details>
+              <.link
+                patch={agent_path(@agent)}
+                data-confirm={@dirty && "Discard your changes to #{@agent.name}'s prompt?"}
+                class="flex h-8 items-center rounded-lg px-3 text-xs text-base-content/70 hover:bg-base-content/[0.06] hover:text-base-content"
+              >
+                Cancel
+              </.link>
+              <button
+                type="submit"
+                class="flex h-8 items-center rounded-lg bg-base-content px-3.5 text-xs font-medium text-base-100 hover:opacity-90"
+              >
+                Save
+              </button>
+            </div>
+          </header>
+
+          <div class="relative min-h-0 flex-1 overflow-y-auto bg-base-200/40">
+            <div class="flex min-h-full">
+              <div
+                class="w-10 shrink-0 select-none border-r border-base-content/10 py-3.5 pr-2 text-right font-mono text-[10px] leading-[18px] text-base-content/25"
+                aria-hidden="true"
+              >
+                <div :for={n <- 1..@lines}>{n}</div>
+              </div>
+              <textarea
+                id="context-prompt"
+                name={@form[:prompt].name}
+                phx-hook="PromptEditor"
+                data-autofocus
+                phx-debounce="150"
+                spellcheck="false"
+                aria-label={"#{@agent.name}'s prompt"}
+                class="block min-h-full w-full resize-none overflow-hidden bg-transparent px-4 py-3.5 font-mono text-[11px] leading-[18px] outline-none focus-visible:outline-none"
+              >{Phoenix.HTML.Form.normalize_value("textarea", @text)}</textarea>
+            </div>
+
+            <div
+              :if={String.trim(@text) == ""}
+              class="pointer-events-none absolute inset-0 flex items-center justify-center p-6"
+            >
+              <div class="max-w-sm text-center">
+                <p class="text-[13px] font-medium">Write how {@agent.name} should work</p>
+                <p class="mt-1.5 text-[11px] leading-[18px] text-base-content/55">
+                  What it's responsible for, how it should work, and what it must never do.
+                  Kiro reads this before your first message in each session.
                 </p>
                 <button
-                  :for={{kind, label, icon} <- @kinds}
                   type="button"
                   phx-click={
                     JS.dispatch("factory:fill",
                       to: "#context-prompt",
-                      detail: %{text: Kinds.template(kind, @agent.name)}
+                      detail: %{text: Kinds.template(@agent.kind, @agent.name)}
                     )
-                    |> JS.remove_attribute("open", to: "#prompt-templates")
                   }
-                  class="flex w-full items-start gap-2.5 rounded-lg px-3 py-2 text-left hover:bg-base-content/[0.06]"
+                  class="pointer-events-auto mt-4 inline-flex items-center gap-1.5 rounded-lg border border-base-content/15 bg-base-100 px-3 py-1.5 text-xs hover:bg-base-content/[0.06]"
                 >
-                  <.icon name={icon} class="mt-0.5 size-4 shrink-0 opacity-60" />
-                  <span class="min-w-0 flex-1">
-                    <span class="flex items-center gap-1.5 text-[13px]">
-                      {label}
-                      <span
-                        :if={kind == @agent.kind}
-                        class="rounded bg-base-200 px-1 text-[10px] text-base-content/55"
-                      >
-                        this agent
-                      </span>
-                    </span>
-                    <span class="block text-[11px] text-base-content/50">
-                      {Kinds.blurb(kind)}
-                    </span>
-                  </span>
+                  <.icon name={Kinds.icon(@agent.kind)} class="size-4 opacity-70" />
+                  Start from the {Kinds.label(@agent.kind)} template
                 </button>
+                <p class="mt-2 text-[11px] text-base-content/40">or just start typing</p>
               </div>
-            </details>
-            <.link
-              patch={agent_path(@agent)}
-              data-confirm={@dirty && "Discard your changes to #{@agent.name}'s prompt?"}
-              class="flex h-8 items-center rounded-lg px-3 text-xs text-base-content/70 hover:bg-base-content/[0.06] hover:text-base-content"
-            >
-              Cancel
-            </.link>
-            <button
-              type="submit"
-              class="flex h-8 items-center rounded-lg bg-base-content px-3.5 text-xs font-medium text-base-100 hover:opacity-90"
-            >
-              Save
-            </button>
-          </div>
-        </header>
-
-        <div class="relative min-h-0 flex-1 overflow-y-auto bg-base-200/40">
-          <div class="flex min-h-full">
-            <div
-              class="w-10 shrink-0 select-none border-r border-base-content/10 py-3.5 pr-2 text-right font-mono text-[10px] leading-[18px] text-base-content/25"
-              aria-hidden="true"
-            >
-              <div :for={n <- 1..@lines}>{n}</div>
             </div>
-            <textarea
-              id="context-prompt"
-              name={@form[:prompt].name}
-              phx-hook="PromptEditor"
-              phx-debounce="150"
-              spellcheck="false"
-              aria-label={"#{@agent.name}'s prompt"}
-              class="block min-h-full w-full resize-none overflow-hidden bg-transparent px-4 py-3.5 font-mono text-[11px] leading-[18px] outline-none focus-visible:outline-none"
-            >{Phoenix.HTML.Form.normalize_value("textarea", @text)}</textarea>
           </div>
 
-          <div
-            :if={String.trim(@text) == ""}
-            class="pointer-events-none absolute inset-0 flex items-center justify-center p-6"
+          <p
+            :for={{msg, _} <- @form[:prompt].errors}
+            class="border-t border-error/30 bg-error/10 px-4 py-2 text-xs text-error"
           >
-            <div class="max-w-sm text-center">
-              <p class="text-[13px] font-medium">Write how {@agent.name} should work</p>
-              <p class="mt-1.5 text-[11px] leading-[18px] text-base-content/55">
-                What it's responsible for, how it should work, and what it must never do.
-                Kiro reads this before your first message in each session.
-              </p>
-              <button
-                type="button"
-                phx-click={
-                  JS.dispatch("factory:fill",
-                    to: "#context-prompt",
-                    detail: %{text: Kinds.template(@agent.kind, @agent.name)}
-                  )
-                }
-                class="pointer-events-auto mt-4 inline-flex items-center gap-1.5 rounded-lg border border-base-content/15 bg-base-100 px-3 py-1.5 text-xs hover:bg-base-content/[0.06]"
-              >
-                <.icon name={Kinds.icon(@agent.kind)} class="size-4 opacity-70" />
-                Start from the {Kinds.label(@agent.kind)} template
-              </button>
-              <p class="mt-2 text-[11px] text-base-content/40">or just start typing</p>
-            </div>
-          </div>
-        </div>
+            {msg}
+          </p>
 
-        <p
-          :for={{msg, _} <- @form[:prompt].errors}
-          class="border-t border-error/30 bg-error/10 px-4 py-2 text-xs text-error"
-        >
-          {msg}
-        </p>
-
-        <footer class="flex h-9 shrink-0 items-center gap-4 border-t border-base-content/10 px-4 text-[10px] text-base-content/45">
-          <span>Markdown</span>
-          <span id="context-count" class="tabular-nums">
-            {@lines} {if @lines == 1, do: "line", else: "lines"}, {@chars} characters
-          </span>
-          <span class="hidden sm:inline">Saving restarts {@agent.name}'s Kiro</span>
-          <span class="ml-auto hidden sm:inline">⌘S to save</span>
-        </footer>
-      </.form>
+          <footer class="flex h-9 shrink-0 items-center gap-4 border-t border-base-content/10 px-4 text-[10px] text-base-content/45">
+            <span>Markdown</span>
+            <span id="context-count" class="tabular-nums">
+              {@lines} {if @lines == 1, do: "line", else: "lines"}, {@chars} characters
+            </span>
+            <span class="hidden sm:inline">Saving restarts {@agent.name}'s Kiro</span>
+            <span class="ml-auto hidden sm:inline">⌘S to save</span>
+          </footer>
+        </.form>
+      </.focus_wrap>
     </div>
     """
   end
 
   attr :label, :string, required: true
+  attr :id, :string, default: nil, doc: "an id for the label, for a control's aria-labelledby"
   slot :inner_block, required: true
 
   # One row in the side panel: label on the left, value on the right.
   def prop(assigns) do
     ~H"""
     <div class="flex min-h-9 items-center gap-2">
-      <dt class="w-24 shrink-0 text-base-content/50">{@label}</dt>
+      <dt id={@id} class="w-24 shrink-0 text-base-content/50">{@label}</dt>
       <dd class="min-w-0 flex-1">{render_slot(@inner_block)}</dd>
     </div>
     """
@@ -202,12 +211,15 @@ defmodule FactoryWeb.WorkflowParts do
 
   attr :field, Phoenix.HTML.FormField, required: true
   attr :options, :list, required: true
+  attr :labelled_by, :string, default: nil, doc: "id of the text that names it"
 
   # A select that reads as plain text until hovered.
   def plain_select(assigns) do
     ~H"""
     <select
+      id={@field.id}
       name={@field.name}
+      aria-labelledby={@labelled_by}
       class="w-full cursor-pointer appearance-none truncate rounded-md border border-transparent bg-transparent px-1.5 py-1 outline-none hover:bg-base-content/[0.06] focus:border-base-content/25 focus-visible:outline-none"
     >
       {Phoenix.HTML.Form.options_for_select(@options, @field.value)}
@@ -467,70 +479,74 @@ defmodule FactoryWeb.WorkflowParts do
       class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 backdrop-blur-sm sm:items-center"
       phx-window-keydown="link_prompt_close"
       phx-key="Escape"
+      phx-mounted={JS.push_focus() |> JS.focus_first(to: "#link-prompt-form")}
+      phx-remove={JS.pop_focus()}
     >
-      <.form
-        for={@form}
-        id="link-prompt-form"
-        phx-submit="link_prompt_save"
-        phx-click-away="link_prompt_close"
-        class="drawer-in w-full max-w-xl overflow-hidden rounded-xl border border-base-content/10 bg-surface shadow-2xl"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="link-prompt-title"
-      >
-        <header class="flex items-center gap-3 border-b border-base-content/10 px-5 py-4">
-          <span class="grid size-9 place-items-center rounded-xl bg-info/15 text-info">
-            <.icon name="hero-chat-bubble-bottom-center-text" class="size-5" />
-          </span>
-          <div class="min-w-0 flex-1">
-            <h2 id="link-prompt-title" class="truncate font-semibold">
-              {@from.name}
-              <.icon name="hero-arrow-long-right-mini" class="size-4 text-base-content/40" />
-              {@to.name}
-            </h2>
-            <p class="text-xs text-base-content/55">
-              Added to {@to.name}'s context each time {@from.name} hands work over.
-            </p>
+      <.focus_wrap id="link-prompt-dialog" class="w-full max-w-xl">
+        <.form
+          for={@form}
+          id="link-prompt-form"
+          phx-submit="link_prompt_save"
+          phx-click-away="link_prompt_close"
+          class="drawer-in w-full overflow-hidden rounded-xl border border-base-content/10 bg-surface shadow-2xl"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="link-prompt-title"
+        >
+          <header class="flex items-center gap-3 border-b border-base-content/10 px-5 py-4">
+            <span class="grid size-9 place-items-center rounded-xl bg-info/15 text-info">
+              <.icon name="hero-chat-bubble-bottom-center-text" class="size-5" />
+            </span>
+            <div class="min-w-0 flex-1">
+              <h2 id="link-prompt-title" class="truncate font-semibold">
+                {@from.name}
+                <.icon name="hero-arrow-long-right-mini" class="size-4 text-base-content/40" />
+                {@to.name}
+              </h2>
+              <p class="text-xs text-base-content/55">
+                Added to {@to.name}'s context each time {@from.name} hands work over.
+              </p>
+            </div>
+            <button
+              type="button"
+              phx-click="link_prompt_close"
+              aria-label="Close"
+              class="grid size-8 place-items-center rounded-lg text-base-content/50 hover:bg-base-content/[0.06] hover:text-base-content"
+            >
+              <.icon name="hero-x-mark-mini" class="size-5" />
+            </button>
+          </header>
+          <div class="px-5 py-4">
+            <.input
+              field={@form[:prompt]}
+              type="textarea"
+              id="link-prompt-text"
+              rows="7"
+              phx-mounted={JS.focus()}
+              placeholder={"e.g. Only pass on the tasks that touch the API, and list the files you changed so #{@to.name} can start there."}
+              class="textarea w-full text-sm leading-relaxed"
+              wrapper_class="block"
+            />
           </div>
-          <button
-            type="button"
-            phx-click="link_prompt_close"
-            aria-label="Close"
-            class="grid size-8 place-items-center rounded-lg text-base-content/50 hover:bg-base-content/[0.06] hover:text-base-content"
-          >
-            <.icon name="hero-x-mark-mini" class="size-5" />
-          </button>
-        </header>
-        <div class="px-5 py-4">
-          <.input
-            field={@form[:prompt]}
-            type="textarea"
-            id="link-prompt-text"
-            rows="7"
-            phx-mounted={JS.focus()}
-            placeholder={"e.g. Only pass on the tasks that touch the API, and list the files you changed so #{@to.name} can start there."}
-            class="textarea w-full text-sm leading-relaxed"
-            wrapper_class="block"
-          />
-        </div>
-        <footer class="flex items-center gap-2 border-t border-base-content/10 px-5 py-3">
-          <button type="submit" id="link-prompt-save" class="btn btn-primary btn-sm">
-            Save prompt
-          </button>
-          <button type="button" phx-click="link_prompt_close" class="btn btn-ghost btn-sm">
-            Cancel
-          </button>
-          <button
-            :if={@link.prompt != ""}
-            id="link-prompt-remove"
-            type="button"
-            phx-click="link_prompt_remove"
-            class="btn btn-ghost btn-sm ml-auto text-error"
-          >
-            <.icon name="hero-trash-micro" class="size-4" /> Remove
-          </button>
-        </footer>
-      </.form>
+          <footer class="flex items-center gap-2 border-t border-base-content/10 px-5 py-3">
+            <button type="submit" id="link-prompt-save" class="btn btn-primary btn-sm">
+              Save prompt
+            </button>
+            <button type="button" phx-click="link_prompt_close" class="btn btn-ghost btn-sm">
+              Cancel
+            </button>
+            <button
+              :if={@link.prompt != ""}
+              id="link-prompt-remove"
+              type="button"
+              phx-click="link_prompt_remove"
+              class="btn btn-ghost btn-sm ml-auto text-error"
+            >
+              <.icon name="hero-trash-micro" class="size-4" /> Remove
+            </button>
+          </footer>
+        </.form>
+      </.focus_wrap>
     </div>
     """
   end
@@ -603,21 +619,31 @@ defmodule FactoryWeb.WorkflowParts do
           >{Phoenix.HTML.Form.normalize_value("textarea", @form[:role].value)}</textarea>
 
           <dl class="mt-3 border-t border-base-content/10 pt-2 text-[13px]">
-            <.prop label="Role">
+            <.prop label="Role" id="agent-prop-role">
               <.plain_select
                 field={@form[:kind]}
+                labelled_by="agent-prop-role"
                 options={for {k, l, _} <- Kinds.all(), do: {l, k}}
               />
             </.prop>
-            <.prop label="Model">
-              <.plain_select field={@form[:model]} options={Kiro.models()} />
+            <.prop label="Model" id="agent-prop-model">
+              <.plain_select
+                field={@form[:model]}
+                labelled_by="agent-prop-model"
+                options={Kiro.models()}
+              />
             </.prop>
-            <.prop label="Mode">
-              <.plain_select field={@form[:kiro_mode]} options={Kiro.modes()} />
+            <.prop label="Mode" id="agent-prop-mode">
+              <.plain_select
+                field={@form[:kiro_mode]}
+                labelled_by="agent-prop-mode"
+                options={Kiro.modes()}
+              />
             </.prop>
-            <.prop label="Session">
+            <.prop label="Session" id="agent-prop-session">
               <.plain_select
                 field={@form[:session]}
+                labelled_by="agent-prop-session"
                 options={[{"Own session", "own"}, {"Shared session", "shared"}]}
               />
             </.prop>

@@ -1,5 +1,7 @@
 // Chat shortcuts: ⌘K / Ctrl+K puts you in the message box; P opens Plan (when you're
-// not typing somewhere).
+// not typing somewhere, and no link, button or menu has the focus).
+import { CONTROLS } from "./question_keys.js"
+
 export const ChatKeys = {
   mounted() {
     this.onKey = (e) => {
@@ -9,7 +11,8 @@ export const ChatKeys = {
         return
       }
       if (e.metaKey || e.ctrlKey || e.altKey) return
-      if (e.target.closest("input, textarea, select, [contenteditable]")) return
+      if (!this.el.contains(e.target) && e.target !== document.body) return
+      if (e.target.closest(CONTROLS)) return
       if (e.key === "p" || e.key === "P") {
         e.preventDefault()
         this.pushEvent("tasks", {})

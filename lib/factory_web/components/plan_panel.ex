@@ -454,9 +454,11 @@ defmodule FactoryWeb.PlanPanel do
     </section>
     <script :type={Phoenix.LiveView.ColocatedHook} name=".PlanEdit">
       // Double-click a task's title or a step to edit it in place; the field it opens
-      // gets the focus, and Esc leaves it unchanged.
+      // (marked data-autofocus) gets the focus once, when it appears, and Esc leaves it
+      // unchanged. Later updates leave the focus where the reader put it.
       export default {
         mounted() {
+          this.last = null
           this.el.addEventListener("dblclick", (e) => {
             const target = e.target.closest("[data-edit]")
             if (!target || this.el.getAttribute("aria-busy") === "true") return
@@ -473,7 +475,10 @@ defmodule FactoryWeb.PlanPanel do
         },
         updated() { this.focus() },
         focus() {
-          const input = this.el.querySelector("[data-inline]")
+          const input = this.el.querySelector("[data-inline][data-autofocus]")
+          const id = input ? input.id : null
+          if (id === this.last) return
+          this.last = id
           if (input && document.activeElement !== input) {
             input.focus()
             input.setSelectionRange(input.value.length, input.value.length)
@@ -508,6 +513,7 @@ defmodule FactoryWeb.PlanPanel do
         id={"chat-plan-inline-#{@i}-#{@part}-value"}
         placeholder={@placeholder}
         data-inline
+        data-autofocus
         phx-blur="plan_inline_save"
         phx-value-i={@i}
         phx-value-part={@part}

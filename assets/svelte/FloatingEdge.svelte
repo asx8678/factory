@@ -13,7 +13,7 @@
     getBezierPath,
     useInternalNode,
   } from "@xyflow/svelte"
-  import { getContext } from "svelte"
+  import { getContext, onDestroy } from "svelte"
 
   let {
     id,
@@ -47,11 +47,13 @@
   let hovered = $state(false)
   let leaveTimer
   // A short grace period, so the pointer can travel from the line to the button.
+  // Focus (Tab landing on the + button) counts as hovering too.
   const hover = (on) => {
     clearTimeout(leaveTimer)
     if (on) hovered = true
     else leaveTimer = setTimeout(() => (hovered = false), 250)
   }
+  onDestroy(() => clearTimeout(leaveTimer))
   const openPrompt = (e) => {
     e.stopPropagation()
     push("link_prompt_edit", { id })
@@ -133,16 +135,20 @@
       class="edge-prompt nodrag nopan"
       onmouseenter={() => hover(true)}
       onmouseleave={() => hover(false)}
+      onfocusin={() => hover(true)}
+      onfocusout={() => hover(false)}
     >
         {#if prompt}
           <button type="button" class="edge-prompt-chip" title={prompt} onclick={openPrompt}>
             <span class="hero-chat-bubble-bottom-center-text-micro size-3.5 shrink-0"></span>
             <span class="truncate">{prompt}</span>
           </button>
-        {:else if hovered || selected}
+        {:else}
+          <!-- Always in the page so Tab can reach it; only seen while the arrow is hovered,
+               selected or the button itself has the focus. -->
           <button
             type="button"
-            class="edge-prompt-add"
+            class={["edge-prompt-add", !(hovered || selected) && "is-quiet"]}
             aria-label="Add a prompt to this hand-off"
             title="Add a prompt to this hand-off"
             onclick={openPrompt}

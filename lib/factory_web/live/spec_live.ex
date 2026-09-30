@@ -934,9 +934,14 @@ defmodule FactoryWeb.SpecLive do
         aria-labelledby="confirm-delete-title"
         phx-window-keydown="cancel_delete"
         phx-key="Escape"
+        phx-mounted={JS.push_focus() |> JS.focus_first(to: "#confirm-delete-dialog")}
+        phx-remove={JS.pop_focus()}
       >
         <div class="absolute inset-0" phx-click="cancel_delete" aria-hidden="true"></div>
-        <div class="relative w-full max-w-md rounded-xl border border-base-300 bg-base-100 p-6 shadow-2xl">
+        <.focus_wrap
+          id="confirm-delete-dialog"
+          class="relative w-full max-w-md rounded-xl border border-base-300 bg-base-100 p-6 shadow-2xl"
+        >
           <div class="flex items-start gap-3">
             <span class="grid size-9 shrink-0 place-items-center rounded-full bg-error/15 text-error">
               <.icon name="hero-trash" class="size-5" />
@@ -955,7 +960,7 @@ defmodule FactoryWeb.SpecLive do
               Delete spec
             </button>
           </div>
-        </div>
+        </.focus_wrap>
       </div>
 
       <FactoryWeb.SuggestTasks.window
