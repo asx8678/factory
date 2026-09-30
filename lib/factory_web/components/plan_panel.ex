@@ -107,8 +107,9 @@ defmodule FactoryWeb.PlanPanel do
 
       <details
         :if={@check && !@checking}
-        id="chat-plan-check"
+        id={"chat-plan-check-#{@check.id}"}
         open
+        phx-mounted={JS.ignore_attributes(["open"])}
         class="group border-b border-base-content/10 bg-base-content/[0.02]"
       >
         <summary class="flex cursor-pointer list-none items-center gap-2 px-3.5 py-2 text-xs [&::-webkit-details-marker]:hidden">
