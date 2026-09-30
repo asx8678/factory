@@ -21,7 +21,7 @@ defmodule Factory.Kiro.Ask do
       may call the tools of these without asking (its MCP permission requests carry no kind)
     * `:reply` - `:all` (default) for everything Kiro wrote, `:last` for only what it wrote
       after its last tool call (its closing message, without the narration in between),
-      which may be empty
+      which may be empty, or `:first` for only what it wrote before its first tool call
     * `:usage` - what the call is for, recorded with its cost by `Factory.Usage.record/1`:
       `%{source: "review", spec_id: 1}` and so on. Without it the source is "other".
   """
@@ -77,6 +77,7 @@ defmodule Factory.Kiro.Ask do
           cond do
             # A turn that ends on a tool call has nothing after it; the caller decides.
             opts[:reply] == :last -> {{:ok, acc.last}, acc}
+            opts[:reply] == :first and String.trim(acc.first) != "" -> {{:ok, acc.first}, acc}
             String.trim(acc.text) == "" -> {{:error, "Kiro ended the turn without a reply."}, acc}
             true -> {{:ok, acc.text}, acc}
           end
@@ -126,7 +127,17 @@ defmodule Factory.Kiro.Ask do
   # reply streams in before its response) and the credits it reported.
   defp call(conn, id, method, params) do
     send_json(conn.port, %{jsonrpc: "2.0", id: id, method: method, params: params})
-    acc = %{text: "", last: "", credits: 0.0, prompted: method == "session/prompt", kinds: %{}}
+
+    acc = %{
+      text: "",
+      last: "",
+      first: "",
+      tooled: false,
+      credits: 0.0,
+      prompted: method == "session/prompt",
+      kinds: %{}
+    }
+
     await(conn, id, "", acc)
   end
 
@@ -220,7 +231,14 @@ defmodule Factory.Kiro.Ask do
          _id,
          acc
        ),
-       do: {:cont, %{acc | text: acc.text <> chunk, last: acc.last <> chunk}}
+       do:
+         {:cont,
+          %{
+            acc
+            | text: acc.text <> chunk,
+              last: acc.last <> chunk,
+              first: if(acc.tooled, do: acc.first, else: acc.first <> chunk)
+          }}
 
   # Kiro reports what each turn cost, in credits.
   defp handle(
@@ -254,7 +272,7 @@ defmodule Factory.Kiro.Ask do
         do: Map.put(acc.kinds, update["toolCallId"], update["kind"]),
         else: acc.kinds
 
-    {:cont, %{acc | last: "", kinds: kinds}}
+    {:cont, %{acc | last: "", tooled: true, kinds: kinds}}
   end
 
   defp handle(_conn, _msg, _id, acc), do: {:cont, acc}
