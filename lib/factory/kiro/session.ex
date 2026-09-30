@@ -630,9 +630,18 @@ defmodule Factory.Kiro.Session do
           }
         )
 
-      Agents.set_activity(agent.id, "waiting", "Waiting for your answer")
-      entry = %{rpc: id, message_id: message.id, run_id: run.id}
-      %{state | elicitations: Map.put(state.elicitations, key, entry)}
+      # The run may have been deleted since it was fetched: then there's no chat to
+      # ask in, and Kiro carries on without an answer.
+      case message do
+        {:error, :gone} ->
+          reply(state, id, %{action: "cancel"})
+          state
+
+        message ->
+          Agents.set_activity(agent.id, "waiting", "Waiting for your answer")
+          entry = %{rpc: id, message_id: message.id, run_id: run.id}
+          %{state | elicitations: Map.put(state.elicitations, key, entry)}
+      end
     end
   end
 

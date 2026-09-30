@@ -46,23 +46,29 @@ defmodule Factory.Agents.Agent do
   @doc "Whether this card is an action (commit, open a PR, email…) rather than an agent."
   def action?(%__MODULE__{kind: kind}), do: kind == "action"
 
+  # What a person may change on an agent's card and in its side panel. The rest
+  # (`status`, `activity`, `usage`, `workflow_id`) is Factory's own and set in code.
+  @editable [:name, :role, :kind, :prompt, :model, :kiro_mode, :session, :x, :y, :action]
+
+  @doc """
+  The full changeset for Factory's own use (`Factory.Agents.create_agent/1`): it also
+  takes `status` and `activity`. The workflow is set on the struct, never cast.
+  """
   def changeset(agent, attrs) do
     agent
-    |> cast(attrs, [
-      :name,
-      :role,
-      :kind,
-      :prompt,
-      :model,
-      :status,
-      :activity,
-      :kiro_mode,
-      :session,
-      :x,
-      :y,
-      :workflow_id,
-      :action
-    ])
+    |> cast(attrs, @editable ++ [:status, :activity])
+    |> validate()
+  end
+
+  @doc "The changeset for what a person edits: name, role, kind, prompt, model, mode, session, place and action."
+  def edit_changeset(agent, attrs) do
+    agent
+    |> cast(attrs, @editable)
+    |> validate()
+  end
+
+  defp validate(changeset) do
+    changeset
     |> update_change(:name, &String.trim/1)
     |> validate_required([:name])
     |> validate_length(:name, max: 40)

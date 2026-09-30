@@ -39,9 +39,11 @@ defmodule Factory.Sources.Source do
 
   def kinds, do: @kinds
 
+  # The workflow a source belongs to is set by Factory when the source is made
+  # (`Factory.Sources.create/3`), never cast from a form.
   def changeset(source, attrs) do
     source
-    |> cast(attrs, [:workflow_id, :kind, :name, :config, :content, :enabled, :x, :y])
+    |> cast(attrs, [:kind, :name, :config, :content, :enabled, :x, :y])
     |> update_change(:name, &String.trim/1)
     |> update_change(:content, &(&1 || ""))
     |> validate_required([:workflow_id, :kind, :name])

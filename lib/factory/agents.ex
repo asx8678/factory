@@ -37,24 +37,35 @@ defmodule Factory.Agents do
 
   def get_agent(id), do: Repo.get(Agent, id)
 
-  @doc "Creates an agent, in the current workflow unless `workflow_id` says otherwise."
+  @doc """
+  Creates an agent, in the current workflow unless `workflow_id` says otherwise. The
+  workflow is set on the record by Factory, not cast from `attrs` (see `Factory.Agents.Agent`).
+  """
   def create_agent(attrs) do
     attrs = Map.new(attrs)
+    {workflow_id, attrs} = pop_workflow_id(attrs)
 
-    attrs =
-      if attrs[:workflow_id] || attrs["workflow_id"],
-        do: attrs,
-        else: Map.put(attrs, :workflow_id, Factory.Workflows.current().id)
-
-    attrs |> insert_agent() |> changed()
+    attrs |> insert_agent(workflow_id || Factory.Workflows.current().id) |> changed()
   end
 
-  defp insert_agent(attrs), do: %Agent{} |> Agent.changeset(attrs) |> Repo.insert()
+  defp pop_workflow_id(attrs) do
+    {atom_id, attrs} = Map.pop(attrs, :workflow_id)
+    {string_id, attrs} = Map.pop(attrs, "workflow_id")
+    {atom_id || string_id, attrs}
+  end
 
+  defp insert_agent(attrs, workflow_id) do
+    %Agent{workflow_id: workflow_id} |> Agent.changeset(attrs) |> Repo.insert()
+  end
+
+  @doc """
+  Changes what a person edits on an agent (`Factory.Agents.Agent.edit_changeset/2`):
+  form params can't set its status, activity or workflow.
+  """
   def update_agent(%Agent{} = agent, attrs),
-    do: agent |> Agent.changeset(attrs) |> Repo.update() |> changed()
+    do: agent |> Agent.edit_changeset(attrs) |> Repo.update() |> changed()
 
-  def change_agent(%Agent{} = agent, attrs \\ %{}), do: Agent.changeset(agent, attrs)
+  def change_agent(%Agent{} = agent, attrs \\ %{}), do: Agent.edit_changeset(agent, attrs)
 
   @doc "Sets what an agent is doing right now (used by its Kiro session)."
   def set_activity(agent_id, status, activity) do
@@ -122,15 +133,17 @@ defmodule Factory.Agents do
 
     Repo.transact(fn ->
       with {:ok, card} <-
-             insert_agent(%{
-               name: kind.label,
-               kind: "action",
-               role: kind.blurb,
-               action: %{"type" => type, "config" => Factory.Actions.defaults(type)},
-               x: x,
-               y: y,
-               workflow_id: workflow_id
-             }),
+             insert_agent(
+               %{
+                 name: kind.label,
+                 kind: "action",
+                 role: kind.blurb,
+                 action: %{"type" => type, "config" => Factory.Actions.defaults(type)},
+                 x: x,
+                 y: y
+               },
+               workflow_id
+             ),
            :ok <- maybe_link(opts[:from], card.id) do
         {:ok, card}
       end
@@ -143,8 +156,7 @@ defmodule Factory.Agents do
     count = Repo.aggregate(from(a in Agent, where: a.workflow_id == ^workflow_id), :count)
 
     Repo.transact(fn ->
-      with {:ok, agent} <-
-             insert_agent(%{name: "Agent #{count + 1}", x: x, y: y, workflow_id: workflow_id}),
+      with {:ok, agent} <- insert_agent(%{name: "Agent #{count + 1}", x: x, y: y}, workflow_id),
            :ok <- maybe_link(opts[:from], agent.id),
            :ok <- maybe_link(agent.id, opts[:to]) do
         {:ok, agent}

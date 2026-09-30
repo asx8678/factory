@@ -234,8 +234,8 @@ defmodule Factory.Actions do
 
   defp build("git_push", c, ctx, _mode) do
     folder = folder(c, ctx)
-    remote = blank(c["remote"]) || "origin"
-    branch = blank(c["branch"])
+    remote = Factory.Text.presence(c["remote"]) || "origin"
+    branch = Factory.Text.presence(c["branch"])
 
     {:ok,
      if(branch,
@@ -283,15 +283,15 @@ defmodule Factory.Actions do
     with {:ok, pat} <- env(c["pat_env"], mode) do
       ops =
         [
-          blank(c["state"]) && %{op: "add", path: "/fields/System.State", value: c["state"]},
-          blank(c["comment"]) && %{op: "add", path: "/fields/System.History", value: c["comment"]}
+          Factory.Text.presence(c["state"]) && %{op: "add", path: "/fields/System.State", value: c["state"]},
+          Factory.Text.presence(c["comment"]) && %{op: "add", path: "/fields/System.History", value: c["comment"]}
         ]
         |> Enum.filter(& &1)
 
       what =
         [
-          blank(c["state"]) && "set state to #{c["state"]}",
-          blank(c["comment"]) && "add a comment"
+          Factory.Text.presence(c["state"]) && "set state to #{c["state"]}",
+          Factory.Text.presence(c["comment"]) && "add a comment"
         ]
         |> Enum.filter(& &1)
         |> Enum.join(" and ")
@@ -316,7 +316,7 @@ defmodule Factory.Actions do
 
       steps =
         [
-          blank(c["comment"]) &&
+          Factory.Text.presence(c["comment"]) &&
             {:http, :post, "#{base}/comments", github(token), %{body: c["comment"]},
              "Comment on #{c["repo"]}##{c["issue"]}"},
           c["close"] == "yes" &&
@@ -333,7 +333,7 @@ defmodule Factory.Actions do
     email =
       Swoosh.Email.new(
         to: c["to"] |> String.split(~r/[,;\s]+/, trim: true),
-        from: blank(c["from"]) || "factory@localhost",
+        from: Factory.Text.presence(c["from"]) || "factory@localhost",
         subject: c["subject"],
         text_body: c["body"]
       )
@@ -355,14 +355,14 @@ defmodule Factory.Actions do
     method = c["method"] |> to_string() |> String.downcase()
     method = if method in ~w(get post put patch delete), do: String.to_atom(method), else: :post
 
-    with {:ok, auth} <- api_auth(blank(c["token_env"]), mode) do
+    with {:ok, auth} <- api_auth(Factory.Text.presence(c["token_env"]), mode) do
       headers = api_headers(c["headers"]) ++ auth
 
       body =
         case {method, c["body"]} do
           {m, _} when m in [:get, :delete] -> nil
           {_, {:json, data}} -> api_body({:json, data})
-          {_, text} -> if blank(text), do: api_body(text), else: nil
+          {_, text} -> if Factory.Text.presence(text), do: api_body(text), else: nil
         end
 
       {:ok,
@@ -397,7 +397,7 @@ defmodule Factory.Actions do
   defp env_name(key), do: "FACTORY_" <> String.upcase(key)
 
   defp folder(c, ctx) do
-    case blank(c["folder"]) do
+    case Factory.Text.presence(c["folder"]) do
       nil -> ctx["folder"]
       f -> Path.expand(f)
     end
@@ -463,13 +463,6 @@ defmodule Factory.Actions do
   defp azure_base(c), do: "https://dev.azure.com/#{enc(c["org"])}/#{enc(c["project"])}"
   defp enc(s), do: URI.encode(String.trim(to_string(s)), &URI.char_unreserved?/1)
 
-  defp blank(v) do
-    case String.trim(to_string(v || "")) do
-      "" -> nil
-      s -> s
-    end
-  end
-
   defp describe({:cmd, folder, args, label}),
     do: "#{label}: git #{Enum.join(args, " ")} (in #{folder})"
 
@@ -502,19 +495,24 @@ defmodule Factory.Actions do
     e -> {:error, "#{label} failed: #{Exception.message(e)}"}
   end
 
+  # The command runs in its own task, not linked to the caller: a crash there (a folder
+  # that vanished, a port failure) is this step's error, not the engine's.
   defp perform({:sh, folder, command, env, shown}) do
-    task =
-      Task.async(fn ->
-        System.cmd("sh", ["-c", command], cd: folder, env: env, stderr_to_stdout: true)
-      end)
+    if is_binary(folder) and File.dir?(folder) do
+      task =
+        Task.Supervisor.async_nolink(Factory.TaskSupervisor, fn ->
+          System.cmd("sh", ["-c", command], cd: folder, env: env, stderr_to_stdout: true)
+        end)
 
-    case Task.yield(task, 600_000) || Task.shutdown(task) do
-      {:ok, {out, 0}} -> {:ok, "Run `#{shown}` (must succeed): passed\n#{tail(out)}"}
-      {:ok, {out, code}} -> {:error, "`#{shown}` failed (exit #{code}):\n#{tail(out)}"}
-      nil -> {:error, "`#{shown}` took over 10 minutes and was stopped."}
+      case Task.yield(task, 600_000) || Task.shutdown(task) do
+        {:ok, {out, 0}} -> {:ok, "Run `#{shown}` (must succeed): passed\n#{tail(out)}"}
+        {:ok, {out, code}} -> {:error, "`#{shown}` failed (exit #{code}):\n#{tail(out)}"}
+        {:exit, reason} -> {:error, "`#{shown}` failed: #{Exception.format_exit(reason)}"}
+        nil -> {:error, "`#{shown}` took over 10 minutes and was stopped."}
+      end
+    else
+      {:error, "The folder #{folder || "(none)"} doesn't exist."}
     end
-  rescue
-    e -> {:error, "`#{shown}` failed: #{Exception.message(e)}"}
   end
 
   defp perform({:http, method, url, headers, body, label}) do

@@ -32,9 +32,18 @@ defmodule Factory.Chat do
   to that agent, and every reply is tagged with it so it shows in that agent's view.
   Before a run starts, what's written to a planner is planned into tasks
   (`Factory.ChatPlanner`), and files attached with it are its spec.
+
+  Returns `:ok`, or `{:error, :gone}` when the run no longer exists (pruned while the
+  chat was open, or deleted): nothing is posted then.
   """
   def handle(%Run{} = run, text, files \\ [], opts \\ []) do
-    run = Runs.get_run(run.id)
+    case Runs.get_run(run.id) do
+      nil -> {:error, :gone}
+      run -> handle_message(run, text, files, opts)
+    end
+  end
+
+  defp handle_message(run, text, files, opts) do
     text = String.trim(text)
     agent = opts[:to]
     # "/ask Coder …" from the All view also belongs in Coder's own chat.
@@ -101,8 +110,20 @@ defmodule Factory.Chat do
     end
   end
 
-  @doc "Runs a button action shown under a factory message."
-  def action(%Run{} = run, "start"), do: command(Runs.get_run(run.id), "/run")
+  @doc """
+  Runs a button action shown under a factory message: `:ok`, or `{:error, :gone}` when
+  the run no longer exists.
+  """
+  def action(%Run{} = run, "start") do
+    case Runs.get_run(run.id) do
+      nil ->
+        {:error, :gone}
+
+      run ->
+        command(run, "/run")
+        :ok
+    end
+  end
 
   @doc """
   Gives a run exactly these spec files (`[{name, content}]`) and the tasks in them,
@@ -116,8 +137,14 @@ defmodule Factory.Chat do
 
   # Files dropped into the chat go into the run's spec, which the run then follows.
   defp attach(run, files) do
-    {:ok, _spec} = run |> Specs.for_run() |> Specs.add_files(files)
-    report(Runs.get_run(run.id), files)
+    with {:ok, spec} <- Specs.ensure_for_run(run),
+         {:ok, _spec} <- Specs.add_files(spec, files) do
+      report(Runs.get_run(run.id) || run, files)
+    else
+      {:error, _} ->
+        say(run, "I couldn't store #{names(files)}. Try attaching it again.")
+        run
+    end
   end
 
   defp report(run, files) do
@@ -394,11 +421,14 @@ defmodule Factory.Chat do
 
     tagged(agent, fn ->
       case Kiro.prompt(agent, run.id, text) do
-        :ok ->
+        {:ok, _ref} ->
           :ok
 
         {:error, :busy} ->
           say(run, "#{agent.name} is still answering. Try again when it's idle.")
+
+        {:error, reason} when is_binary(reason) ->
+          say(run, "Couldn't start Kiro for #{agent.name}: #{reason}")
 
         {:error, reason} ->
           say(run, "Couldn't start Kiro for #{agent.name}: #{inspect(reason)}")

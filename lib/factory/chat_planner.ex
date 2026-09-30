@@ -16,7 +16,7 @@ defmodule Factory.ChatPlanner do
   (`{:agent_stream, …}` on `"run:ID"`). If Kiro can't reach the tools, the planner
   replies with the whole plan as JSON, which replaces the tasks as before.
   """
-  alias Factory.{Agents, Kiro, PlanTools, Repo, Runs, Specs}
+  alias Factory.{Agents, Kiro, PlanTools, Repo, Runs, Specs, Text}
   alias Factory.Runs.Run
   alias Factory.Specs.{Planner, TaskCheck}
 
@@ -34,8 +34,16 @@ defmodule Factory.ChatPlanner do
 
   @doc "Adds spec files attached in the chat to the run's spec, for the planner to read."
   def keep_files(%Run{} = run, files) do
-    {:ok, _spec} = run |> Specs.for_run() |> Specs.add_files(files)
-    Runs.get_run(run.id)
+    with {:ok, spec} <- Specs.ensure_for_run(run),
+         {:ok, _spec} <- Specs.add_files(spec, files) do
+      :ok
+    else
+      {:error, _} ->
+        names = Enum.map_join(files, ", ", &elem(&1, 0))
+        Runs.post(run, "factory", "I couldn't store #{names}. Try attaching it again.")
+    end
+
+    Runs.get_run(run.id) || run
   end
 
   @doc """
@@ -58,9 +66,12 @@ defmodule Factory.ChatPlanner do
     end
   end
 
+  # Under the run's lock: the run's spec (made now if it has none), the prompt, and
+  # the run with what was asked so far as its description.
   defp prepare(run, planner, mode, findings) do
     Runs.with_locked_run(run.id, fn run ->
-      if run.status == "draft" do
+      with true <- run.status == "draft" || {:error, :not_draft},
+           {:ok, spec} <- Specs.ensure_for_run(run) do
         requests =
           for m <- Runs.list_messages(run.id),
               m.role == "user",
@@ -70,7 +81,6 @@ defmodule Factory.ChatPlanner do
               not review_message?(m),
               do: text
 
-        spec = Specs.for_run(run)
         # Base specs are rules, not part of the run's own files.
         files = Enum.reject(Specs.files(spec), &(elem(&1, 0) == "tasks.md"))
         base = Specs.base_files_for_run(run)
@@ -96,10 +106,9 @@ defmodule Factory.ChatPlanner do
           |> Ecto.Changeset.change(planner_generation: Ecto.UUID.generate())
           |> Repo.update!()
 
-        {:ok, run} = Runs.update_run(run, %{description: Enum.join(requests, "\n\n")})
-        {:ok, {run, files, prompt}}
-      else
-        {:error, :not_draft}
+        with {:ok, run} <- Runs.update_run(run, %{description: Enum.join(requests, "\n\n")}) do
+          {:ok, {run, files, prompt}}
+        end
       end
     end)
   end
@@ -317,7 +326,7 @@ defmodule Factory.ChatPlanner do
       post(
         run,
         planner,
-        with_questions(blank(reply, "Here's how I'd do it."), questions),
+        with_questions(Text.or_default(reply, "Here's how I'd do it."), questions),
         %{"tasks" => titles, "spec_hint" => files == [], "questions" => questions},
         ["start"]
       )
@@ -332,22 +341,30 @@ defmodule Factory.ChatPlanner do
 
   # The plan replaces the spec's tasks: the planner rethinks it from everything asked.
   defp finish(run, planner, files, {:ok, %{reply: reply, tasks: tasks}}) do
-    {:ok, _spec} =
-      Specs.update_spec(Specs.for_run(run), %{tasks: Planner.to_markdown(tasks, 1) <> "\n"})
+    saved =
+      with {:ok, spec} <- Specs.ensure_for_run(run),
+           do: Specs.update_spec(spec, %{tasks: Planner.to_markdown(tasks, 1) <> "\n"})
 
-    run = Runs.get_run(run.id)
-    Agents.set_activity(planner.id, "idle", nil)
+    case saved do
+      {:ok, spec} ->
+        run = Runs.get_run(run.id) || run
+        Agents.set_activity(planner.id, "idle", nil)
 
-    post(
-      run,
-      planner,
-      blank(reply, "Here's how I'd do it."),
-      %{
-        "tasks" => Enum.map(tasks, & &1["title"]),
-        "spec_hint" => files == []
-      },
-      ["start"]
-    )
+        post(
+          run,
+          planner,
+          Text.or_default(reply, "Here's how I'd do it."),
+          %{
+            # As saved: a repeated title got a count (`Factory.Specs.Planner.to_markdown/2`).
+            "tasks" => Enum.map(Specs.tasks(spec), & &1.title),
+            "spec_hint" => files == []
+          },
+          ["start"]
+        )
+
+      {:error, _} ->
+        finish(run, planner, files, {:error, "the plan couldn't be saved."})
+    end
   end
 
   defp finish(run, planner, _files, {:error, reason}) do
@@ -358,7 +375,7 @@ defmodule Factory.ChatPlanner do
   defp ask(run, planner, reply, questions) do
     body =
       with_questions(
-        blank(reply, "I need a bit more information before I can plan this."),
+        Text.or_default(reply, "I need a bit more information before I can plan this."),
         questions
       )
 
@@ -430,5 +447,4 @@ defmodule Factory.ChatPlanner do
     end
   end
 
-  defp blank(text, default), do: if(String.trim(text) == "", do: default, else: text)
 end

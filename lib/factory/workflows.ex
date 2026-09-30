@@ -110,6 +110,17 @@ defmodule Factory.Workflows do
     w |> Ecto.Changeset.change(base_spec_ids: Enum.uniq(ids)) |> Repo.update() |> changed()
   end
 
+  @doc "Takes a deleted base spec out of every workflow that started its runs with it."
+  def forget_base_spec(spec_id) when is_integer(spec_id) do
+    {count, _} =
+      Repo.update_all(from(w in Workflow, where: ^spec_id in w.base_spec_ids),
+        pull: [base_spec_ids: spec_id]
+      )
+
+    if count > 0, do: changed(:ok)
+    :ok
+  end
+
   def rename(%Workflow{} = w, name),
     do: w |> Workflow.changeset(%{name: name}) |> Repo.update() |> changed()
 
@@ -144,7 +155,12 @@ defmodule Factory.Workflows do
 
   def delete(%Workflow{}), do: {:error, :standard}
 
-  @doc "Copies a workflow (agents, prompts, settings, hand-offs) as a new custom one."
+  @doc """
+  Copies a workflow (agents, prompts, settings, hand-offs, data sources) as a new custom
+  one. Rows are copied as they are (`Ecto.Changeset.change/2`), without validating
+  them again: a source whose folder has since moved is still copied. Its repositories
+  start syncing once the copy has committed.
+  """
   def clone(%Workflow{} = w, name \\ nil) do
     result =
       Repo.transact(fn ->
@@ -158,19 +174,19 @@ defmodule Factory.Workflows do
           ids =
             Map.new(Agents.list_agents(w.id), fn a ->
               attrs = Map.take(a, ~w(name role kind prompt model kiro_mode session x y action)a)
-              new = %Agent{workflow_id: copy.id} |> Agent.changeset(attrs) |> insert_copy!()
+              new = %Agent{workflow_id: copy.id} |> Ecto.Changeset.change(attrs) |> insert_copy!()
 
               {a.id, new.id}
             end)
 
           for l <- links(w.id) do
             %Link{}
-            |> Link.changeset(%{
+            |> Ecto.Changeset.change(%{
               source_id: ids[l.source_id],
               target_id: ids[l.target_id],
               source_handle: l.source_handle,
               target_handle: l.target_handle,
-              prompt: l.prompt
+              prompt: l.prompt || ""
             })
             |> insert_copy!()
           end
@@ -191,15 +207,16 @@ defmodule Factory.Workflows do
     end
   end
 
-  # The public creation helpers broadcast and start syncs immediately. Insert copies
-  # without those effects so a rollback never exposes a partial workflow.
+  # The public creation helpers validate, broadcast and start syncs at once. Copies
+  # are inserted as they are, without those effects, so a rollback never exposes a
+  # partial workflow and a source that no longer validates still comes along.
   defp copy_sources(from_id, to_id, agent_ids) do
     for source <- Sources.list(from_id) do
       attrs = Map.take(source, ~w(kind name config content enabled x y)a)
 
       copy =
         %Sources.Source{workflow_id: to_id}
-        |> Sources.Source.changeset(attrs)
+        |> Ecto.Changeset.change(attrs)
         |> insert_copy!()
 
       for id <- Sources.agent_ids(source), copied_id = agent_ids[id], not is_nil(copied_id) do
@@ -401,7 +418,7 @@ defmodule Factory.Workflows do
   end
 
   defp prompt(step),
-    do: step["prompt"] || FactoryWeb.AgentKinds.template(step["kind"], step["name"])
+    do: step["prompt"] || Factory.Agents.Kinds.template(step["kind"], step["name"])
 
   defp stop_sessions(%Workflow{id: id}) do
     for a <- Agents.list_agents(id), do: Kiro.stop(a.id)

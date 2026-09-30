@@ -10,6 +10,7 @@ defmodule Factory.Specs.Planner do
   The first turn's summary of the project is passed to the second, so Kiro doesn't
   start from nothing. Replies are JSON; the parsers keep only what they understand.
   """
+  alias Factory.Text
 
   # The one shape a task has wherever Kiro writes one: suggestions, a run's plan, a chat
   # plan without tools, an improved or drafted task, and `Factory.PlanTools.add_tasks`.
@@ -17,7 +18,7 @@ defmodule Factory.Specs.Planner do
 
   @doc """
   What Kiro may do in the project while it plans: read anything, and run commands that
-  only look (`Factory.Kiro.Permission.looking?/1`), never change anything.
+  only look (`Factory.Kiro.Permission.looking?/2`), never change anything.
   """
   def looking_rule do
     "Don't change any files. You may run commands that only look: `git status` and " <>
@@ -44,19 +45,19 @@ defmodule Factory.Specs.Planner do
         %{
           "title" => String.slice(title, 0, 200),
           "objective" =>
-            t["objective"] |> text() |> String.replace(~r/\s*\R\s*/u, " ") |> String.slice(0, 500),
+            t["objective"] |> Text.text() |> String.replace(~r/\s*\R\s*/u, " ") |> String.slice(0, 500),
           # Only text: a number among the details is noise, unlike a requirement's "1.2".
           "details" =>
-            t["details"] |> List.wrap() |> Enum.filter(&is_binary/1) |> lines() |> Enum.take(12),
+            t["details"] |> List.wrap() |> Enum.filter(&is_binary/1) |> Text.lines() |> Enum.take(12),
           "verify" =>
-            t["verify"] |> List.wrap() |> Enum.filter(&is_binary/1) |> lines() |> Enum.take(6),
+            t["verify"] |> List.wrap() |> Enum.filter(&is_binary/1) |> Text.lines() |> Enum.take(6),
           "agent" =>
             if(is_binary(t["agent"]) and String.trim(t["agent"]) != "",
               do: String.trim(t["agent"])
             ),
           "model" => if(t["model"] in Factory.Kiro.task_models(), do: t["model"]),
           "requirements" =>
-            t["requirements"] |> List.wrap() |> Enum.map(&to_string/1) |> lines() |> Enum.take(8)
+            t["requirements"] |> List.wrap() |> Enum.map(&to_string/1) |> Text.lines() |> Enum.take(8)
         }
     end
   end
@@ -125,13 +126,19 @@ defmodule Factory.Specs.Planner do
   @doc "The tasks in `list` that have a title, in the one shape (`task/1`)."
   def tasks(list), do: list |> List.wrap() |> Enum.map(&task/1) |> Enum.reject(&is_nil/1)
 
-  defp lines(list) do
-    for item <- List.wrap(list),
-        is_binary(item) or is_number(item),
-        line <- item |> to_string() |> String.split(~r/\R/u),
-        line = String.trim(line),
-        line != "",
-        do: line
+  @doc """
+  The tasks (`task/1`'s shape) with no two titles the same, nor one in `taken` (the
+  titles of tasks they're added to): a repeat gets a count, "Add the form (2)". A run
+  finds its tasks by title, so titles must be unique.
+  """
+  def unique_titles(tasks, taken \\ []) do
+    tasks
+    |> Enum.reduce({[], taken}, fn task, {done, taken} ->
+      title = Factory.Spec.unique_title(task["title"], taken)
+      {[Map.put(task, "title", title) | done], [title | taken]}
+    end)
+    |> elem(0)
+    |> Enum.reverse()
   end
 
   @doc "Prompt for turn 1: read the project, then ask questions."
@@ -380,10 +387,10 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
       tasks = tasks(data["tasks"])
 
       plan = %{
-        requirements: text(data["requirements"]),
-        design: text(data["design"]),
+        requirements: Text.text(data["requirements"]),
+        design: Text.text(data["design"]),
         tasks: Enum.take(tasks, 30),
-        why: text(data["why"])
+        why: Text.text(data["why"])
       }
 
       cond do
@@ -690,7 +697,7 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
     with {:ok, data} <- decode(reply) do
       questions =
         for q <- List.wrap(data["questions"]),
-            text = if(is_map(q), do: text(q["question"]), else: text(q)),
+            text = if(is_map(q), do: Text.text(q["question"]), else: Text.text(q)),
             text != "" do
           options =
             if is_map(q), do: q["options"] |> List.wrap() |> Enum.filter(&is_binary/1), else: []
@@ -704,7 +711,7 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
       unclear = data["clear"] == false and questions != []
       tasks = if unclear, do: [], else: Enum.take(tasks, 30)
 
-      {:ok, %{reply: text(data["reply"]), tasks: tasks, questions: Enum.take(questions, 5)}}
+      {:ok, %{reply: Text.text(data["reply"]), tasks: tasks, questions: Enum.take(questions, 5)}}
     end
   end
 
@@ -735,7 +742,7 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
              agent: t["agent"],
              model: t["model"],
              requirements: t["requirements"],
-             why: text(data["why"])
+             why: Text.text(data["why"])
            }}
       end
     end
@@ -755,10 +762,10 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
             is_binary(q),
             options = item["options"] |> List.wrap() |> Enum.filter(&is_binary/1) |> Enum.take(4),
             length(options) >= 2 do
-          %{"question" => String.trim(q), "why" => text(item["why"]), "options" => options}
+          %{"question" => String.trim(q), "why" => Text.text(item["why"]), "options" => options}
         end
 
-      {:ok, %{"project" => text(data["project"]), "questions" => Enum.take(questions, 6)}}
+      {:ok, %{"project" => Text.text(data["project"]), "questions" => Enum.take(questions, 6)}}
     end
   end
 
@@ -787,6 +794,7 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
   """
   def to_markdown(tasks, first) do
     tasks
+    |> unique_titles()
     |> Enum.with_index(first)
     |> Enum.map_join("\n\n", fn {task, n} ->
       {_, [block]} = Factory.Spec.blocks("- [ ] #{n}. #{task["title"]}")
@@ -864,14 +872,9 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
   end
 
   defp decode(reply) do
-    with [json] <- Regex.run(~r/\{.*\}/s, reply),
-         {:ok, data} when is_map(data) <- JSON.decode(json) do
-      {:ok, data}
-    else
-      _ -> {:error, "Kiro's reply wasn't something Factory could read."}
+    case Text.decode_json(reply) do
+      {:ok, data} -> {:ok, data}
+      :error -> {:error, "Kiro's reply wasn't something Factory could read."}
     end
   end
-
-  defp text(s) when is_binary(s), do: String.trim(s)
-  defp text(_), do: ""
 end

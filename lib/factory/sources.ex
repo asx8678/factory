@@ -54,8 +54,9 @@ defmodule Factory.Sources do
         do: attrs,
         else: Map.merge(attrs, next_position(workflow_id))
 
+    # The workflow is Factory's choice, never a form field.
     %Source{workflow_id: workflow_id}
-    |> Source.changeset(Map.put(attrs, "workflow_id", workflow_id))
+    |> Source.changeset(attrs)
     |> Repo.insert()
     |> after_change(fn source ->
       if agent_ids, do: set_agents(source, agent_ids)
@@ -82,32 +83,6 @@ defmodule Factory.Sources do
     if repo?(source), do: File.rm_rf(local_path(source))
     if source.kind == "pageindex", do: File.rm_rf(sections_dir(source))
     source |> Repo.delete() |> after_change(fn _ -> :ok end)
-  end
-
-  @doc """
-  Copies a workflow's sources to another workflow (used when cloning), attached to
-  the copies of the same agents: `agent_ids` maps old agent ids to new ones.
-  Pass `sync: false` inside transactions and start the copied sources after commit.
-  """
-  def copy(from_workflow_id, to_workflow_id, agent_ids \\ %{}, opts \\ []) do
-    for s <- list(from_workflow_id) do
-      create(
-        to_workflow_id,
-        %{
-          kind: s.kind,
-          name: s.name,
-          config: s.config,
-          content: s.content,
-          enabled: s.enabled,
-          x: s.x,
-          y: s.y,
-          agents: s |> agent_ids() |> Enum.map(&agent_ids[&1]) |> Enum.reject(&is_nil/1)
-        },
-        opts
-      )
-    end
-
-    :ok
   end
 
   # Attaching sources to agents
@@ -369,7 +344,7 @@ defmodule Factory.Sources do
 
   defp git_sync(source) do
     dir = local_path(source)
-    branch = blank_nil(source.config["branch"])
+    branch = Factory.Text.presence(source.config["branch"])
 
     deadline =
       System.monotonic_time(:millisecond) +
@@ -411,7 +386,7 @@ defmodule Factory.Sources do
   defp git_env(%Source{kind: "azure_devops", config: c}) do
     base = [{"GIT_TERMINAL_PROMPT", "0"}]
 
-    case blank_nil(c["pat_env"]) do
+    case Factory.Text.presence(c["pat_env"]) do
       nil ->
         {:ok, base}
 
@@ -449,13 +424,6 @@ defmodule Factory.Sources do
 
       true ->
         String.slice(out, -600, 600)
-    end
-  end
-
-  defp blank_nil(v) do
-    case String.trim(to_string(v || "")) do
-      "" -> nil
-      s -> s
     end
   end
 
@@ -510,7 +478,7 @@ defmodule Factory.Sources do
           do: remote_url(s),
           else: "Azure DevOps #{s.config["org"]}/#{s.config["project"]}/#{s.config["repo"]}"
 
-      branch = if b = blank_nil(s.config["branch"]), do: ", branch #{b}", else: ""
+      branch = if b = Factory.Text.presence(s.config["branch"]), do: ", branch #{b}", else: ""
 
       "## Repository \"#{s.name}\" (#{where}#{branch})\nA local copy is at #{local_path(s)}."
     end
@@ -527,7 +495,7 @@ defmodule Factory.Sources do
     case PageIndex.load(s.config["path"]) do
       {:ok, tree} ->
         dir = if tree.text?, do: ensure_sections(s, tree)
-        doc = blank_nil(s.config["document"])
+        doc = Factory.Text.presence(s.config["document"])
 
         how =
           cond do
@@ -557,7 +525,7 @@ defmodule Factory.Sources do
 
   defp describe(%Source{kind: "meta_index"} = s) do
     root =
-      blank_nil(s.config["root"]) ||
+      Factory.Text.presence(s.config["root"]) ||
         (s.config["path"] && Path.dirname(Path.expand(s.config["path"])))
 
     at = if s.config["path"], do: " at #{Path.expand(s.config["path"])}", else: ""

@@ -5,6 +5,7 @@ defmodule Factory.Specs.Review do
 
   The prompt asks for JSON only; `parse/1` reads it and keeps only what it knows.
   """
+  alias Factory.Text
 
   @checks [
     {"requirements", "Clear requirements",
@@ -58,8 +59,7 @@ defmodule Factory.Specs.Review do
 
   @doc "Reads Kiro's reply. Returns `{:ok, review}` or `{:error, reason}`."
   def parse(reply) do
-    with json when is_binary(json) <- json_object(reply),
-         {:ok, %{"score" => score} = data} when is_number(score) <- JSON.decode(json) do
+    with {:ok, %{"score" => score} = data} when is_number(score) <- Text.decode_json(reply) do
       score = score |> round() |> max(0) |> min(100)
       known = Enum.map(@checks, &elem(&1, 0))
 
@@ -67,13 +67,13 @@ defmodule Factory.Specs.Review do
         for %{"id" => id, "status" => status} = c <- List.wrap(data["checks"]),
             id in known,
             status in ~w(pass warn fail),
-            do: %{"id" => id, "status" => status, "note" => text(c["note"])}
+            do: %{"id" => id, "status" => status, "note" => Text.text(c["note"])}
 
       {:ok,
        %{
          "score" => score,
          "verdict" => verdict(score),
-         "summary" => text(data["summary"]),
+         "summary" => Text.text(data["summary"]),
          "checks" => Enum.sort_by(checks, &Enum.find_index(known, fn k -> k == &1["id"] end)),
          "improvements" =>
            data["improvements"] |> List.wrap() |> Enum.filter(&is_binary/1) |> Enum.take(6)
@@ -83,14 +83,4 @@ defmodule Factory.Specs.Review do
     end
   end
 
-  # The outermost {...} in the reply, which may be wrapped in a ```json fence or prose.
-  defp json_object(reply) do
-    case Regex.run(~r/\{.*\}/s, reply) do
-      [json] -> json
-      _ -> nil
-    end
-  end
-
-  defp text(s) when is_binary(s), do: String.trim(s)
-  defp text(_), do: ""
 end

@@ -15,7 +15,49 @@ defmodule Factory.Runs do
   @doc "Subscribes to `{:active_runs_changed}`: a run was made, removed or changed status."
   def subscribe_active, do: Phoenix.PubSub.subscribe(Factory.PubSub, "runs:active")
 
-  defp broadcast(topic, msg), do: Phoenix.PubSub.broadcast(Factory.PubSub, topic, msg)
+  # Broadcasts made inside a transaction wait in the process until it commits.
+  @pending :factory_pending_broadcasts
+
+  @doc """
+  Broadcasts `msg` on Factory's PubSub topic. Inside a transaction (`transact/1`,
+  `with_locked_run/2`) it waits until the transaction has committed, and is dropped if
+  it rolls back, so a page never hears of a change that isn't there.
+  """
+  def broadcast(topic, msg) do
+    if Repo.in_transaction?() do
+      Process.put(@pending, [{topic, msg} | Process.get(@pending, [])])
+      :ok
+    else
+      Phoenix.PubSub.broadcast(Factory.PubSub, topic, msg)
+    end
+  end
+
+  @doc """
+  `Repo.transact/1`, then the broadcasts made in it (`broadcast/2`), each once, when it
+  committed. Inside another transaction it only runs `fun`: the outer one broadcasts.
+  """
+  def transact(fun) do
+    if Repo.in_transaction?() do
+      Repo.transact(fun)
+    else
+      Process.delete(@pending)
+
+      try do
+        result = Repo.transact(fun)
+        if match?({:ok, _}, result), do: flush_broadcasts()
+        result
+      after
+        Process.delete(@pending)
+      end
+    end
+  end
+
+  defp flush_broadcasts do
+    for {topic, msg} <- Process.get(@pending, []) |> Enum.reverse() |> Enum.uniq(),
+        do: Phoenix.PubSub.broadcast(Factory.PubSub, topic, msg)
+
+    :ok
+  end
 
   @doc "The latest runs, newest first, with their tasks: `limit` of them (default 30)."
   def list_runs(limit \\ 30) do
@@ -57,9 +99,12 @@ defmodule Factory.Runs do
 
   def get_run(id), do: Run |> Repo.get(id) |> Repo.preload(:tasks)
 
-  @doc "Reads the latest run under a row lock and applies a transactional callback."
+  @doc """
+  Reads the latest run under a row lock and applies a transactional callback
+  (`transact/1`: what it broadcasts goes out once the transaction has committed).
+  """
   def with_locked_run(id, fun) do
-    Repo.transact(fn ->
+    transact(fn ->
       case Repo.one(from r in Run, where: r.id == ^id, lock: "FOR UPDATE") do
         nil -> {:error, :not_found}
         run -> fun.(Repo.preload(run, :tasks))
@@ -130,14 +175,16 @@ defmodule Factory.Runs do
     end)
   end
 
+  @doc """
+  Changes a run and tells its pages (`tasks_changed/2`). Inside a transaction the pages
+  hear of it once it has committed (`broadcast/2`).
+  """
   def update_run(%Run{} = run, attrs) do
     old_status = run.status
 
     with {:ok, run} <- run |> Run.changeset(attrs) |> Repo.update(force: true) do
       run = Repo.preload(run, :tasks, force: true)
-      broadcast("run:#{run.id}", {:run_updated, run})
-      broadcast("runs", {:runs_changed})
-      if run.status != old_status, do: broadcast("runs:active", {:active_runs_changed})
+      tasks_changed(run, status_changed: run.status != old_status)
       {:ok, run}
     end
   end
@@ -167,10 +214,16 @@ defmodule Factory.Runs do
     Repo.preload(run, :tasks, force: true)
   end
 
-  @doc "Tells the run's pages its tasks changed (see `mark_tasks_done/2`)."
-  def tasks_changed(%Run{} = run) do
+  @doc """
+  Tells the run's pages the run or its tasks changed (see `mark_tasks_done/2`, which
+  doesn't). Inside a transaction they hear of it once it has committed (`broadcast/2`).
+  With `status_changed: true` the pages counting active runs hear of it too.
+  """
+  def tasks_changed(%Run{} = run, opts \\ []) do
     broadcast("run:#{run.id}", {:run_updated, run})
     broadcast("runs", {:runs_changed})
+    if opts[:status_changed], do: broadcast("runs:active", {:active_runs_changed})
+    :ok
   end
 
   @doc """
@@ -218,10 +271,7 @@ defmodule Factory.Runs do
   # The first markdown heading in the spec, or the first file name.
   defp spec_title([{name, _} | _] = files) do
     Enum.find_value(files, Path.rootname(name), fn {_, content} ->
-      case Regex.run(~r/^#\s+(.+)$/m, content) do
-        [_, heading] -> heading |> String.trim() |> String.slice(0, 80)
-        _ -> nil
-      end
+      Factory.Text.first_heading(content)
     end)
   end
 
@@ -271,9 +321,14 @@ defmodule Factory.Runs do
     end
   end
 
+  @doc """
+  Posts a message to the run's chat and tells the chat (`broadcast/2`). Returns the
+  message, or `{:error, :gone}` when the run no longer exists (pruned, or deleted
+  meanwhile) rather than raising.
+  """
   def post(%Run{} = run, role, body, opts \\ []) do
-    message =
-      Repo.insert!(%Message{
+    result =
+      %Message{
         run_id: run.id,
         role: role,
         body: body,
@@ -281,9 +336,18 @@ defmodule Factory.Runs do
         actions: Keyword.get(opts, :actions, []),
         author: Keyword.get(opts, :author),
         meta: Keyword.get(opts, :meta, %{})
-      })
+      }
+      |> Ecto.Changeset.change()
+      |> Ecto.Changeset.foreign_key_constraint(:run_id)
+      |> Repo.insert()
 
-    broadcast("run:#{run.id}", {:message, message})
-    message
+    case result do
+      {:ok, message} ->
+        broadcast("run:#{run.id}", {:message, message})
+        message
+
+      {:error, _changeset} ->
+        {:error, :gone}
+    end
   end
 end

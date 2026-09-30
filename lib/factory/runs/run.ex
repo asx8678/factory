@@ -28,6 +28,12 @@ defmodule Factory.Runs.Run do
     timestamps(type: :utc_datetime)
   end
 
+  @doc """
+  Factory's own changeset: `Factory.Runs.update_run/2` is only ever called with
+  attributes built in code (a status the engine sets, settings the chat chose). Form
+  params never reach it: a person renames a run through `/rename`, which passes the
+  title alone.
+  """
   def changeset(run, attrs) do
     run
     |> cast(attrs, [

@@ -57,17 +57,27 @@ defmodule FactoryWeb.WorkflowsLive do
      )}
   end
 
-  # Another tab changed the graph. Close the panel if its agent was deleted there,
-  # and leave a workflow that was deleted there.
-  # An action run from its panel finished.
-  def handle_info({:action_result, id, result}, socket) do
+  # An action run from its panel finished (`run_action/2`), or crashed: either way the
+  # card stops running and its panel shows the outcome.
+  def handle_async({:action, id}, {:ok, result}, socket),
+    do: {:noreply, action_finished(socket, id, result)}
+
+  def handle_async({:action, id}, {:exit, reason}, socket) do
+    result = {:error, "The action crashed: #{Exception.format_exit(reason)}"}
+    Agents.set_activity(id, "error", String.slice(elem(result, 1), 0, 200))
+    {:noreply, action_finished(socket, id, result)}
+  end
+
+  defp action_finished(socket, id, result) do
     socket = update(socket, :running_actions, &MapSet.delete(&1, id))
 
     if socket.assigns.selected && socket.assigns.selected.id == id,
-      do: {:noreply, socket |> assign(action_result: result) |> refresh()},
-      else: {:noreply, refresh(socket)}
+      do: socket |> assign(action_result: result) |> refresh(),
+      else: refresh(socket)
   end
 
+  # Another tab changed the graph. Close the panel if its agent was deleted there,
+  # and leave a workflow that was deleted there.
   # An agent's status or usage moved: patch its card in place, without reloading the
   # workflow (the canvas follows the graph attribute). Other workflows' agents are skipped.
   def handle_info({:agent_activity, agent}, socket) do
@@ -390,12 +400,16 @@ defmodule FactoryWeb.WorkflowsLive do
   end
 
   def handle_event("wf_clone", _, socket) do
-    {:ok, copy} = Workflows.clone(socket.assigns.workflow)
+    case Workflows.clone(socket.assigns.workflow) do
+      {:ok, copy} ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "Cloned as “#{copy.name}”.")
+         |> push_patch(to: ~p"/workflows/#{copy.id}")}
 
-    {:noreply,
-     socket
-     |> put_flash(:info, "Cloned as “#{copy.name}”.")
-     |> push_patch(to: ~p"/workflows/#{copy.id}")}
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Couldn't clone the workflow. Try again.")}
+    end
   end
 
   def handle_event("wf_restore", _, socket) do
@@ -480,19 +494,24 @@ defmodule FactoryWeb.WorkflowsLive do
   end
 
   def handle_event("source_edit", %{"id" => id}, socket) do
-    source = Sources.get(id)
-    form = source |> Sources.change() |> to_form(as: :source)
+    case Sources.get(id) do
+      nil ->
+        {:noreply, socket |> put_flash(:error, "That source is gone.") |> reload_sources()}
 
-    {:noreply,
-     assign(socket,
-       sources_view: :form,
-       source_return: if(socket.assigns.sources_view == :list, do: :list),
-       source_kind: source.kind,
-       source_form: form,
-       editing_source: source,
-       source_agents: Agents.list_agents(socket.assigns.workflow.id),
-       attached: MapSet.new(Sources.agent_ids(source))
-     )}
+      source ->
+        form = source |> Sources.change() |> to_form(as: :source)
+
+        {:noreply,
+         assign(socket,
+           sources_view: :form,
+           source_return: if(socket.assigns.sources_view == :list, do: :list),
+           source_kind: source.kind,
+           source_form: form,
+           editing_source: source,
+           source_agents: Agents.list_agents(socket.assigns.workflow.id),
+           attached: MapSet.new(Sources.agent_ids(source))
+         )}
+    end
   end
 
   def handle_event("source_validate", %{"source" => params}, socket) do
@@ -821,24 +840,24 @@ defmodule FactoryWeb.WorkflowsLive do
     {:noreply, assign(socket, action_result: result)}
   end
 
+  # Runs the action in the background; `handle_async/3` takes the result, or the
+  # crash, so the card never stays "running".
   defp run_action(socket, card) do
-    lv = self()
     Agents.set_activity(card.id, "running", "Running")
-
-    Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
-      result = Actions.run(card)
-
-      {status, text} =
-        if match?({:ok, _}, result), do: {"done", "Done"}, else: {"error", elem(result, 1)}
-
-      Agents.set_activity(card.id, status, String.slice(text, 0, 200))
-      send(lv, {:action_result, card.id, result})
-    end)
 
     {:noreply,
      socket
      |> update(:running_actions, &MapSet.put(&1, card.id))
-     |> assign(action_result: :running)}
+     |> assign(action_result: :running)
+     |> start_async({:action, card.id}, fn ->
+       result = Actions.run(card)
+
+       {status, text} =
+         if match?({:ok, _}, result), do: {"done", "Done"}, else: {"error", elem(result, 1)}
+
+       Agents.set_activity(card.id, status, String.slice(text, 0, 200))
+       result
+     end)}
   end
 
   # The card with the form's unsaved values (name and settings).

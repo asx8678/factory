@@ -4,7 +4,7 @@ defmodule Factory.Specs do
   requirements, design and tasks, each approved by a person before the next step opens. An approved spec starts runs.
   """
   import Ecto.Query
-  alias Factory.{Repo, Runs, Spec}
+  alias Factory.{Repo, Runs, Spec, Text}
   alias Factory.Specs.{Planner, Review}
   alias Factory.Specs.Spec, as: SpecDoc
 
@@ -67,23 +67,57 @@ defmodule Factory.Specs do
   A run's own spec: its plan (overview, requirements, design, tasks). Everything that
   plans a run writes here, whether in the chat or on the Spec page. Until the run
   starts, its tasks and the text its agents read follow the spec (`update_spec/2`).
-  Made the first time it's needed, in the run's project folder.
+  Made the first time it's needed, in the run's project folder. Raises when it can't
+  be made; `ensure_for_run/1` returns the error instead.
   """
-  def for_run(%Factory.Runs.Run{spec_id: id} = run) when is_integer(id),
-    do: get_spec(id) || new_for_run(run)
+  def for_run(%Factory.Runs.Run{} = run) do
+    case ensure_for_run(run) do
+      {:ok, spec} -> spec
+      {:error, reason} -> raise "couldn't make a spec for run #{run.id}: #{inspect(reason)}"
+    end
+  end
 
-  def for_run(%Factory.Runs.Run{} = run), do: new_for_run(run)
+  @doc """
+  `for_run/1` as `{:ok, spec}`, or `{:error, changeset}` when the spec can't be saved
+  and `{:error, :not_found}` when the run is gone. A new spec is made in one
+  transaction under the run's lock, so two callers at once end up with the same spec.
+  """
+  def ensure_for_run(%Factory.Runs.Run{spec_id: id} = run) when is_integer(id) do
+    case get_spec(id) do
+      nil -> new_for_run(run)
+      spec -> {:ok, spec}
+    end
+  end
+
+  def ensure_for_run(%Factory.Runs.Run{} = run), do: new_for_run(run)
 
   # A run planned before it had a spec keeps its files in its spec text; the new spec
   # starts from them, so the run's tasks aren't lost.
   defp new_for_run(run) do
-    {:ok, spec} = create_spec(run.title)
-    {:ok, spec} = set_project_dir(spec, run.settings["project_dir"])
-    {:ok, _run} = Factory.Runs.update_run(run, %{spec_id: spec.id})
+    result =
+      Runs.with_locked_run(run.id, fn locked ->
+        # Another caller may have made it while this one waited for the lock.
+        case locked.spec_id && get_spec(locked.spec_id) do
+          %SpecDoc{} = spec ->
+            {:ok, {:found, spec}}
 
-    case run_files(run.spec) do
-      [] -> spec
-      files -> spec |> add_files(files) |> elem(1)
+          _ ->
+            with {:ok, spec} <- create_spec(locked.title),
+                 {:ok, spec} <- set_project_dir(spec, locked.settings["project_dir"]),
+                 {:ok, _run} <- Runs.update_run(locked, %{spec_id: spec.id}),
+                 {:ok, spec} <- add_run_files(spec, locked.spec) do
+              {:ok, {:made, spec}}
+            end
+        end
+      end)
+
+    with {:ok, {_found_or_made, spec}} <- result, do: {:ok, spec}
+  end
+
+  defp add_run_files(spec, text) do
+    case run_files(text) do
+      [] -> {:ok, spec}
+      files -> add_files(spec, files)
     end
   end
 
@@ -195,12 +229,7 @@ defmodule Factory.Specs do
     end
   end
 
-  defp name_of({_file, text, _}) do
-    case Regex.run(~r/^#\s+(.+)$/m, text) do
-      [_, heading] -> heading |> String.trim() |> String.slice(0, 80)
-      _ -> nil
-    end
-  end
+  defp name_of({_file, text, _}), do: Text.first_heading(text)
 
   defp fallback_name({file, _, _}) when is_binary(file), do: Path.rootname(Path.basename(file))
   defp fallback_name(_description), do: "New spec"
@@ -221,20 +250,37 @@ defmodule Factory.Specs do
   defp missing?(spec, part),
     do: String.trim(Map.fetch!(spec, String.to_existing_atom(part))) == ""
 
-  @doc "Changes the spec's text. A run planned in it and not started yet follows the change."
+  @doc """
+  Changes the spec's text. Every run planned in it that hasn't started (its draft runs)
+  follows the change: its tasks and the text its agents read (`sync_run/2`).
+  `{:error, changeset}` when the change is invalid; `{:error, reason}` when a run
+  couldn't follow it, in which case the change is still saved. Inside a transaction the
+  pages hear of it once it has committed (`Factory.Runs.broadcast/2`).
+  """
   def update_spec(%SpecDoc{} = spec, attrs) do
-    with {:ok, spec} <- spec |> SpecDoc.changeset(attrs) |> Repo.update() |> preloaded() do
-      case home_run(spec) do
-        %{status: "draft"} = run -> sync_run(spec, run)
-        _ -> :ok
-      end
-
-      {:ok, spec}
+    with {:ok, spec} <- spec |> SpecDoc.changeset(attrs) |> Repo.update(),
+         :ok <- sync_draft_runs(preload(spec)) do
+      preloaded({:ok, spec})
     end
   end
 
+  defp sync_draft_runs(%SpecDoc{runs: runs} = spec) do
+    Enum.reduce_while(runs, :ok, fn
+      %{status: "draft"} = run, :ok ->
+        case sync_run(spec, run) do
+          {:ok, _run} -> {:cont, :ok}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+
+      _run, :ok ->
+        {:cont, :ok}
+    end)
+  end
+
+  @doc "Deletes a spec. Workflows that started their runs with it (a base spec) forget it."
   def delete_spec(%SpecDoc{} = spec) do
     with {:ok, spec} <- Repo.delete(spec) do
+      Factory.Workflows.forget_base_spec(spec.id)
       broadcast("specs", {:specs_changed})
       {:ok, spec}
     end
@@ -291,7 +337,7 @@ defmodule Factory.Specs do
         {:error, :nothing_missing}
 
       write ->
-        run = home_run(spec)
+        run = loaded_home_run(spec)
 
         with %Factory.Agents.Workflow{} = workflow <- Factory.Workflows.for_run(run || %{}) do
           type = Factory.Runs.Types.get(Factory.Workflows.kind(workflow))
@@ -309,7 +355,11 @@ defmodule Factory.Specs do
               builders: builders(spec)
             )
 
-          {:ok, spec} = set_write(spec, %{"status" => "running", "writing" => write})
+          ref = Ecto.UUID.generate()
+
+          {:ok, spec} =
+            set_write(spec, %{"status" => "running", "writing" => write, "ref" => ref})
+
           dir = project_dir(spec)
           model = Factory.Kiro.planning_model()
 
@@ -330,35 +380,73 @@ defmodule Factory.Specs do
                 Planner.parse_run_plan(reply, write)
               end
 
-            if spec = get_spec(spec.id), do: wrote(spec, write, result)
+            wrote(spec.id, write, ref, result)
           end)
 
           {:ok, spec}
         else
-          nil -> wrote(spec, write, {:error, "This run's workflow no longer exists."})
+          nil ->
+            set_write(spec, %{
+              "status" => "error",
+              "error" => "This run's workflow no longer exists."
+            })
         end
     end
   end
 
-  defp wrote(spec, _write, {:error, reason}),
-    do: set_write(spec, %{"status" => "error", "error" => reason})
+  # Keeps what Kiro wrote, under the spec's lock and only while this round (`ref`) is
+  # still the one running: a round stopped or started again meanwhile changes nothing
+  # (`{:error, :stale}`), and a spec deleted meanwhile is `{:error, :gone}`.
+  defp wrote(spec_id, write, ref, result) do
+    written =
+      Runs.transact(fn ->
+        case lock_spec(spec_id) do
+          %SpecDoc{plan: %{"write" => %{"status" => "running", "ref" => ^ref}}} = spec ->
+            case result do
+              {:ok, plan} ->
+                case update_spec(spec, written_parts(spec, write, plan)) do
+                  {:ok, spec} ->
+                    set_write(spec, %{"status" => "done", "wrote" => write, "why" => plan.why})
 
-  defp wrote(spec, write, {:ok, plan}) do
-    changes =
-      for part <- write, into: %{} do
-        case part do
-          "requirements" -> {:requirements, plan.requirements}
-          "design" -> {:design, plan.design}
-          # After any text the person gave that has no tasks in it.
-          "tasks" -> {:tasks, join(spec.tasks, Planner.to_markdown(plan.tasks, 1) <> "\n")}
+                  {:error, reason} ->
+                    set_write(spec, %{"status" => "error", "error" => save_error(reason)})
+                end
+
+              {:error, reason} ->
+                set_write(spec, %{"status" => "error", "error" => reason})
+            end
+
+          nil ->
+            {:error, :gone}
+
+          _spec ->
+            {:error, :stale}
         end
-      end
+      end)
 
-    {:ok, spec} = update_spec(spec, changes)
-    {:ok, spec} = set_write(spec, %{"status" => "done", "wrote" => write, "why" => plan.why})
-    review(spec)
-    {:ok, spec}
+    with {:ok, spec} <- written do
+      if match?({:ok, _}, result), do: review(spec)
+      {:ok, spec}
+    end
   end
+
+  defp written_parts(spec, write, plan) do
+    for part <- write, into: %{} do
+      case part do
+        "requirements" -> {:requirements, plan.requirements}
+        "design" -> {:design, plan.design}
+        # After any text the person gave that has no tasks in it.
+        "tasks" -> {:tasks, join(spec.tasks, Planner.to_markdown(plan.tasks, 1) <> "\n")}
+      end
+    end
+  end
+
+  defp save_error(%Ecto.Changeset{}), do: "Factory couldn't save what Kiro wrote."
+  defp save_error(:not_found), do: "The run this spec was written for no longer exists."
+  defp save_error(reason), do: "Factory couldn't save what Kiro wrote: #{inspect(reason)}"
+
+  defp lock_spec(spec_id),
+    do: Repo.one(from s in SpecDoc, where: s.id == ^spec_id, lock: "FOR UPDATE")
 
   defp join(text, more) do
     case String.trim(text || "") do
@@ -423,9 +511,11 @@ defmodule Factory.Specs do
         {:error, :no_folder}
 
       true ->
+        ref = Ecto.UUID.generate()
+
         {:ok, spec} =
           spec
-          |> Ecto.Changeset.change(project_dir: dir, plan: %{"status" => "reading"})
+          |> Ecto.Changeset.change(project_dir: dir, plan: %{"status" => "reading", "ref" => ref})
           |> Repo.update()
           |> preloaded()
 
@@ -433,12 +523,13 @@ defmodule Factory.Specs do
 
         run_plan(
           spec,
+          ref,
           "plan_questions",
           prompt,
           &Planner.parse_questions/1,
           %{"failed" => "reading"},
           fn result ->
-            Map.merge(result, %{"status" => "questions"})
+            Map.merge(result, %{"status" => "questions", "ref" => ref})
           end
         )
 
@@ -483,6 +574,7 @@ defmodule Factory.Specs do
 
       run_plan(
         spec,
+        ref,
         "plan_tasks",
         prompt,
         parse,
@@ -502,8 +594,8 @@ defmodule Factory.Specs do
   """
   def add_suggestions(spec_id, ref, tasks) do
     result =
-      Repo.transact(fn ->
-        spec = Repo.one(from s in SpecDoc, where: s.id == ^spec_id, lock: "FOR UPDATE")
+      Runs.transact(fn ->
+        spec = lock_spec(spec_id)
         have = (spec && spec.plan["tasks"]) || []
 
         cond do
@@ -527,19 +619,21 @@ defmodule Factory.Specs do
 
   @doc """
   Adds chosen tasks to the spec's tasks step, after the tasks already there or
-  instead of them (`:replace`). Numbering continues from the last task.
+  instead of them (`:replace`). Numbering continues from the last task. Tasks are
+  found by their title (a run's tasks, the queue), so a task whose title is already
+  taken gets a count: "Add the form (2)" (`Factory.Spec.unique_title/2`).
   """
   def add_tasks(%SpecDoc{} = spec, tasks, mode \\ :append) do
     existing = if mode == :replace, do: "", else: String.trim_trailing(spec.tasks || "")
+    there = Spec.parse_tasks(existing)
 
     first =
-      existing
-      |> Spec.parse_tasks()
+      there
       |> Enum.map(&((&1.ref || "0") |> String.split(".") |> hd() |> String.to_integer()))
       |> Enum.max(fn -> 0 end)
       |> Kernel.+(1)
 
-    added = Planner.to_markdown(tasks, first)
+    added = Planner.to_markdown(Planner.unique_titles(tasks, Enum.map(there, & &1.title)), first)
     text = if existing == "", do: added <> "\n", else: existing <> "\n\n" <> added <> "\n"
     update_spec(spec, %{tasks: text})
   end
@@ -547,8 +641,9 @@ defmodule Factory.Specs do
   defp planning?(spec), do: spec.plan["status"] in ["reading", "writing"]
 
   # Runs one turn in the background. On failure the plan keeps what it had (so the
-  # answers survive) and "failed" says which step to try again.
-  defp run_plan(spec, source, prompt, parse, base, done, opts \\ []) do
+  # answers survive) and "failed" says which step to try again. What it writes only
+  # lands while round `ref` is still the one running (`finish_plan/3`).
+  defp run_plan(spec, ref, source, prompt, parse, base, done, opts \\ []) do
     dir = spec.project_dir
     topic = "spec:#{spec.id}"
     model = Factory.Kiro.planning_model()
@@ -576,15 +671,37 @@ defmodule Factory.Specs do
           {:error, reason} -> Map.merge(base, %{"status" => "error", "error" => reason})
         end
 
-      if spec = get_spec(spec.id), do: set_plan(spec, plan)
+      finish_plan(spec.id, ref, plan)
     end)
+  end
+
+  # Writes a round's result under the spec's lock, only while that round is still the
+  # one running (as `add_suggestions/3` checks): `{:error, :stale}` once it was reset
+  # or started again, `{:error, :gone}` when the spec was deleted.
+  defp finish_plan(spec_id, ref, plan) do
+    Runs.transact(fn ->
+      case lock_spec(spec_id) do
+        %SpecDoc{plan: %{"ref" => ^ref, "status" => status}} = spec
+        when status in ["reading", "writing"] ->
+          spec |> Ecto.Changeset.change(plan: plan) |> Repo.update()
+
+        nil ->
+          {:error, :gone}
+
+        _spec ->
+          {:error, :stale}
+      end
+    end)
+    |> preloaded()
   end
 
   defp set_plan(spec, plan) do
     spec |> Ecto.Changeset.change(plan: plan) |> Repo.update() |> preloaded()
   end
 
-  defp broadcast(topic, msg), do: Phoenix.PubSub.broadcast(Factory.PubSub, topic, msg)
+  # Inside a transaction (`Factory.Runs.transact/1`, `Factory.Runs.with_locked_run/2`)
+  # the pages hear of it once it has committed.
+  defp broadcast(topic, msg), do: Runs.broadcast(topic, msg)
 
   @doc """
   Approves a step. Only an open step with text in it can be approved, except the
@@ -625,7 +742,7 @@ defmodule Factory.Specs do
   run uses (see `Factory.Sources`), as `data-sources.md`.
   """
   def kiro_files(%SpecDoc{} = spec) do
-    run = home_run(spec)
+    run = loaded_home_run(spec)
 
     workflow_id =
       case run do
@@ -656,7 +773,7 @@ defmodule Factory.Specs do
   """
   def builders(spec) do
     workflow =
-      case home_run(spec) do
+      case loaded_home_run(spec) do
         nil -> Factory.Workflows.current()
         run -> Factory.Workflows.for_run(run) || Factory.Workflows.current()
       end
@@ -674,6 +791,12 @@ defmodule Factory.Specs do
         preload: :tasks
     )
   end
+
+  # `home_run/1` from the spec's runs when they're loaded (newest first, so the home
+  # run is the last; it never changes once there), saving a query; else from the
+  # database, which also covers a spec read before its run was linked.
+  defp loaded_home_run(%SpecDoc{runs: [_ | _] = runs}), do: List.last(runs)
+  defp loaded_home_run(spec), do: home_run(spec)
 
   @doc "Sets the folder Kiro reads for this spec's project."
   def set_project_dir(%SpecDoc{} = spec, dir) do
@@ -784,7 +907,7 @@ defmodule Factory.Specs do
       task ->
         dir = project_dir(spec)
         topic = "spec:#{spec.id}"
-        asked = (home_run(spec) || %{description: nil}).description
+        asked = (loaded_home_run(spec) || %{description: nil}).description
 
         prompt =
           Planner.improve_prompt(kiro_files(spec), task, instruction, asked || "", builders(spec))
@@ -885,7 +1008,8 @@ defmodule Factory.Specs do
 
   @doc """
   Changes task `index`: its title, details (one per line) and requirements
-  (comma separated). A renamed task keeps its place in the queue.
+  (comma separated). A renamed task keeps its place in the queue; renamed to another
+  task's title, it gets a count (see `add_tasks/3`).
   """
   def update_task(%SpecDoc{} = spec, index, %{} = params) do
     title = params |> Map.get("title", "") |> String.trim()
@@ -905,7 +1029,7 @@ defmodule Factory.Specs do
       true ->
         with {:ok, spec} <-
                rewrite_tasks(spec, fn blocks ->
-                 List.update_at(blocks, index, &Spec.edit_block(&1, changes))
+                 blocks |> List.update_at(index, &Spec.edit_block(&1, changes)) |> retitle(index)
                end) do
           new_title = spec |> task_list() |> Enum.at(index) |> Map.fetch!(:title)
 
@@ -959,6 +1083,16 @@ defmodule Factory.Specs do
     |> Map.reject(fn {_, v} -> is_nil(v) end)
   end
 
+  # A task renamed to another task's title gets a count (`Factory.Spec.unique_title/2`).
+  defp retitle(blocks, index) do
+    others = for {block, i} <- Enum.with_index(blocks), i != index, do: block.title
+
+    List.update_at(blocks, index, fn block ->
+      title = Spec.unique_title(block.title, others)
+      if title == block.title, do: block, else: Spec.edit_block(block, %{title: title})
+    end)
+  end
+
   defp drop_indices(blocks, indices) do
     for {block, i} <- Enum.with_index(blocks), i not in indices, do: block
   end
@@ -983,7 +1117,7 @@ defmodule Factory.Specs do
   @doc """
   Changes task `index` of a plan being made in the chat: its title, details (one per
   line) and requirements (comma separated). `{:error, :locked}` once the tasks step is
-  approved on the Spec page.
+  approved on the Spec page. Renamed to another task's title, it gets a count.
   """
   def edit_plan_task(%SpecDoc{} = spec, index, %{} = params) do
     title = params |> Map.get("title", "") |> to_string() |> String.trim()
@@ -1004,7 +1138,7 @@ defmodule Factory.Specs do
         {:error, :not_found}
 
       true ->
-        blocks = List.update_at(blocks, index, &Spec.edit_block(&1, changes))
+        blocks = blocks |> List.update_at(index, &Spec.edit_block(&1, changes)) |> retitle(index)
         update_spec(spec, %{tasks: Spec.render_blocks(preamble, blocks)})
     end
   end

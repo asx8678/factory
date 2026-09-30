@@ -228,6 +228,38 @@ defmodule Factory.Spec do
     end
   end
 
+  @doc """
+  `title` unless a task in `taken` (titles) already has it, else the title with a
+  count, "Title (2)", "Title (3)"…, so no two tasks share one: a run's tasks, their
+  statuses and the queue are found by title.
+  """
+  def unique_title(title, taken) do
+    if title in taken do
+      Stream.iterate(2, &(&1 + 1))
+      |> Enum.find_value(fn n ->
+        candidate = "#{title} (#{n})"
+        if candidate not in taken, do: candidate
+      end)
+    else
+      title
+    end
+  end
+
+  @doc """
+  The blocks with duplicate titles renamed (`unique_title/2`), earlier ones keeping
+  theirs; `taken` are titles already in use (tasks the blocks are added to).
+  """
+  def unique_titles(blocks, taken \\ []) do
+    blocks
+    |> Enum.reduce({[], taken}, fn block, {done, taken} ->
+      title = unique_title(block.title, taken)
+      block = if title == block.title, do: block, else: edit_block(block, %{title: title})
+      {[block | done], [title | taken]}
+    end)
+    |> elem(0)
+    |> Enum.reverse()
+  end
+
   defp trim_trailing_blank(lines),
     do: lines |> Enum.reverse() |> Enum.drop_while(&(String.trim(&1) == "")) |> Enum.reverse()
 
