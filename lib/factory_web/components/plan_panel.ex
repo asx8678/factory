@@ -7,8 +7,8 @@ defmodule FactoryWeb.PlanPanel do
   panel ends with the choice to implement the plan.
 
   A task too thin to build without guessing (`Factory.Specs.TaskCheck`) is marked with
-  what it's missing. Check scope has the planner compare the plan with what was asked
-  and report, changing nothing; Improve plan has it rework the plan from the code.
+  what it's missing. Scope (check scope of work) has the planner compare the plan with what was asked
+  and report, changing nothing; Refine has it rework the plan from the code.
 
   Events (to the chat LiveView): `plan_edit`, `plan_edit_cancel`, `plan_save`,
   `plan_remove`, `plan_refine`, `plan_ask_open`, `plan_ask`, `plan_use`,
@@ -67,20 +67,20 @@ defmodule FactoryWeb.PlanPanel do
           type="button"
           phx-click="plan_scope"
           disabled={@working != nil}
-          title="Kiro reads the code and checks the plan against what you asked: what's covered, missing or beyond scope, the risks, and whether the tasks are the right size. It doesn't change the plan."
+          title="Check scope of work: Kiro reads the code and checks the plan against what you asked: what's covered, missing or beyond scope, the risks, and whether the tasks are the right size. It doesn't change the plan."
           class="flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-xs text-base-content/70 hover:bg-base-content/[0.06] hover:text-base-content disabled:opacity-40"
         >
-          <.icon name="hero-magnifying-glass-micro" class="size-3.5" /> Check scope
+          <.icon name="hero-magnifying-glass-micro" class="size-3.5" /> Scope
         </button>
         <button
           id="chat-plan-review"
           type="button"
           phx-click="plan_review"
           disabled={@working != nil}
-          title="Kiro looks at the code and the whole plan again, then reworks it: concrete tasks, the right size, the tests it needs, and what a scope check found"
+          title="Refine the plan: Kiro looks at the code and the whole plan again, then reworks it: concrete tasks, the right size, the tests it needs, and what a scope check found"
           class="flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-xs font-medium text-primary hover:bg-primary/10 disabled:opacity-40"
         >
-          <.icon name="hero-sparkles-micro" class="size-3.5" /> Improve plan
+          <.icon name="hero-sparkles-micro" class="size-3.5" /> Refine
         </button>
         <button
           id="chat-plan-spec"
@@ -132,7 +132,7 @@ defmodule FactoryWeb.PlanPanel do
             disabled={@working != nil}
             class="btn btn-primary btn-xs gap-1"
           >
-            <.icon name="hero-sparkles-micro" class="size-3.5" /> Improve plan with this
+            <.icon name="hero-sparkles-micro" class="size-3.5" /> Refine with this
           </button>
           <button type="button" phx-click="plan_check_dismiss" class="btn btn-ghost btn-xs">
             Dismiss
