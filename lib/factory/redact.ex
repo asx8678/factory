@@ -41,6 +41,10 @@ defmodule Factory.Redact do
     ~r/(\s-u\s*["']?)([^\s:"']+)(?=:)/
   ]
 
+  # Roles and accounts a database or system has built in (`pg_read_server_files`,
+  # `db_owner`, `mysql.session`): what an error about them needs searched, so they stay.
+  @built_in ~r/^(?:pg_|db_|mysql\.|rds_|rdsadmin|azure_|cloudsql|##MS_|NT AUTHORITY\\|NT SERVICE\\)/i
+
   @doc """
   The text with what identifies anyone replaced by a marker such as `[host]`. Options:
 
@@ -67,7 +71,7 @@ defmodule Factory.Redact do
     )
     |> sub(~r/((?:\s-u|--user)[=\s]+["']?[^\s:"']+:)[^\s"'<>]+/, "\\1[secret]")
     |> sub(~r/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/, "[email]")
-    |> then(&Enum.reduce(@users, &1, fn regex, text -> sub(text, regex, "\\1[user]") end))
+    |> users_given()
     |> sub(
       ~r{(?<![\w.:/~-])(?:/Users|/home)/[^/\s]+(?:/[^\s"'`<>()\[\]]*)?|[A-Za-z]:\\Users\\[^\s"'`<>]+},
       "[path]"
@@ -102,6 +106,7 @@ defmodule Factory.Redact do
         String.length(name) >= 3,
         Regex.match?(~r/\p{L}/u, name),
         not String.starts_with?(name, "["),
+        not Regex.match?(@built_in, name),
         Regex.match?(~r/[_.\\@\d-]|\p{Ll}\p{Lu}/u, name),
         uniq: true,
         do: name
@@ -148,6 +153,13 @@ defmodule Factory.Redact do
   end
 
   defp sub(text, regex, marker), do: Regex.replace(regex, text, marker)
+
+  # Each user name where it's given as one, but for the built-in ones.
+  defp users_given(text),
+    do: Enum.reduce(@users, text, fn regex, text -> Regex.replace(regex, text, &user/3) end)
+
+  defp user(whole, lead, name),
+    do: if(Regex.match?(@built_in, name), do: whole, else: lead <> "[user]")
 
   defp tenant_hosts do
     suffixes = Enum.map_join(@tenant_suffixes, "|", &Regex.escape/1)
