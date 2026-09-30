@@ -40,7 +40,8 @@ defmodule FactoryWeb.Layouts do
 
   attr :kiro, :map,
     default: nil,
-    doc: "whether Kiro is signed in (`signed_out`, `checking`), from FactoryWeb.KiroStatus"
+    doc:
+      "whether Kiro is signed in and under its usage limit (`signed_out`, `limited`, `checking`), from FactoryWeb.KiroStatus"
 
   attr :current_scope, :map,
     default: nil,
@@ -100,6 +101,10 @@ defmodule FactoryWeb.Layouts do
 
         <div class="flex items-center gap-4 text-sm">
           <.kiro_signed_out :if={@kiro && @kiro.signed_out} checking={@kiro.checking} />
+          <.kiro_limited
+            :if={@kiro && @kiro[:limited] && !@kiro.signed_out}
+            checking={@kiro.checking}
+          />
           <.link
             :if={@active_runs > 0}
             id="active-runs"
@@ -148,6 +153,35 @@ defmodule FactoryWeb.Layouts do
         type="button"
         phx-click="kiro_check"
         disabled={@checking}
+        class="rounded-full bg-base-100 px-2 py-0.5 font-medium text-base-content/75 shadow-sm transition-colors hover:text-base-content disabled:opacity-60"
+      >
+        {if @checking, do: "Checking…", else: "Check again"}
+      </button>
+    </div>
+    """
+  end
+
+  attr :checking, :boolean, default: false
+
+  # Kiro refused a prompt for its usage limit: nothing gets an answer until it resets.
+  # Check again asks Kiro one word (FactoryWeb.KiroStatus handles "kiro_limit_check").
+  defp kiro_limited(assigns) do
+    ~H"""
+    <div
+      id="kiro-limited"
+      role="status"
+      class="flex items-center gap-2 rounded-full border border-warning/40 bg-warning/10 py-0.5 pr-1 pl-2.5 text-xs text-base-content/80"
+    >
+      <.icon name="hero-exclamation-triangle-mini" class="size-4 shrink-0 text-warning" />
+      <span class="whitespace-nowrap">
+        Kiro's usage limit is reached<span class="hidden lg:inline">: agents can't answer until it resets</span>
+      </span>
+      <button
+        id="kiro-limit-check"
+        type="button"
+        phx-click="kiro_limit_check"
+        disabled={@checking}
+        title="Asks Kiro for one word: free if it's still refused, a fraction of a credit if not"
         class="rounded-full bg-base-100 px-2 py-0.5 font-medium text-base-content/75 shadow-sm transition-colors hover:text-base-content disabled:opacity-60"
       >
         {if @checking, do: "Checking…", else: "Check again"}

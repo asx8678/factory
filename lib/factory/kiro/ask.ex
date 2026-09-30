@@ -96,6 +96,12 @@ defmodule Factory.Kiro.Ask do
           {{:error, reason}, acc}
       end
 
+    # A usage limit says so on every page until a prompt is answered again.
+    case reply do
+      {:error, reason} -> if Kiro.usage_limited?(reason), do: Kiro.Catalog.note_limit(reason)
+      {:ok, _} -> if acc.prompted, do: Kiro.Catalog.clear_limit()
+    end
+
     # Only a call that got as far as the prompt costs anything.
     if acc.prompted do
       Factory.Usage.record(

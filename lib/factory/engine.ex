@@ -1306,10 +1306,15 @@ defmodule Factory.Engine do
 
     {:ok, run} = Runs.update_run(run, %{status: "paused", progress: progress})
 
+    next =
+      if Factory.Kiro.usage_limited?(reason),
+        do: "Kiro answers nothing until its usage limit resets: /resume then.",
+        else: "Fix the cause, then /resume to try it again."
+
     Runs.post(
       run,
       "factory",
-      "#{step.name} failed: #{reason}\nThe run is paused at this step. Fix the cause, then /resume to try it again.",
+      "#{step.name} failed: #{reason}\nThe run is paused at this step. #{next}",
       meta: meta(step)
     )
   end

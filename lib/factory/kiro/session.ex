@@ -1275,6 +1275,13 @@ defmodule Factory.Kiro.Session do
   defp finish_turn(%{turn: nil} = state, _error, _stop_reason), do: state
 
   defp finish_turn(%{turn: turn} = state, error, stop_reason) do
+    # A usage limit says so on every page, until a turn is answered again.
+    cond do
+      Kiro.usage_limited?(error) -> Factory.Kiro.Catalog.note_limit(error)
+      error == nil -> Factory.Kiro.Catalog.clear_limit()
+      true -> :ok
+    end
+
     # The last text streamed before the reply is posted, so none is lost in between.
     state = state |> flush_stream() |> close_elicitations()
     {request, pending} = Map.pop(state.pending, turn.request_id)

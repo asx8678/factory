@@ -9,6 +9,9 @@ defmodule FactoryWeb.KiroStatus do
   warning's Check again button (`"kiro_check"`) is handled here, for every page. A
   page that wants the check's result too defines `kiro_checked(catalog, socket)`,
   which returns the socket.
+
+  Kiro's usage limit gets a warning of its own (`limited`), from a prompt it refused,
+  until one is answered; its Check again (`"kiro_limit_check"`) asks Kiro one word.
   """
   import Phoenix.Component, only: [assign: 3]
   import Phoenix.LiveView, only: [attach_hook: 4, connected?: 1]
@@ -19,10 +22,10 @@ defmodule FactoryWeb.KiroStatus do
 
     socket =
       socket
-      |> assign(:kiro, %{signed_out: Catalog.signed_out?(), checking: false})
+      |> assign(:kiro, status())
       |> attach_hook(:kiro_status, :handle_info, fn
         {:kiro_catalog, catalog}, socket ->
-          socket = assign(socket, :kiro, %{signed_out: Catalog.signed_out?(), checking: false})
+          socket = assign(socket, :kiro, status())
 
           if function_exported?(socket.view, :kiro_checked, 2),
             do: {:halt, socket.view.kiro_checked(catalog, socket)},
@@ -36,10 +39,17 @@ defmodule FactoryWeb.KiroStatus do
           Catalog.check_later()
           {:halt, assign(socket, :kiro, %{socket.assigns.kiro | checking: true})}
 
+        "kiro_limit_check", _params, socket ->
+          Catalog.check_limit_later()
+          {:halt, assign(socket, :kiro, %{socket.assigns.kiro | checking: true})}
+
         _event, _params, socket ->
           {:cont, socket}
       end)
 
     {:cont, socket}
   end
+
+  defp status,
+    do: %{signed_out: Catalog.signed_out?(), limited: Catalog.limited?(), checking: false}
 end

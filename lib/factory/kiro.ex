@@ -308,6 +308,12 @@ defmodule Factory.Kiro do
   @doc "Whether `reason` (`stop_reason/3`) is that Kiro isn't signed in."
   def signed_out?(reason), do: reason == @signed_out
 
+  @doc """
+  Whether Kiro refused for its usage limit ("You've reached your monthly usage limit"):
+  nothing gets an answer until it resets.
+  """
+  def usage_limited?(reason), do: is_binary(reason) and reason =~ ~r/usage limit/i
+
   # What kiro-cli wrote to its log after `mark`, at most the last 64 KB of it. A log
   # that's shorter than the mark was started again: all of it is new.
   defp log_since(log_name, mark) do

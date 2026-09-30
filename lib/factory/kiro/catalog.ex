@@ -31,6 +31,13 @@ defmodule Factory.Kiro.Catalog do
   @doc "Whether the last check, or a Kiro that stopped since, found Kiro signed out."
   def signed_out?, do: Kiro.signed_out?(error())
 
+  @doc """
+  Whether Kiro refused a prompt for its usage limit, and hasn't answered one since. Kept
+  apart from `error/0`: a check of the models works during a usage limit, as it sends
+  no prompt, so it can't tell.
+  """
+  def limited?, do: get()["limit"] != nil
+
   defp get, do: :persistent_term.get(@key, %{})
 
   @doc "Loads the catalog remembered from the last check. Called at startup."
@@ -48,11 +55,13 @@ defmodule Factory.Kiro.Catalog do
   def check do
     case probe() do
       {:ok, options} ->
-        catalog = %{
-          "models" => options["model"] || [],
-          "modes" => options["mode"] || [],
-          "checked_at" => DateTime.utc_now(:second) |> DateTime.to_iso8601()
-        }
+        catalog =
+          %{
+            "models" => options["model"] || [],
+            "modes" => options["mode"] || [],
+            "checked_at" => DateTime.utc_now(:second) |> DateTime.to_iso8601()
+          }
+          |> Map.merge(Map.take(get(), ["limit", "limited_at"]))
 
         save(catalog)
         {:ok, catalog}
@@ -75,6 +84,39 @@ defmodule Factory.Kiro.Catalog do
         "failed_at" => DateTime.utc_now(:second) |> DateTime.to_iso8601()
       })
     )
+  end
+
+  @doc "Remembers that Kiro refused a prompt for its usage limit: pages say so until it answers."
+  def note_limit(reason) do
+    save(
+      Map.merge(get(), %{
+        "limit" => reason,
+        "limited_at" => DateTime.utc_now(:second) |> DateTime.to_iso8601()
+      })
+    )
+  end
+
+  @doc "Forgets the usage limit once Kiro has answered a prompt."
+  def clear_limit do
+    if limited?(), do: save(Map.drop(get(), ["limit", "limited_at"]))
+    :ok
+  end
+
+  @doc """
+  Whether the usage limit has reset, in the background: Kiro is asked for one word. Refused,
+  that costs nothing; answered, a fraction of a credit, and the warning goes.
+  """
+  def check_limit_later do
+    Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
+      case Kiro.Ask.run("Reply with the single word OK.", usage: %{source: "other"}) do
+        # Kiro.Ask forgot the limit itself.
+        {:ok, _} ->
+          :ok
+
+        {:error, reason} ->
+          if Kiro.usage_limited?(reason), do: note_limit(reason), else: save(get())
+      end
+    end)
   end
 
   @doc "Checks in the background, e.g. at startup."
