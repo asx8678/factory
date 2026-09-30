@@ -7,7 +7,12 @@ defmodule FactoryWeb.SettingsLive do
   """
   use FactoryWeb, :live_view
 
-  @tabs [{"general", "General"}, {"models", "Models"}, {"web", "Web searches"}]
+  @tabs [
+    {"general", "General"},
+    {"models", "Models"},
+    {"runs", "Runs"},
+    {"web", "Web searches"}
+  ]
 
   alias Factory.Kiro.Catalog
 
@@ -20,6 +25,7 @@ defmodule FactoryWeb.SettingsLive do
     assign(socket,
       names_form:
         to_form(%{"names" => Enum.join(Factory.Redact.saved_names(), "\n")}, as: :redact),
+      limit_form: limit_form(Factory.Engine.credit_limit()),
       models: Catalog.models() || [],
       modes: Catalog.modes() || [],
       checked_at: Catalog.checked_at(),
@@ -60,6 +66,28 @@ defmodule FactoryWeb.SettingsLive do
      )}
   end
 
+  # How many credits a run may use before it pauses to ask (Factory.Engine); 0 is none.
+  def handle_event("credit_limit", %{"limit" => %{"credits" => text}}, socket) do
+    case Float.parse(String.trim(text)) do
+      {n, ""} when n >= 0 ->
+        Factory.Prefs.put("run_credit_limit", n)
+
+        {:noreply,
+         socket
+         |> assign(limit_form: limit_form(n))
+         |> put_flash(
+           :info,
+           if(n == 0,
+             do: "Runs now go on however many credits they use.",
+             else: "Runs now pause at #{FactoryWeb.Usage.credits(n)} credits to ask."
+           )
+         )}
+
+      _ ->
+        {:noreply, put_flash(socket, :error, "The limit is a number of credits, 0 or more.")}
+    end
+  end
+
   # Asks Kiro which models it has; the answer comes back as {:kiro_catalog, _}.
   def handle_event("check_models", _, socket) do
     Catalog.check_later()
@@ -67,6 +95,9 @@ defmodule FactoryWeb.SettingsLive do
   end
 
   def kiro_checked(_catalog, socket), do: socket |> assign(checking: false) |> catalog()
+
+  defp limit_form(n),
+    do: to_form(%{"credits" => FactoryWeb.Usage.credits(n)}, as: :limit)
 
   def handle_params(params, _uri, socket) do
     tab = if params["tab"] in Enum.map(@tabs, &elem(&1, 0)), do: params["tab"], else: "general"
@@ -266,6 +297,26 @@ defmodule FactoryWeb.SettingsLive do
                     </li>
                   </ul>
                 </details>
+              </section>
+            <% "runs" -> %>
+              <section id="credit-limit">
+                <h2 class="font-medium">Credits a run may use</h2>
+                <p class="mt-0.5 text-sm text-base-content/55">
+                  A run that has used this many credits pauses before its next step and asks
+                  whether to go on; Continue lets it use as many again. It's checked between
+                  steps, so a step that's already working finishes first. 0 means no limit.
+                </p>
+                <.form
+                  for={@limit_form}
+                  id="credit-limit-form"
+                  phx-submit="credit_limit"
+                  class="mt-3 flex items-start gap-2"
+                >
+                  <div class="w-32">
+                    <.input field={@limit_form[:credits]} type="number" min="0" step="0.5" />
+                  </div>
+                  <button id="credit-limit-save" class="btn btn-sm mt-1">Save</button>
+                </.form>
               </section>
             <% "web" -> %>
               <section id="redact-names">

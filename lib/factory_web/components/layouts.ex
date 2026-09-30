@@ -164,13 +164,16 @@ defmodule FactoryWeb.Layouts do
     <.link
       id="usage-meter"
       navigate={~p"/usage"}
-      title={"#{FactoryWeb.UsageMeter.label(@usage.scope)}: #{@usage.calls} #{if @usage.calls == 1, do: "call", else: "calls"} to Kiro, #{FactoryWeb.Usage.credits(@usage.credits)} credits, about #{FactoryWeb.Usage.tokens(@usage.tokens)} tokens (estimated)"}
+      title={"#{FactoryWeb.UsageMeter.label(@usage.scope)}: #{@usage.calls} #{if @usage.calls == 1, do: "call", else: "calls"} to Kiro, #{FactoryWeb.Usage.credits(@usage.credits)} credits, about #{FactoryWeb.Usage.tokens(@usage.tokens)} tokens (estimated)#{if @usage[:limit], do: ". It pauses at #{FactoryWeb.Usage.credits(@usage.limit)} credits to ask whether to go on."}"}
       class="hidden items-center gap-2 rounded-full border border-base-content/10 px-3 py-1 text-xs tabular-nums text-base-content/70 transition-colors hover:border-base-content/25 hover:text-base-content sm:flex"
     >
       <span class="text-base-content/45">{FactoryWeb.UsageMeter.label(@usage.scope)}</span>
       <span class="flex items-center gap-1">
         <.icon name="hero-bolt-micro" class="size-3.5 text-warning/80" />
         {FactoryWeb.Usage.credits(@usage.credits)}
+        <span :if={@usage[:limit]} id="usage-limit" class="text-base-content/40">
+          / {FactoryWeb.Usage.credits(@usage.limit)}
+        </span>
       </span>
       <span class="text-base-content/50">≈{FactoryWeb.Usage.tokens(@usage.tokens)} tok</span>
     </.link>

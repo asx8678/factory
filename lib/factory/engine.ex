@@ -238,7 +238,10 @@ defmodule Factory.Engine do
       Runs.with_locked_run(run_id, fn run ->
         if run.status in ["queued", "running"] do
           with {:ok, steps} <- executable_steps(run) do
-            progress = Map.merge(%{"done" => [], "outputs" => %{}}, run.progress || %{})
+            progress =
+              %{"done" => [], "outputs" => %{}}
+              |> Map.merge(run.progress || %{})
+              |> allow_more_credits(run)
 
             {:ok, run} =
               Runs.update_run(run, %{status: "running", progress: Map.delete(progress, "error")})
@@ -301,10 +304,78 @@ defmodule Factory.Engine do
       why = skip_reason(run, step) ->
         skip(run, steps, step, rest, why)
 
+      spent = step.kind != "action" && over_credits(run) ->
+        pause_for_credits(run, step, spent)
+
       true ->
         run_step(run, steps, step, rest)
     end
   end
+
+  @doc """
+  How many credits a run may use before it pauses to ask whether to go on: the limit in
+  Settings (`"run_credit_limit"` in `Factory.Prefs`), else `config :factory,
+  :run_credit_limit` (10). 0 means no limit.
+  """
+  def credit_limit do
+    case Factory.Prefs.get("run_credit_limit") do
+      n when is_number(n) and n >= 0 -> n
+      _ -> Application.get_env(:factory, :run_credit_limit, 10)
+    end
+  end
+
+  @doc "How many credits the run may use before it pauses next, or nil with no limit."
+  def credit_allowance(%Run{} = run) do
+    case credit_limit() do
+      limit when limit > 0 -> (run.progress || %{})["credits_allowed"] || limit
+      _ -> nil
+    end
+  end
+
+  # What the run has used and may use, once it has used that much.
+  defp over_credits(run) do
+    with allowed when allowed != nil <- credit_allowance(run),
+         %{credits: used} when used >= allowed <- Factory.Usage.totals({:run, run.id}),
+         do: {used, allowed},
+         else: (_ -> nil)
+  end
+
+  # Paused between steps, like a person's pause: what it has done stays.
+  defp pause_for_credits(run, step, {used, allowed}) do
+    Runs.with_locked_run(run.id, fn run ->
+      if run.status == "running" do
+        progress = Map.put(run.progress, "credit_pause", true)
+        {:ok, run} = Runs.update_run(run, %{status: "paused", progress: progress})
+
+        Runs.post(
+          run,
+          "factory",
+          "This run has used #{credits(used)} credits, past its limit of #{credits(allowed)}, " <>
+            "so it's paused before #{step.name}. Continue lets it use " <>
+            "#{credits(credit_limit())} more; the limit is in Settings → Runs.",
+          actions: ["continue"]
+        )
+      end
+
+      {:ok, run}
+    end)
+
+    nil
+  end
+
+  # A run that paused at its credit limit may use as much again when it goes on, however
+  # it was resumed.
+  defp allow_more_credits(%{"credit_pause" => true} = progress, run) do
+    used = Factory.Usage.totals({:run, run.id}).credits
+
+    progress
+    |> Map.delete("credit_pause")
+    |> Map.put("credits_allowed", used + credit_limit())
+  end
+
+  defp allow_more_credits(progress, _run), do: progress
+
+  defp credits(n), do: :erlang.float_to_binary(n / 1, decimals: 1)
 
   # In troubleshooting, a step with nothing to do is skipped rather than run only to say
   # so: the Code Investigator with no repository, and the Evidence Analyst in a quick

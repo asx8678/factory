@@ -103,6 +103,8 @@ defmodule Factory.Chat do
 
   @doc "Runs a button action shown under a factory message."
   def action(%Run{} = run, "start"), do: command(Runs.get_run(run.id), "/run")
+  # Under a run paused at its credit limit (`Factory.Engine.credit_limit/0`).
+  def action(%Run{} = run, "continue"), do: command(Runs.get_run(run.id), "/resume")
 
   @doc """
   Fix it, under a finished troubleshooting run: a new chat on the Fix a bug workflow,

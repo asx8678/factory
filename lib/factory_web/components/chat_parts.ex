@@ -673,6 +673,15 @@ defmodule FactoryWeb.ChatParts do
         <.icon name="hero-play-mini" class="size-4" /> Start run
       </button>
       <button
+        :if={("continue" in @message.actions and @run) && @run.status == "paused"}
+        id={"continue-#{@message.id}"}
+        phx-click="action"
+        phx-value-action="continue"
+        class="mt-3 flex items-center gap-1.5 rounded-full bg-primary px-4 py-1.5 text-sm font-medium text-primary-content transition-opacity hover:opacity-90"
+      >
+        <.icon name="hero-play-mini" class="size-4" /> Continue
+      </button>
+      <button
         :if={("fix_it" in @message.actions and @run) && @run.status == "done"}
         id={"fix-it-#{@message.id}"}
         phx-click="fix_it"
