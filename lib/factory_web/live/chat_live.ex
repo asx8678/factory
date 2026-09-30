@@ -780,6 +780,19 @@ defmodule FactoryWeb.ChatLive do
         {:ok, {entry.client_name, File.read!(path)}}
       end)
 
+    # A file named .txt may still not be text; it's set aside, not stored.
+    {files, binary} = Enum.split_with(files, fn {_name, text} -> String.valid?(text) end)
+
+    socket =
+      if binary == [],
+        do: socket,
+        else:
+          put_flash(
+            socket,
+            :error,
+            "#{Enum.map_join(binary, ", ", &elem(&1, 0))} isn't a text file, so it wasn't attached."
+          )
+
     if String.trim(body) == "" and files == [] do
       {:noreply, socket}
     else

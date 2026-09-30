@@ -11,8 +11,14 @@ defmodule Factory.Kiro.Permission do
   """
 
   # Kiro's own tools, by what they do, for requests that carry neither kind nor call id.
+  # Kiro 2.26 names them read_file, run_command, web_fetch, and remote_web_search (its
+  # search runs on a server of its own, "remote").
   @tool_kinds %{
     "fs_read" => "read",
+    "read_file" => "read",
+    "run_command" => "execute",
+    "remote_web_search" => "fetch",
+    "remote_web_fetch" => "fetch",
     "fs_write" => "edit",
     "fs_append" => "edit",
     "str_replace" => "edit",
@@ -137,9 +143,10 @@ defmodule Factory.Kiro.Permission do
   end
 
   # The commands in a chain or pipeline.
+  # A pipe escaped for grep's alternation (`grep "a\|b"`) isn't one.
   defp parts(text) do
     text
-    |> String.split(~r/&&|\|\||;|\||&|\R/)
+    |> String.split(~r/&&|\|\||;|(?<!\\)\||&|\R/)
     |> Enum.map(&String.trim/1)
     |> Enum.reject(&(&1 == ""))
   end
@@ -212,7 +219,18 @@ defmodule Factory.Kiro.Permission do
   # The paths that lead outside `folder` (relative ones are inside it).
   defp outside_paths(paths, folder) do
     folder = Path.expand(folder)
-    Enum.reject(paths, &inside?(Path.expand(&1, folder), folder))
+    Enum.reject(paths, &allowed?(Path.expand(&1, folder), folder))
+  end
+
+  # Inside the folder, or Kiro's own working files.
+  defp allowed?(path, folder) do
+    inside?(path, folder) or kiros_own?(path)
+  end
+
+  # Where Kiro keeps what a tool gave it that was too big to hand over at once, to read
+  # back in pieces: its own working files, not the person's.
+  defp kiros_own?(path) do
+    inside?(Path.expand(path), Path.expand("~/.kiro/sessions"))
   end
 
   @doc """
@@ -264,7 +282,7 @@ defmodule Factory.Kiro.Permission do
       String.starts_with?(word, ["/", "~"]) or String.contains?(word, "..") ->
         # A glob reads what its folder holds.
         path = word |> String.replace(~r/[*?\[{].*$/, "") |> Path.expand(folder)
-        path != "" and not inside?(path, folder) and File.exists?(path)
+        path != "" and not allowed?(path, folder) and File.exists?(path)
 
       true ->
         false

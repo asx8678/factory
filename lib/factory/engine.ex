@@ -789,12 +789,19 @@ defmodule Factory.Engine do
     notes = Map.get(step, :notes, %{})
     kind = (workflow = Workflows.for_run(run)) && Workflows.kind(workflow)
 
+    # An agent that searches the web gets everything with what identifies anyone taken
+    # out (`Factory.Redact`), whatever the agents before it wrote.
+    clean =
+      if step.agent && Agent.web?(step.agent),
+        do: &Factory.Redact.text/1,
+        else: & &1
+
     # Each arrow in: what the agent before handed over, then what the arrow says.
     handoffs =
       Enum.flat_map(step.after, fn id ->
         from = Enum.find(steps, &(&1.id == id))
-        text = run.progress["outputs"][id]
-        note = notes[id]
+        text = clean.(run.progress["outputs"][id])
+        note = clean.(notes[id])
 
         [
           text && tag(~s(<handoff from="#{from.name}">), text, "</handoff>", 64 * 1024),
@@ -822,8 +829,8 @@ defmodule Factory.Engine do
         job(run, step, kind),
         kind == "incident" && Factory.Runs.Troubleshooting.mode_line(project_dir(run)),
         base_specs(run),
-        run.spec && tag("<spec>", run.spec, "</spec>", 96 * 1024),
-        sources(step),
+        run.spec && tag("<spec>", clean.(run.spec), "</spec>", 96 * 1024),
+        clean_sources(sources(step), clean),
         own != "" && %{head: "Your instructions:\n", body: own, tail: "", max: 16 * 1024}
       ]
       |> List.flatten()
@@ -839,7 +846,7 @@ defmodule Factory.Engine do
             "This is another pass: #{feedback["from"]} sent the work back. Fix what they say.",
             tag(
               ~s(<feedback from="#{feedback["from"]}">),
-              feedback["text"],
+              clean.(feedback["text"]),
               "</feedback>",
               16 * 1024
             )
@@ -877,6 +884,9 @@ defmodule Factory.Engine do
           "case file: what to look up is there.</job>",
       else: tag("<job>", run.description || run.title, "</job>", job_room(kind))
   end
+
+  defp clean_sources(nil, _clean), do: nil
+  defp clean_sources(%{body: body} = part, clean), do: %{part | body: clean.(body)}
 
   defp job_room("incident"), do: 96 * 1024
   defp job_room(_kind), do: 16 * 1024
@@ -1022,7 +1032,7 @@ defmodule Factory.Engine do
           run,
           "factory",
           "Done: all #{length(steps)} #{if length(steps) == 1, do: "step", else: "steps"} of the workflow ran." <>
-            tasks_note(run.tasks) <> verified_note(run)
+            tasks_note(run.tasks, steps) <> verified_note(run)
         )
 
         {:ok, run}
@@ -1048,7 +1058,13 @@ defmodule Factory.Engine do
   end
 
   # Tasks are done when an agent marked them (`Factory.RunTools`), not because the run ended.
-  defp tasks_note([]), do: ""
+  # In a workflow whose agents only read (a review, troubleshooting) they're checks to
+  # work through, and nobody marks them.
+  defp tasks_note([], _steps), do: ""
+
+  defp tasks_note(tasks, steps) do
+    if Enum.any?(steps, &marks_tasks?(%{tasks: tasks}, &1)), do: tasks_note(tasks), else: ""
+  end
 
   defp tasks_note(tasks) do
     case {Enum.count(tasks, &(&1.status == "done")), length(tasks)} do
