@@ -122,7 +122,7 @@ defmodule FactoryWeb.ChatLiveTest do
     refute has_element?(view, "#chat-map-agent-#{coder.id} .wf-ctx")
   end
 
-  test "Specs and Plan open the chat's own spec", %{conn: conn} do
+  test "Spec, and the P shortcut to its tasks, open the chat's own spec", %{conn: conn} do
     {:ok, run} = Runs.create_run()
     {:ok, run} = Runs.update_run(run, %{settings: %{"project_dir" => File.cwd!()}})
     {:ok, view, _} = live(conn, ~p"/chat/#{run.id}")
@@ -132,7 +132,8 @@ defmodule FactoryWeb.ChatLiveTest do
     assert to == "/specs/#{spec_id}"
 
     {:ok, view, _} = live(conn, ~p"/chat/#{run.id}")
-    {:error, {:live_redirect, %{to: to}}} = view |> element("#tasks-button") |> render_click()
+    # The P shortcut (ChatKeys) sends "tasks".
+    {:error, {:live_redirect, %{to: to}}} = render_hook(view, "tasks", %{})
     assert to == "/specs/#{spec_id}?step=tasks"
   end
 end

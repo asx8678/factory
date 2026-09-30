@@ -121,41 +121,6 @@ defmodule FactoryWeb.ChatParts do
     """
   end
 
-  attr :view, :string, required: true
-
-  def view_switch(assigns) do
-    ~H"""
-    <div
-      class="ml-auto flex rounded-lg border border-base-300 p-0.5"
-      role="tablist"
-      aria-label="View"
-    >
-      <button
-        :for={
-          {key, label, icon} <- [
-            {"chat", "Chat", "hero-chat-bubble-left-right-mini"},
-            {"graph", "Graph", "hero-share-mini"}
-          ]
-        }
-        id={"view-#{key}"}
-        role="tab"
-        aria-selected={to_string(@view == key)}
-        phx-click="view"
-        phx-value-view={key}
-        class={[
-          "flex items-center gap-1.5 rounded-md px-2.5 py-0.5 text-[13px] transition-colors",
-          if(@view == key,
-            do: "bg-base-content/10 font-medium text-base-content",
-            else: "text-base-content/55 hover:text-base-content"
-          )
-        ]}
-      >
-        <.icon name={icon} class="size-4" /> {label}
-      </button>
-    </div>
-    """
-  end
-
   attr :runs, :list, required: true
   attr :run, :any, required: true
 
@@ -215,124 +180,171 @@ defmodule FactoryWeb.ChatParts do
 
   # The workflow drawn small and live: who's busy, what's done, where it stopped. Click
   # an agent to chat with just that agent (again to go back); "All" shows everything.
-  def flow_strip(assigns) do
-    states = WorkflowMap.states(assigns.steps, assigns.run)
-
-    assigns =
-      assign(assigns, states: states, caption: caption(assigns.steps, states, assigns.run))
+  # The run's agents in one quiet line: a status dot and name each, a thin bar under
+  # an agent whose context is filling up. A click shows only that agent's messages;
+  # × goes back to all of them.
+  def run_steps(assigns) do
+    steps = Enum.reject(assigns.steps, &(&1.kind == "action" or &1.agent == nil))
+    assigns = assign(assigns, steps: steps, states: WorkflowMap.states(steps, assigns.run))
 
     ~H"""
     <nav
+      :if={@steps != []}
       id="flow-strip"
-      class="flex shrink-0 items-center gap-3 border-b border-base-300 px-4 sm:px-6"
       aria-label="Workflow"
+      class="flex min-w-0 items-center gap-0.5 overflow-x-auto text-xs [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
     >
       <.link
+        :if={@focus}
         id="agent-all"
         patch={chat_path(@run, nil)}
-        class={[
-          "flex shrink-0 items-center rounded-full px-3 py-1 text-sm transition-colors",
-          if(@focus == nil,
-            do: "bg-base-content/10 font-medium text-base-content",
-            else: "text-base-content/60 hover:bg-base-content/[0.06] hover:text-base-content"
-          )
-        ]}
+        title="Show every agent's messages"
+        class="mr-0.5 grid size-5 shrink-0 place-items-center rounded text-base-content/50 hover:bg-base-content/[0.06] hover:text-base-content"
       >
-        All
+        <.icon name="hero-x-mark-micro" class="size-3.5" />
       </.link>
-      <span class="h-5 w-px shrink-0 bg-base-300"></span>
-      <div
-        :if={@steps != []}
-        class="min-w-0 flex-1 overflow-x-auto px-1.5 py-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-      >
-        <WorkflowMap.map
-          id="chat-map"
-          steps={Enum.reject(@steps, &(&1.kind == "action"))}
-          states={@states}
-          focus={@focus && "agent-#{@focus.id}"}
-          link={&agent_link(&1, @run, @focus)}
-          patch
+      <%= for {step, i} <- Enum.with_index(@steps) do %>
+        <.icon
+          :if={i > 0}
+          name="hero-chevron-right-micro"
+          class="size-3 shrink-0 text-base-content/25"
         />
-      </div>
-      <.link
-        :if={@steps == []}
-        navigate={~p"/workflows"}
-        class="flex-1 py-3.5 text-sm text-base-content/55 hover:underline"
-      >
-        No agents yet. Add them in Workflows.
-      </.link>
-      <p
-        :if={@caption}
-        id="flow-caption"
-        class="hidden max-w-sm shrink-0 items-center gap-2 text-sm text-base-content/65 lg:flex"
-      >
-        <span class={["size-1.5 shrink-0 rounded-full", caption_dot(elem(@caption, 0))]}></span>
-        <span class="truncate">{elem(@caption, 1)}</span>
-      </p>
-      <button
-        :if={@run && @run.status in ["queued", "running"]}
-        id="pause-run"
-        type="button"
-        phx-click="control"
-        phx-value-command="/pause"
-        title="Pause after the step that's working now"
-        class="btn btn-ghost btn-xs shrink-0 gap-1"
-      >
-        <.icon name="hero-pause-mini" class="size-4" /> Pause
-      </button>
-      <button
-        :if={@run && @run.status == "paused"}
-        id="resume-run"
-        type="button"
-        phx-click="control"
-        phx-value-command="/resume"
-        title="Go on from the step it stopped at"
-        class="btn btn-xs shrink-0 gap-1"
-      >
-        <.icon name="hero-play-mini" class="size-4" /> Resume
-      </button>
+        <.link
+          id={"chat-map-agent-#{step.agent.id}"}
+          patch={chat_path(@run, if(@focus && @focus.id == step.agent.id, do: nil, else: step.agent))}
+          title={step_title(step, @states[step.id])}
+          class={[
+            "relative flex shrink-0 items-center gap-1.5 rounded px-1.5 py-0.5 transition-colors",
+            if(@focus && @focus.id == step.agent.id,
+              do: "bg-base-content/10 font-medium text-base-content",
+              else: "text-base-content/60 hover:bg-base-content/[0.06] hover:text-base-content"
+            )
+          ]}
+        >
+          <span class={["size-1.5 shrink-0 rounded-full", state_dot(@states[step.id])]}></span>
+          {step.name}
+          <span
+            :if={FactoryWeb.Usage.level(step.agent.usage["context_pct"]) in ["mid", "high"]}
+            class={["wf-ctx", "is-#{FactoryWeb.Usage.level(step.agent.usage["context_pct"])}"]}
+            style={"width: #{min(step.agent.usage["context_pct"], 100)}%"}
+            aria-hidden="true"
+          ></span>
+        </.link>
+      <% end %>
     </nav>
     """
   end
 
-  # An agent's card opens the chat with it, or back with everyone if it's open already.
-  defp agent_link(%{kind: "action"}, _run, _focus), do: nil
-  defp agent_link(%{agent: nil}, _run, _focus), do: nil
+  # "Coder: working (Using Read File)", with its context when it's in use.
+  defp step_title(step, state) do
+    activity =
+      if state == :busy and step.agent.activity, do: " (#{step.agent.activity})", else: ""
 
-  defp agent_link(%{agent: agent}, run, focus),
-    do: chat_path(run, if(focus && focus.id == agent.id, do: nil, else: agent))
+    pct = step.agent.usage["context_pct"]
 
-  # One line on where the workflow is: who's working on what, or where it stopped.
-  defp caption(steps, states, run) do
-    busy = Enum.find(steps, &(states[&1.id] == :busy))
-    stuck = run && Enum.find(steps, &(states[&1.id] in [:error, :paused]))
+    context =
+      if is_number(pct),
+        do:
+          " · Context #{FactoryWeb.Usage.pct(pct)} (compacts at #{FactoryWeb.Usage.compact_at()}%)",
+        else: ""
 
-    cond do
-      busy ->
-        {:busy, "#{busy.name}: #{(busy.agent && busy.agent.activity) || "working"}"}
-
-      stuck && states[stuck.id] == :error ->
-        {:error, "Stopped at #{stuck.name}. Fix the cause, then /resume."}
-
-      stuck ->
-        {:paused, "Paused at #{stuck.name}. /resume to go on."}
-
-      run && run.status == "done" ->
-        {:done, "Done: all #{length(steps)} steps ran."}
-
-      run && run.status == "queued" ->
-        {:queued, "Queued, starting…"}
-
-      true ->
-        nil
-    end
+    "#{step.name}: #{String.downcase(WorkflowMap.state_label(state))}#{activity}#{context}"
   end
 
-  defp caption_dot(:busy), do: "bg-primary animate-pulse"
-  defp caption_dot(:error), do: "bg-error"
-  defp caption_dot(:paused), do: "bg-warning"
-  defp caption_dot(:done), do: "bg-success"
-  defp caption_dot(_), do: "bg-base-content/30"
+  defp state_dot(:done), do: "bg-success"
+  defp state_dot(:busy), do: "bg-info animate-pulse"
+  defp state_dot(state) when state in [:waiting, :paused], do: "bg-warning"
+  defp state_dot(:error), do: "bg-error"
+  defp state_dot(_), do: "bg-base-content/25"
+
+  attr :run, :any, required: true
+
+  # Pause and Resume beside the agents while a run is under way or stopped.
+  def run_control(assigns) do
+    ~H"""
+    <button
+      :if={@run && @run.status in ["queued", "running"]}
+      id="pause-run"
+      type="button"
+      phx-click="control"
+      phx-value-command="/pause"
+      title="Pause after the step that's working now"
+      class="flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-xs text-base-content/70 hover:bg-base-content/[0.06] hover:text-base-content"
+    >
+      <.icon name="hero-pause-micro" class="size-3.5" /> Pause
+    </button>
+    <button
+      :if={@run && @run.status == "paused"}
+      id="resume-run"
+      type="button"
+      phx-click="control"
+      phx-value-command="/resume"
+      title="Go on from the step it stopped at"
+      class="flex h-6 shrink-0 items-center gap-1 rounded-md bg-primary/12 px-1.5 text-xs font-medium text-primary hover:bg-primary/20"
+    >
+      <.icon name="hero-play-micro" class="size-3.5" /> Resume
+    </button>
+    """
+  end
+
+  attr :view, :string, required: true
+  attr :run, :any, required: true
+  attr :workflow, :any, required: true
+
+  # Less used views and pages, out of the toolbar.
+  def more_menu(assigns) do
+    ~H"""
+    <details
+      id="chat-more"
+      class="relative shrink-0"
+      phx-click-away={JS.remove_attribute("open", to: "#chat-more")}
+    >
+      <summary
+        title="More"
+        class="grid size-7 cursor-pointer list-none place-items-center rounded-md text-base-content/60 hover:bg-base-content/[0.06] hover:text-base-content [&::-webkit-details-marker]:hidden"
+      >
+        <.icon name="hero-ellipsis-horizontal-mini" class="size-4" />
+      </summary>
+      <div class="absolute right-0 z-30 mt-1 w-52 rounded-lg border border-base-content/10 bg-surface p-1 text-sm shadow-lg">
+        <button
+          id={if @view == "graph", do: "view-chat", else: "view-graph"}
+          type="button"
+          phx-click={
+            JS.push("view", value: %{view: if(@view == "graph", do: "chat", else: "graph")})
+            |> JS.remove_attribute("open", to: "#chat-more")
+          }
+          class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-base-content/[0.06]"
+        >
+          <.icon
+            name={
+              if @view == "graph", do: "hero-chat-bubble-left-right-mini", else: "hero-share-mini"
+            }
+            class="size-4 text-base-content/55"
+          />
+          {if @view == "graph", do: "Back to the chat", else: "Show the workflow graph"}
+        </button>
+        <.link
+          :if={@run && @run.kind}
+          id="run-details"
+          navigate={~p"/runs/#{@run.id}"}
+          class="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-base-content/[0.06]"
+        >
+          <.icon name="hero-chart-bar-mini" class="size-4 text-base-content/55" /> Run details
+        </.link>
+        <.link
+          :if={@workflow}
+          navigate={~p"/workflows/#{@workflow.id}"}
+          class="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-base-content/[0.06]"
+        >
+          <.icon name="hero-pencil-square-mini" class="size-4 text-base-content/55" />
+          Edit the workflow
+        </.link>
+      </div>
+    </details>
+    """
+  end
+
+  # An agent's card opens the chat with it, or back with everyone if it's open already.
 
   attr :focus, :any, required: true
   attr :to, :any, default: nil
@@ -357,84 +369,12 @@ defmodule FactoryWeb.ChatParts do
         What are we building in <span class="text-primary">{Path.basename(@dir)}</span>?
       </h1>
 
-      <dl class="mt-6 space-y-0.5 text-sm">
-        <div class="group/row -mx-2 grid grid-cols-[1.75rem_5rem_minmax(0,1fr)_auto] items-center gap-3 rounded-lg px-2 py-2 transition-colors hover:bg-base-content/[0.03]">
-          <span class="grid size-7 place-items-center rounded-md bg-success/12 text-success">
-            <.icon name="hero-folder-mini" class="size-4" />
-          </span>
-          <dt class="text-base-content/50">Project</dt>
-          <dd class="truncate font-mono text-xs font-light text-base-content/80" title={@dir}>
-            {short_dir(@dir)}
-          </dd>
-          <button
-            type="button"
-            phx-click="browse"
-            class="rounded-md px-2 py-0.5 text-xs text-base-content/45 transition-colors hover:bg-base-content/[0.06] hover:text-base-content group-hover/row:text-base-content/70"
-          >
-            Change
-          </button>
-        </div>
-        <div class="group/row -mx-2 grid grid-cols-[1.75rem_5rem_minmax(0,1fr)_auto] items-center gap-3 rounded-lg px-2 py-2 transition-colors hover:bg-base-content/[0.03]">
-          <span class="grid size-7 place-items-center rounded-md bg-primary/12 text-primary">
-            <.icon name={FactoryWeb.RunParts.workflow_icon(@workflow, :micro)} class="size-4" />
-          </span>
-          <dt class="text-base-content/50">Workflow</dt>
-          <dd class="min-w-0 truncate">
-            {@workflow.name}
-            <span :if={@chain != []} class="text-base-content/45">
-              · {Enum.join(@chain, " → ")}
-            </span>
-          </dd>
-          <button
-            type="button"
-            phx-click={JS.set_attribute({"open", ""}, to: "#workflow-picker")}
-            class="rounded-md px-2 py-0.5 text-xs text-base-content/45 transition-colors hover:bg-base-content/[0.06] hover:text-base-content group-hover/row:text-base-content/70"
-          >
-            Change
-          </button>
-        </div>
-        <div class="group/row -mx-2 grid grid-cols-[1.75rem_5rem_minmax(0,1fr)_auto] items-center gap-3 rounded-lg px-2 py-2 transition-colors hover:bg-base-content/[0.03]">
-          <span class={[
-            "grid size-7 place-items-center rounded-md",
-            if(@specs == 0, do: "bg-warning/12 text-warning", else: "bg-primary/12 text-primary")
-          ]}>
-            <.icon name="hero-document-text-mini" class="size-4" />
-          </span>
-          <dt class="text-base-content/50">Specs</dt>
-          <dd :if={@specs == 0} class="min-w-0 truncate text-base-content/55">
-            None. Agents follow only what you write; add your standards so they follow those too.
-          </dd>
-          <dd :if={@specs > 0} class="min-w-0 truncate">
-            {@specs} attached
-          </dd>
-          <button
-            type="button"
-            phx-click="specs"
-            class={[
-              "text-xs hover:text-base-content",
-              if(@specs == 0, do: "font-medium text-warning", else: "text-base-content/45")
-            ]}
-          >
-            {if @specs == 0, do: "Add", else: "Change"}
-          </button>
-        </div>
-      </dl>
-
-      <p class="mt-6 max-w-2xl text-[14px] leading-relaxed text-base-content/65">
+      <p class="mt-2 text-base-content/60">
         Describe the change below. {if is_map(@to), do: @to.name, else: "The planner"} reads
-        the code, asks about anything unclear, and lists the tasks for you to refine. Starting
-        from a requirements document instead?
-        <button
-          id="open-plan"
-          type="button"
-          phx-click="tasks"
-          class="font-medium text-base-content underline decoration-base-content/30 underline-offset-4 hover:decoration-base-content"
-        >
-          Open Plan
-        </button>
+        the code, asks about anything unclear, and lists the tasks for you to refine.
       </p>
 
-      <div :if={examples(@workflow) != []} id="examples" class="mt-5 flex flex-wrap gap-2">
+      <div :if={examples(@workflow) != []} id="examples" class="mt-4 flex flex-wrap gap-1.5">
         <button
           :for={ex <- examples(@workflow)}
           type="button"
@@ -445,7 +385,7 @@ defmodule FactoryWeb.ChatParts do
         </button>
       </div>
 
-      <div class="mt-8 flex flex-wrap items-center gap-3 border-t border-base-300/60 pt-4 text-xs text-base-content/50">
+      <div class="mt-6 flex flex-wrap items-center gap-3 border-t border-base-300/60 pt-3 text-xs text-base-content/50">
         <.link
           :if={@last_run}
           id="last-run"
@@ -463,7 +403,7 @@ defmodule FactoryWeb.ChatParts do
         </.link>
         <span class="ml-auto hidden items-center gap-3 sm:flex">
           <span><kbd class="launcher-kbd">⌘K</kbd> type</span>
-          <span><kbd class="launcher-kbd">P</kbd> Plan</span>
+          <span><kbd class="launcher-kbd">P</kbd> Tasks</span>
         </span>
       </div>
     </div>
@@ -481,7 +421,7 @@ defmodule FactoryWeb.ChatParts do
         Refine them together, then implement.
       </p>
 
-      <ol class="mt-8 space-y-2">
+      <ol class="mt-6 space-y-2">
         <li>
           <button
             type="button"
@@ -512,35 +452,6 @@ defmodule FactoryWeb.ChatParts do
               </span>
             </span>
             <span class="text-xs text-base-content/55">{if @dir_ok, do: "Change", else: "Browse…"}</span>
-          </button>
-        </li>
-        <li class="flex items-center gap-3 rounded-xl border border-base-300/70 px-4 py-3">
-          <span class="grid size-6 shrink-0 place-items-center rounded-full bg-success text-success-content">
-            <.icon name="hero-check-micro" class="size-4" />
-          </span>
-          <span class="min-w-0 flex-1">
-            <span class="block text-sm font-medium">{@workflow && @workflow.name}</span>
-            <span class="block text-xs text-base-content/55">
-              The workflow. Change it at the top.
-            </span>
-          </span>
-        </li>
-        <li :if={@uploads}>
-          <button
-            id="add-spec"
-            type="button"
-            phx-click="specs"
-            class="flex w-full cursor-pointer items-center gap-3 rounded-xl border border-dashed border-base-300 px-4 py-3 text-left transition-colors hover:border-base-content/30"
-          >
-            <span class="grid size-6 shrink-0 place-items-center rounded-full border border-base-content/25 text-base-content/55">
-              <.icon name="hero-document-plus-micro" class="size-3.5" />
-            </span>
-            <span class="min-w-0 flex-1">
-              <span class="block text-sm font-medium">Add a spec or requirements</span>
-              <span class="block text-xs text-base-content/55">
-                Optional: your base specs, or this run's own. Or just describe the change below.
-              </span>
-            </span>
           </button>
         </li>
       </ol>
@@ -1018,11 +929,12 @@ defmodule FactoryWeb.ChatParts do
     assigns = assign(assigns, pct: pct, usage: usage, level: FactoryWeb.Usage.level(pct))
 
     ~H"""
+    <%!-- Only once it matters: the context filling up, or just compacted. --%>
     <div
-      :if={@pct || @usage["compacted_from"]}
+      :if={@level in ["mid", "high"] or @usage["compacted_from"]}
       id="context-chip"
       class={[
-        "ctx-chip flex h-8 items-center overflow-hidden rounded-full border text-xs tabular-nums",
+        "ctx-chip flex h-7 items-center overflow-hidden rounded-full border text-xs tabular-nums",
         @level && "is-#{@level}"
       ]}
     >
@@ -1176,7 +1088,8 @@ defmodule FactoryWeb.ChatParts do
           <.recipient_picker agents={@agents} focus={@focus} to={@to} run={@run} />
           <.context_chip agent={recipient(@focus, @to)} />
 
-          <span class="ml-auto hidden pr-1 text-xs text-base-content/35 sm:inline">
+          <span class="ml-auto"></span>
+          <span class="composer-hint pr-1 text-xs text-base-content/35">
             Enter to send · Shift+Enter for a new line
           </span>
           <button
@@ -1184,7 +1097,7 @@ defmodule FactoryWeb.ChatParts do
             type="submit"
             disabled={!@ready}
             class={[
-              "grid size-8 place-items-center rounded-full transition",
+              "grid size-7 place-items-center rounded-full transition",
               if(@ready,
                 do: "bg-base-content text-base-100 hover:opacity-85",
                 else: "cursor-not-allowed bg-base-content/15 text-base-content/40"
@@ -1273,11 +1186,6 @@ defmodule FactoryWeb.ChatParts do
   defp upload_error(:not_accepted), do: "only .md and .txt files"
   defp upload_error(:too_many_files), do: "up to 5 files at a time"
   defp upload_error(err), do: to_string(err)
-
-  defp short_dir(dir) do
-    home = System.user_home!()
-    if String.starts_with?(dir, home), do: "~" <> String.replace_prefix(dir, home, ""), else: dir
-  end
 
   # Starting points for the message box, by the kind of job the workflow does.
   @examples %{

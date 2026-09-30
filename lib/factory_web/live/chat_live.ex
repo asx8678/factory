@@ -615,7 +615,7 @@ defmodule FactoryWeb.ChatLive do
     ~H"""
     <Layouts.app flash={@flash} usage={@usage_meter} active_runs={@active_runs} active={:chat} full>
       <div id="chat-page" phx-hook="ChatKeys" class="flex h-full flex-col bg-base-100">
-        <header class="flex min-h-11 shrink-0 flex-wrap items-center gap-x-2 gap-y-1.5 px-4 pt-1.5 sm:px-6">
+        <header class="flex min-h-11 shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-base-300 px-4 py-1.5 sm:px-6">
           <.chat_switcher runs={@runs} run={@run} />
           <.folder_button dir={@dir} ok={@dir_ok} warn={@folder_warn} locked={!settable?(@run)} />
           <.workflow_picker
@@ -623,77 +623,37 @@ defmodule FactoryWeb.ChatLive do
             workflow={@workflow}
             locked={!settable?(@run)}
           />
-          <span class="mx-0.5 h-4 w-px bg-base-300" aria-hidden="true"></span>
+          <%!-- The run's spec: its base specs and its own requirements, design and tasks. --%>
           <button
             id="specs-button"
             type="button"
             phx-click="specs"
-            title="Base specs to follow, and this run's own spec"
+            title="Base specs to follow, and this run's own spec and tasks"
             class={[
-              "flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[13px] transition-colors hover:bg-base-content/[0.06]",
-              if(spec_count(assigns) > 0,
-                do: "border-primary/40",
-                else: "border-dashed border-base-300 text-base-content/65"
+              "flex h-6 items-center gap-1.5 rounded-md border px-2 text-[13px] transition-colors hover:bg-base-content/[0.06]",
+              if(spec_count(assigns) > 0 or (@run && @run.tasks != []),
+                do: "border-base-300",
+                else: "border-dashed border-base-300 text-base-content/60"
               )
             ]}
           >
-            <.icon name="hero-document-text-mini" class="size-4 text-primary" /> Specs
-            <span
-              :if={spec_count(assigns) > 0}
-              class="rounded-full bg-primary/15 px-1.5 text-xs tabular-nums text-primary"
-            >
-              {spec_count(assigns)}
-            </span>
-          </button>
-          <button
-            :if={settable?(@run)}
-            id="tasks-button"
-            type="button"
-            phx-click="tasks"
-            title="Describe it or upload a file; Kiro studies the code and specs and makes the plan"
-            class={[
-              "flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[13px] transition-colors hover:bg-base-content/[0.06]",
-              if(@run && @run.tasks != [],
-                do: "border-success/40",
-                else: "border-dashed border-base-300 text-base-content/65"
-              )
-            ]}
-          >
-            <.icon name="hero-list-bullet-mini" class="size-4 text-success" /> Plan
+            <.icon name="hero-document-text-micro" class="size-3.5 text-primary" /> Spec
             <span
               :if={@run && @run.tasks != []}
-              class="rounded-full bg-success/15 px-1.5 text-xs tabular-nums text-success"
+              class="tabular-nums text-base-content/50"
+              title="Tasks done, of all"
             >
-              {length(@run.tasks)}
+              {Enum.count(@run.tasks, &(&1.status == "done"))}/{length(@run.tasks)}
             </span>
           </button>
-          <Layouts.status_badge :if={@run} status={@run.status} />
-          <span
-            :if={@run_usage.turns > 0}
-            id="run-usage"
-            class="hidden items-center gap-1 text-sm text-base-content/50 sm:flex"
-            title="Agent replies in this chat and the Kiro credits they used"
-          >
-            <.icon name="hero-chart-bar-mini" class="size-4" />
-            {@run_usage.turns} {if @run_usage.turns == 1, do: "turn", else: "turns"} · {FactoryWeb.Usage.credits(
-              @run_usage.credits
-            )} credits
-          </span>
-          <span :if={@run && @run.tasks != []} class="hidden text-sm text-base-content/50 sm:inline">
-            {Enum.count(@run.tasks, &(&1.status == "done"))} of {length(@run.tasks)} tasks done
-          </span>
-          <.link
-            :if={@run && @run.kind}
-            id="run-details"
-            navigate={~p"/runs/#{@run.id}"}
-            class="hidden text-sm text-base-content/50 hover:text-base-content sm:inline"
-          >
-            Run details
-          </.link>
-          <.view_switch view={@view} />
-        </header>
 
-        <.flow_strip steps={@steps} focus={@focus} run={@run} />
+          <div class="ml-auto flex min-w-0 items-center gap-2">
+            <.run_steps steps={@steps} focus={@focus} run={@run} />
+            <Layouts.status_badge :if={@run && @run.status != "draft"} status={@run.status} />
+            <.run_control run={@run} />
+            <.more_menu view={@view} run={@run} workflow={@workflow} />
+          </div>
+        </header>
 
         <%!-- Hidden rather than removed: the message stream isn't kept on the server, so re-adding it would come back empty. --%>
         <section

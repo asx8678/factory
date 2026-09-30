@@ -154,6 +154,10 @@ body {
    narrowed, as inline code already is. */
 .font-mono { font-stretch: 85%; }
 
+/* The message box's keyboard hint shows only while you're typing there. */
+.composer-hint { display: none; }
+@media (min-width: 640px) { .composer-box:focus-within .composer-hint { display: inline; } }
+
 /* In the base layer so utilities like focus-visible:outline-none can override it. */
 @layer base {
   :focus-visible {
