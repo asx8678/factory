@@ -16,7 +16,8 @@ defmodule Factory.Engine do
   go in the run's progress (`"prompts"`), so what an agent was sent can be checked.
 
   An action card (`Factory.Actions`) runs when the cards before it are done, with
-  `{{summary}}` filled from what they handed over.
+  `{{summary}}` filled from what they handed over. One with no arrows at all, in a
+  workflow with agents, isn't in the flow yet and doesn't run.
 
   Each agent step runs on the agent's own Kiro session (`Factory.Kiro.run_step/4`), so
   a step that comes round again carries on the same conversation. Steps that change
@@ -89,11 +90,15 @@ defmodule Factory.Engine do
   # Reviewer → Coder) doesn't make the earlier card wait: it's a way to send the work
   # back. The other arrows are hand-offs and decide the order.
   defp canvas_steps(workflow_id) do
-    cards = Agents.list_agents(workflow_id) |> Enum.sort_by(&{&1.y, &1.x, &1.id})
-    ids = MapSet.new(cards, & &1.id)
+    all = Agents.list_agents(workflow_id)
+    all_ids = MapSet.new(all, & &1.id)
 
     links =
-      Workflows.links(workflow_id) |> Enum.filter(&(&1.source_id in ids and &1.target_id in ids))
+      Workflows.links(workflow_id)
+      |> Enum.filter(&(&1.source_id in all_ids and &1.target_id in all_ids))
+
+    cards =
+      all |> Enum.reject(&loose_action?(&1, all, links)) |> Enum.sort_by(&{&1.y, &1.x, &1.id})
 
     back = back_links(cards, links)
 
@@ -138,6 +143,16 @@ defmodule Factory.Engine do
       }
     end)
   end
+
+  # An action card with no arrow at all, in a workflow with agents, hasn't been put in
+  # the flow yet (the palette drops it unconnected): it doesn't run. Otherwise a
+  # "Commit & push" left on the canvas would push. A workflow of only actions runs them.
+  defp loose_action?(%{kind: "action", id: id}, all, links) do
+    Enum.any?(all, &(&1.kind != "action")) and
+      not Enum.any?(links, &(&1.source_id == id or &1.target_id == id))
+  end
+
+  defp loose_action?(_card, _all, _links), do: false
 
   # Arrows that close a loop: depth first from the cards nothing points to, in reading
   # order, an arrow to a card on the current path goes back.
