@@ -106,7 +106,7 @@ defmodule Factory.Verifier do
           %{
             "check" => String.trim(c["check"]),
             "passed" => c["passed"] == true,
-            "evidence" => text(c["evidence"])
+            "evidence" => Factory.Text.text(c["evidence"])
           }
         end
 
@@ -116,12 +116,9 @@ defmodule Factory.Verifier do
           _ -> checks != [] and Enum.all?(checks, & &1["passed"])
         end
 
-      {:ok, %{passed: passed, checks: checks, fix: text(data["fix"])}}
+      {:ok, %{passed: passed, checks: checks, fix: Factory.Text.text(data["fix"])}}
     else
       _ -> {:error, "The verifying model's reply wasn't something Factory could read."}
     end
   end
-
-  defp text(s) when is_binary(s), do: String.trim(s)
-  defp text(_), do: ""
 end
