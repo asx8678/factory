@@ -19,6 +19,8 @@ defmodule Factory.PlanningTest do
       Runs.update_run(run, %{settings: %{"workflow_id" => w.id, "project_dir" => File.cwd!()}})
 
     Runs.subscribe(run.id)
+    # Planning runs on the planner's own Kiro session, which outlives the test unless stopped.
+    on_exit(fn -> Factory.Kiro.stop(planner.id) end)
     %{run: run, planner: planner}
   end
 

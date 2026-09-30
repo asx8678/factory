@@ -288,8 +288,15 @@ defmodule Factory.PlanTools do
   the agent that plans the run (`Factory.Chat.planner_for/1`) may change it. Once the
   run has started, the plan can be added to and changed but not replaced, and the
   run's tasks follow it, keeping what's done. Questions go in the reply.
+
+  A planner's draft turn (`planning: %{generation:, notify:}`, from
+  `Factory.ChatPlanner`) is checked like a one-off request: it only writes while the
+  run is a draft on that generation, and `notify` gets `{:plan_tools, generation,
+  event}` for each call that worked, questions included.
   """
-  def call_in_turn(run_id, agent, name, args) when is_map(args) do
+  def call_in_turn(run_id, agent, name, args, planning \\ nil)
+
+  def call_in_turn(run_id, agent, name, args, planning) when is_map(args) do
     with true <- Enum.any?(@tools, &(&1.name == name)) || {:error, "There's no tool #{name}."} do
       result =
         Runs.with_locked_run(run_id, fn run ->
@@ -302,6 +309,14 @@ defmodule Factory.PlanTools do
             planner == nil or planner.id != agent.id ->
               {:error,
                "Only #{(planner && planner.name) || "the workflow's planner"} changes this run's plan."}
+
+            planning != nil and
+                (run.status != "draft" or run.planner_generation != planning.generation) ->
+              {:error,
+               "This plan was replaced by a newer request or the run has started. Stop and end your turn."}
+
+            planning != nil ->
+              apply_tool(name, args, run)
 
             name == "ask_user" ->
               {:ok, {:read, "Ask them in your reply; the person answers in the chat."}}
@@ -316,14 +331,26 @@ defmodule Factory.PlanTools do
         end)
 
       case result do
-        {:ok, {_event, text}} -> {:ok, text}
-        {:error, text} when is_binary(text) -> {:error, text}
-        {:error, _} -> {:error, "This chat no longer exists. End your turn."}
+        {:ok, {event, text}} ->
+          if planning do
+            send(planning.notify, {:plan_tools, planning.generation, event})
+
+            if event == :changed,
+              do: Factory.ChatPlanner.show_progress(run_id, agent, "Planning…")
+          end
+
+          {:ok, text}
+
+        {:error, text} when is_binary(text) ->
+          {:error, text}
+
+        {:error, _} ->
+          {:error, "This chat no longer exists. End your turn."}
       end
     end
   end
 
-  def call_in_turn(_run_id, _agent, _name, _args),
+  def call_in_turn(_run_id, _agent, _name, _args, _planning),
     do: {:error, "The arguments must be an object."}
 
   # Before the start the spec change carries over to the run by itself

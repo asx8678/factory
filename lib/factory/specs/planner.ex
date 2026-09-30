@@ -284,6 +284,13 @@ its own, naming the files it touches and the requirement numbers it covers. Incl
   end
 
   @doc """
+  `chat_prompt/4` in two parts for a planner's own Kiro session: `{brief, ask}`, the
+  spec files and the rest. The session sends the brief only when it hasn't yet.
+  """
+  def chat_prompt_parts(name, requests, files, current),
+    do: {spec_text(files), name |> chat_prompt(requests, [], current) |> String.trim_trailing()}
+
+  @doc """
   Prompt for planning in a chat: the planner reads the project, rethinks how the
   person's requests (oldest first) are best done, and writes the plan with Factory's
   tools (`Factory.PlanTools`): a summary and approach first, then its tasks a few at a

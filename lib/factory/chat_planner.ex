@@ -1,7 +1,9 @@
 defmodule Factory.ChatPlanner do
   @moduledoc """
   Planning in a chat: what the person writes to the workflow's planner is turned into
-  tasks. The planner (on Kiro, read-only, in the chat's project folder) rethinks how
+  tasks, on the planner's own Kiro session (`Factory.Kiro.run_step/4`), so later
+  messages keep the conversation; a one-off `Kiro.ask` when that session is busy in
+  another folder. The planner (on Kiro, read-only, in the chat's project folder) rethinks how
   it's best done from everything asked so far, the spec files attached and the plan so
   far. It writes the plan with Factory's tools as it goes (`Factory.PlanTools`): a
   summary and approach, then the tasks a few at a time, or changes to the tasks already
@@ -46,7 +48,11 @@ defmodule Factory.ChatPlanner do
         files = Enum.reject(Specs.files(spec), &(elem(&1, 0) == "tasks.md"))
         base = Specs.base_files_for_run(run)
         current = if Specs.tasks(spec) == [], do: nil, else: PlanTools.describe(spec, :full)
-        prompt = Planner.chat_prompt(planner.name, requests, base ++ files, current)
+
+        prompt = %{
+          full: Planner.chat_prompt(planner.name, requests, base ++ files, current),
+          parts: Planner.chat_prompt_parts(planner.name, requests, base ++ files, current)
+        }
 
         run =
           Runs.get_run(run.id)
@@ -69,25 +75,59 @@ defmodule Factory.ChatPlanner do
     show_progress(run.id, planner, "Reading the project…")
 
     Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
-      token = PlanTools.grant(run.id, generation, planner)
-
+      # On the planner's own Kiro session, which keeps the conversation between
+      # messages; a one-off session when that one is busy in another folder.
       result =
-        with {:ok, reply} <-
-               Kiro.ask(prompt,
-                 workdir: dir,
-                 allow: ["read", "search"],
-                 mcp_servers: [PlanTools.mcp_server(token)],
-                 reply: :last,
-                 on_tool: &show_progress(run.id, planner, Planner.describe_tool(&1, dir)),
-                 usage: %{source: "plan_chat", run_id: run.id, agent_id: planner.id}
-               ) do
-          read_result(reply, generation)
+        case plan_in_session(run, planner, prompt, generation, dir) do
+          {:error, :busy} -> plan_once(run, planner, prompt, generation, dir)
+          result -> result
         end
 
       finish(run.id, generation, planner, files, result)
     end)
 
     :ok
+  end
+
+  defp plan_in_session(run, planner, prompt, generation, dir) do
+    {brief, ask} = prompt.parts
+
+    brief =
+      if String.trim(brief) == "",
+        do: nil,
+        else: {brief, "chat:#{run.id}:" <> Factory.Context.sha256(brief)}
+
+    reply =
+      Kiro.run_step(planner, run.id, ask,
+        brief: brief,
+        source: "plan_chat",
+        context: :skip,
+        reply: :last,
+        post: false,
+        stream: false,
+        activity: "Planning “#{run.title}”",
+        on_tool: &show_progress(run.id, planner, Planner.describe_tool(&1, dir)),
+        planning: %{generation: generation, notify: self()},
+        on_busy: :return
+      )
+
+    with {:ok, reply} <- reply, do: read_result(reply, generation)
+  end
+
+  defp plan_once(run, planner, prompt, generation, dir) do
+    token = PlanTools.grant(run.id, generation, planner)
+
+    with {:ok, reply} <-
+           Kiro.ask(prompt.full,
+             workdir: dir,
+             allow: ["read", "search"],
+             mcp_servers: [PlanTools.mcp_server(token)],
+             reply: :last,
+             on_tool: &show_progress(run.id, planner, Planner.describe_tool(&1, dir)),
+             usage: %{source: "plan_chat", run_id: run.id, agent_id: planner.id}
+           ) do
+      read_result(reply, generation)
+    end
   end
 
   # What the tools reported while Kiro worked (`Factory.PlanTools`). Without any tool

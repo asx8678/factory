@@ -159,8 +159,9 @@ defmodule Factory.RunTools do
   # A planner's tool from a session: for the chat message it's answering, not a run step.
   defp plan_in_session(key, name, args) do
     with pid when is_pid(pid) <- Factory.Kiro.whereis(key),
-         %{run_id: run_id, agent: agent, step: nil} <- Factory.Kiro.Session.current_turn(pid) do
-      Factory.PlanTools.call_in_turn(run_id, agent, name, args)
+         %{run_id: run_id, agent: agent, step: nil} = turn <-
+           Factory.Kiro.Session.current_turn(pid) do
+      Factory.PlanTools.call_in_turn(run_id, agent, name, args, turn[:planning])
     else
       %{step: %{}} -> {:error, "During a run step, work on the tasks as they are."}
       _ -> {:error, "These tools only work while you're answering a message."}

@@ -53,6 +53,8 @@ defmodule Factory.Kiro do
     dir = workdir(Factory.Runs.get_run(run_id))
     key = session_key(agent)
     ref = make_ref()
+    # `on_busy: :return` gives `{:error, :busy}` for a session busy in another folder.
+    {on_busy, opts} = Keyword.pop(opts, :on_busy)
     opts = Keyword.put(opts, :reply_to, {self(), ref})
 
     queued =
@@ -84,6 +86,9 @@ defmodule Factory.Kiro do
             Process.demonitor(monitor, [:flush])
             {:error, "#{agent.name} didn't answer within #{div(wait, 60_000)} minutes."}
         end
+
+      {:error, :busy} when on_busy == :return ->
+        {:error, :busy}
 
       {:error, :busy} ->
         {:error,

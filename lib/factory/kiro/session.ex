@@ -61,6 +61,16 @@ defmodule Factory.Kiro.Session do
     * `:brief` - `{text, key}`: context that goes in front of the text only when this
       agent hasn't had it (same key) in this session; after a compaction or a restart
       it goes again
+    * `:context` - `true` (default) puts the agent's sources and prompt in front of its
+      first message; `false` when the text carries them; `:skip` to leave them for a
+      later message
+    * `:reply` - `:all` (default) or `:last`: only what Kiro wrote after its last tool
+      call, for `:reply_to`
+    * `:post` - false to leave the reply out of the chat (the caller posts it);
+      `:stream` - false to not stream it there as it comes
+    * `:on_tool` - called with each ACP `tool_call` update, in the session's process
+    * `:planning` - `%{generation:, notify:}` for a planner's draft turn: Factory's plan
+      tools check the generation and tell `notify` what they did (`Factory.PlanTools`)
   """
   def prompt(pid, agent, run_id, text, opts \\ []),
     do: GenServer.call(pid, {:prompt, agent, run_id, text, opts})
@@ -132,8 +142,13 @@ defmodule Factory.Kiro.Session do
       :activity,
       :step,
       :brief,
+      :on_tool,
+      :planning,
       source: "agent_turn",
-      context: true
+      context: true,
+      reply: :all,
+      post: true,
+      stream: true
     ]
   end
 
@@ -147,9 +162,16 @@ defmodule Factory.Kiro.Session do
       :request_id,
       :reply_to,
       :step,
+      :on_tool,
+      :planning,
       source: "agent_turn",
+      reply: :all,
+      post: true,
+      stream: true,
       input_tokens: 0,
       text: "",
+      # what Kiro wrote since its last tool call
+      last: "",
       denied: [],
       credits: nil,
       # tools Kiro used, in order: %{call_id:, tool:, title:, paths:, outcome:}
@@ -210,8 +232,13 @@ defmodule Factory.Kiro.Session do
         activity: opts[:activity],
         step: opts[:step],
         brief: opts[:brief],
+        on_tool: opts[:on_tool],
+        planning: opts[:planning],
         source: opts[:source] || "agent_turn",
-        context: Keyword.get(opts, :context, true)
+        context: Keyword.get(opts, :context, true),
+        reply: Keyword.get(opts, :reply, :all),
+        post: Keyword.get(opts, :post, true),
+        stream: Keyword.get(opts, :stream, true)
       }
 
       {:reply, :ok, next(%{state | queue: state.queue ++ [job]})}
@@ -224,7 +251,9 @@ defmodule Factory.Kiro.Session do
   def handle_call(:current_step, _from, state), do: {:reply, nil, state}
 
   def handle_call(:current_turn, _from, %{turn: %Turn{} = turn} = state),
-    do: {:reply, %{run_id: turn.run_id, agent: turn.agent, step: turn.step}, state}
+    do:
+      {:reply,
+       %{run_id: turn.run_id, agent: turn.agent, step: turn.step, planning: turn.planning}, state}
 
   def handle_call(:current_turn, _from, state), do: {:reply, nil, state}
 
@@ -446,13 +475,21 @@ defmodule Factory.Kiro.Session do
         "sessionUpdate" => "agent_message_chunk",
         "content" => %{"type" => "text", "text" => text}
       } ->
-        state = update_turn(state, fn turn -> %{turn | text: turn.text <> text} end)
-        if state.turn, do: stream(state)
+        state =
+          update_turn(state, fn turn ->
+            %{turn | text: turn.text <> text, last: turn.last <> text}
+          end)
+
+        if state.turn && state.turn.stream, do: stream(state)
         state
 
       %{"sessionUpdate" => "tool_call", "title" => title} ->
         if state.turn, do: Agents.set_activity(state.turn.agent.id, "running", "Using #{title}")
-        track_tool(state, update)
+        if state.turn && state.turn.on_tool, do: on_tool(state.turn.on_tool, update)
+
+        state
+        |> update_turn(fn turn -> %{turn | last: ""} end)
+        |> track_tool(update)
 
       %{"sessionUpdate" => "tool_call_update"} ->
         track_tool(state, update)
@@ -772,6 +809,11 @@ defmodule Factory.Kiro.Session do
       run_id: job.run_id,
       reply_to: job.reply_to,
       step: job.step,
+      on_tool: job.on_tool,
+      planning: job.planning,
+      reply: job.reply,
+      post: job.post,
+      stream: job.stream,
       source: job.source,
       ask: job.text,
       request_id: state.next_id,
@@ -810,6 +852,8 @@ defmodule Factory.Kiro.Session do
   # keeps it for the rest of the conversation. In the shared session every message is
   # labelled with who is speaking.
   # A run step's text already carries them (`context?` false): the agent counts as primed.
+  defp with_context(state, _agent, text, :skip), do: {text, state}
+
   defp with_context(state, agent, text, context?) do
     # The data sources attached to the agent, then its own prompt.
     context =
@@ -890,14 +934,18 @@ defmodule Factory.Kiro.Session do
     # Mark the agent first, so anyone reacting to the chat message sees the new status.
     Agents.set_activity(agent.id, if(error, do: "error", else: "idle"), error)
 
-    if run = Runs.get_run(turn.run_id) do
-      Runs.post(run, "factory", text <> denied, author: agent.name, meta: meta)
+    if turn.post do
+      if run = Runs.get_run(turn.run_id) do
+        Runs.post(run, "factory", text <> denied, author: agent.name, meta: meta)
+      end
     end
 
     answer(
       turn.reply_to,
       cond do
         error -> {:error, error}
+        # A turn that ends on a tool call has nothing after it; the caller decides.
+        turn.reply == :last -> {:ok, turn.last}
         String.trim(turn.text) == "" -> {:error, "Kiro ended the turn without a reply."}
         true -> {:ok, turn.text <> denied}
       end
@@ -987,6 +1035,13 @@ defmodule Factory.Kiro.Session do
     end
 
     {:stop, :normal, %{state | queue: [], switching: nil}}
+  end
+
+  # A job's tool callback (a planner's progress bubble) can't take the session down.
+  defp on_tool(fun, update) do
+    fun.(update)
+  rescue
+    e -> Logger.warning("A Kiro tool callback failed: #{Exception.message(e)}")
   end
 
   # Whoever waits for a job (a run step) hears how it ended.
