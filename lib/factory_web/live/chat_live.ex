@@ -35,7 +35,8 @@ defmodule FactoryWeb.ChatLive do
        plan_asking: nil,
        plan_improve: %{},
        plan_inline: nil,
-       plan_checking: false
+       plan_checking: false,
+       plan_check: nil
      )
      |> set_dir("")
      |> load_agents()
@@ -436,6 +437,9 @@ defmodule FactoryWeb.ChatLive do
     |> plan_changed(Specs.remove_plan_task(plan_spec(socket), String.to_integer(i)))
   end
 
+  def handle_event("plan_check_dismiss", _, socket),
+    do: {:noreply, assign(socket, plan_check: nil)}
+
   def handle_event("plan_refine", %{"i" => i}, socket),
     do: {:noreply, ask_kiro(socket, String.to_integer(i), @refine)}
 
@@ -640,6 +644,7 @@ defmodule FactoryWeb.ChatLive do
     end
 
     assign(socket,
+      plan_check: latest_check(run, socket.assigns[:planner]),
       plan_spec: spec,
       plan_sub: spec && spec.id,
       plan_editing: nil,
@@ -647,6 +652,24 @@ defmodule FactoryWeb.ChatLive do
       plan_improve: %{},
       plan_inline: nil
     )
+  end
+
+  # The planner's latest reply, when it's a scope check: the report the plan shows.
+  defp latest_check(nil, _planner), do: nil
+  defp latest_check(_run, nil), do: nil
+
+  defp latest_check(run, planner) do
+    last =
+      Repo.one(
+        from m in Message,
+          where:
+            m.run_id == ^run.id and not is_nil(m.author) and
+              fragment("?->>'agent_id'", m.meta) == ^to_string(planner.id),
+          order_by: [desc: m.id],
+          limit: 1
+      )
+
+    if last && last.meta["check"], do: last
   end
 
   defp plan_spec(socket),
@@ -828,10 +851,16 @@ defmodule FactoryWeb.ChatLive do
     # An agent's final reply replaces its live bubble; the planner's ends a scope check.
     socket = update(socket, :streaming, &Map.delete(&1, message.meta["agent_id"]))
 
+    # The planner's latest reply: a scope check shows in the plan until the next one.
     socket =
-      if socket.assigns.planner && message.meta["agent_id"] == socket.assigns.planner.id,
-        do: assign(socket, plan_checking: false),
-        else: socket
+      if socket.assigns.planner && message.author &&
+           message.meta["agent_id"] == socket.assigns.planner.id,
+         do:
+           assign(socket,
+             plan_checking: false,
+             plan_check: if(message.meta["check"], do: message)
+           ),
+         else: socket
 
     socket =
       if message.author && socket.assigns.run,
@@ -1015,6 +1044,7 @@ defmodule FactoryWeb.ChatLive do
                 inline={@plan_inline}
                 working={planner_activity(assigns)}
                 checking={@plan_checking}
+                check={@plan_check}
                 spec_hint={plan_spec_hint?(assigns)}
               />
             </div>

@@ -30,6 +30,7 @@ defmodule FactoryWeb.PlanPanel do
     doc: "what the planner is doing, while it works on the plan"
 
   attr :checking, :boolean, default: false, doc: "whether that work is a scope check"
+  attr :check, :any, default: nil, doc: "the latest scope check's message, until the plan changes"
 
   attr :spec_hint, :boolean, default: false
 
@@ -103,6 +104,40 @@ defmodule FactoryWeb.PlanPanel do
         </span>
         <span class="min-w-0 truncate">{@working}</span>
       </p>
+
+      <details
+        :if={@check && !@checking}
+        id="chat-plan-check"
+        open
+        class="group border-b border-base-content/10 bg-base-content/[0.02]"
+      >
+        <summary class="flex cursor-pointer list-none items-center gap-2 px-3.5 py-2 text-xs [&::-webkit-details-marker]:hidden">
+          <.icon name="hero-magnifying-glass-micro" class="size-3.5 text-base-content/55" />
+          <span class="font-medium">Scope check</span>
+          <span class="text-base-content/45">by {@check.author}</span>
+          <.icon
+            name="hero-chevron-down-micro"
+            class="ml-auto size-3.5 text-base-content/45 transition-transform group-open:rotate-180"
+          />
+        </summary>
+        <div class="max-h-80 overflow-y-auto px-3.5 pb-1">
+          <div class="md">{FactoryWeb.Markdown.render(@check.body)}</div>
+        </div>
+        <div class="flex items-center gap-1.5 px-3.5 pb-2.5 pt-1.5">
+          <button
+            id="chat-plan-check-improve"
+            type="button"
+            phx-click="plan_review"
+            disabled={@working != nil}
+            class="btn btn-primary btn-xs gap-1"
+          >
+            <.icon name="hero-sparkles-micro" class="size-3.5" /> Improve plan with this
+          </button>
+          <button type="button" phx-click="plan_check_dismiss" class="btn btn-ghost btn-xs">
+            Dismiss
+          </button>
+        </div>
+      </details>
 
       <ol class={[
         "divide-y divide-base-content/[0.07] transition-opacity",

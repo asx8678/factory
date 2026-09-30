@@ -500,15 +500,31 @@ defmodule FactoryWeb.ChatParts do
     """
   end
 
+  # A scope check: its report is in the plan (FactoryWeb.PlanPanel), so here it's one
+  # line that opens to the full text, and the plan isn't pushed out of view.
+  def message(%{message: %{author: author, meta: %{"check" => true}}} = assigns)
+      when is_binary(author) do
+    ~H"""
+    <details id={@id} class="group rounded-lg border border-base-content/10 text-sm">
+      <summary class="flex cursor-pointer list-none items-center gap-2 px-3 py-1.5 text-xs text-base-content/60 hover:text-base-content [&::-webkit-details-marker]:hidden">
+        <.icon name="hero-magnifying-glass-micro" class="size-3.5" />
+        <span class="font-medium text-base-content/75">Scope check</span>
+        by {@message.author} · the report is in the plan
+        <.icon
+          name="hero-chevron-down-micro"
+          class="ml-auto size-3.5 transition-transform group-open:rotate-180"
+        />
+      </summary>
+      <div class="md border-t border-base-content/10 px-3 py-2">
+        {FactoryWeb.Markdown.render(@message.body)}
+      </div>
+    </details>
+    """
+  end
+
   def message(%{message: %{author: author}} = assigns) when is_binary(author) do
     ~H"""
     <div id={@id}>
-      <p
-        :if={@message.meta["check"]}
-        class="mb-2 inline-flex items-center gap-1.5 rounded-md bg-base-content/[0.06] px-2 py-0.5 text-xs font-medium text-base-content/70"
-      >
-        <.icon name="hero-magnifying-glass-micro" class="size-3.5" /> Scope check
-      </p>
       <p
         :if={@message.meta["unclear"]}
         class="mb-2 inline-flex items-center gap-1.5 rounded-full bg-warning/12 px-2.5 py-0.5 text-xs font-medium text-warning"
