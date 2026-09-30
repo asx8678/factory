@@ -250,8 +250,15 @@ defmodule Factory.KiroTest do
 
   test "a session over the threshold compacts before its next message", %{run: run} do
     # The fake Kiro reports 2% after every reply.
+    previous = Application.get_env(:factory, :context)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:factory, :context, previous),
+        else: Application.delete_env(:factory, :context)
+    end)
+
     Application.put_env(:factory, :context, compact_at: 2)
-    on_exit(fn -> Application.delete_env(:factory, :context) end)
 
     Chat.handle(run, "/ask Coder first")
     assert_receive {:message, %{author: "Coder", body: "echo: first"}}, 5_000

@@ -29,7 +29,8 @@ defmodule Factory.Context do
   ]
 
   def config(key) do
-    :factory |> Application.get_env(:context, []) |> Keyword.get(key, @defaults[key])
+    # Missing or nil (a test may clear it) means the defaults.
+    (Application.get_env(:factory, :context) || []) |> Keyword.get(key, @defaults[key])
   end
 
   @doc "Estimated tokens in `text` (as `Factory.Usage` counts them)."

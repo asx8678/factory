@@ -257,8 +257,15 @@ defmodule Factory.EngineTest do
 
   test "a step's prompt stays within the budget, and its size and hash are kept" do
     %{w: w, coder: coder, planner: planner} = workflow("true")
+    previous = Application.get_env(:factory, :context)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:factory, :context, previous),
+        else: Application.delete_env(:factory, :context)
+    end)
+
     Application.put_env(:factory, :context, run_prompt_bytes: 3000)
-    on_exit(fn -> Application.delete_env(:factory, :context) end)
 
     run = queued_run(w)
     huge = String.duplicate("A long plan line.\n", 1000)

@@ -180,7 +180,12 @@ defmodule Factory.UsageTest do
   test "context severity uses the thresholds exposed for the graph" do
     previous = Application.get_env(:factory, :context)
     Application.put_env(:factory, :context, compact_at: 60)
-    on_exit(fn -> Application.put_env(:factory, :context, previous) end)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:factory, :context, previous),
+        else: Application.delete_env(:factory, :context)
+    end)
 
     assert %{mid: 36.0, high: 60} = FactoryWeb.Usage.thresholds()
     assert FactoryWeb.Usage.level(35.9) == "low"

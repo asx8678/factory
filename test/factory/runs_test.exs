@@ -14,12 +14,14 @@ defmodule Factory.RunsTest do
     _spec = Specs.for_run(planned)
     age(empty, 90)
     age(planned, 90)
+    planned_id = planned.id
 
-    assert Runs.prune_empty() == 1
+    # Other tests may commit runs meanwhile, so check these two, not a total.
+    assert Runs.prune_empty() >= 1
     assert Runs.get_run(empty.id) == nil
     assert %{spec_id: id} = Runs.get_run(planned.id)
     assert is_integer(id)
-    assert Runs.latest_empty() == nil
+    refute match?(%{id: ^planned_id}, Runs.latest_empty())
   end
 
   test "usage sums the credits of the agents' replies" do
