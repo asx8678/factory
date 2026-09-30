@@ -130,6 +130,61 @@ defmodule Factory.OsProcess do
     ErlangError -> :ok
   end
 
+  @doc """
+  The processes a port's OS process (or the OS pid given) started, and theirs, each with
+  when it started: `[{pid, started}]`. `kill_known/1` kills them later, even once their
+  parent is gone and they belong to init, without touching a process that has since
+  taken one of their numbers.
+  """
+  def descendants_with_start(port) when is_port(port) do
+    case Port.info(port, :os_pid) do
+      {:os_pid, pid} -> descendants_with_start(pid)
+      nil -> []
+    end
+  end
+
+  def descendants_with_start(pid) when is_integer(pid) do
+    table = processes()
+    children = Enum.group_by(table, fn {_pid, {parent, _}} -> parent end, fn {pid, _} -> pid end)
+
+    for child <- descendants(pid, children),
+        child != pid,
+        {_, started} = table[child],
+        do: {child, started}
+  end
+
+  @doc "Kills those of `known` (`descendants_with_start/1`) still running as they were."
+  def kill_known([]), do: :ok
+
+  def kill_known(known) do
+    table = processes()
+
+    case for({pid, started} <- known, match?({_, ^started}, table[pid]), do: to_string(pid)) do
+      [] -> :ok
+      pids -> System.cmd("kill", ["-KILL" | pids], stderr_to_stdout: true)
+    end
+
+    :ok
+  rescue
+    ErlangError -> :ok
+  end
+
+  # Every process: pid => {parent pid, when it started, as ps writes it}.
+  defp processes do
+    case System.cmd("ps", ["-axo", "pid=,ppid=,lstart="], stderr_to_stdout: true) do
+      {output, 0} ->
+        for line <- String.split(output, "\n", trim: true),
+            [pid, parent, started] <- [String.split(String.trim(line), ~r/\s+/, parts: 3)],
+            into: %{},
+            do: {String.to_integer(pid), {String.to_integer(parent), started}}
+
+      _ ->
+        %{}
+    end
+  rescue
+    ErlangError -> %{}
+  end
+
   defp children do
     case System.cmd("ps", ["-axo", "pid=,ppid="], stderr_to_stdout: true) do
       {output, 0} ->

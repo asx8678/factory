@@ -144,10 +144,23 @@ defmodule Factory.Chat do
     {:ok, Runs.get_run(fix.id)}
   end
 
-  # The troubleshooting report: what the workflow's last step handed over.
+  # The troubleshooting report: what the workflow's last step handed over, or, when the
+  # workflow's agents were made again since the run, what the agent of that name wrote
+  # last in it.
   defp report(run) do
     last = run |> Engine.steps() |> Enum.reject(&(&1.kind == "action")) |> List.last()
-    (last && run.progress["outputs"][last.id]) || run.description || run.title
+
+    (last && (run.progress["outputs"][last.id] || last_reply(run, last.name))) ||
+      run.description || run.title
+  end
+
+  defp last_reply(run, author) do
+    run.id
+    |> Runs.list_messages()
+    |> Enum.reverse()
+    |> Enum.find_value(fn m ->
+      m.author == author and not Map.has_key?(m.meta || %{}, "elicitation") and m.body
+    end)
   end
 
   @doc """

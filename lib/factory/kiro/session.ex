@@ -156,6 +156,12 @@ defmodule Factory.Kiro.Session do
     :nonce,
     # where that kiro-cli's lines begin in its log (`Kiro.stop_reason/3`)
     log_mark: 0,
+    # what kiro-cli started (its chat process, its engine), with when, to stop them if it
+    # dies on its own (`Factory.OsProcess.kill_known/1`)
+    started: [],
+    # whether Kiro has Factory's tools loaded, and the wait for it (`_kiro/mcp/status`)
+    mcp_ready: false,
+    mcp_timer: nil,
     buffer: "",
     next_id: 1,
     pending: %{},
@@ -375,8 +381,9 @@ defmodule Factory.Kiro.Session do
         {:reply, :ok, state}
 
       {entry, rest} ->
+        # A link to open has nothing filled in: accepting it says the person went there.
         result =
-          if action == "accept",
+          if action == "accept" and entry[:url] == nil,
             do: %{action: "accept", content: content},
             else: %{action: action}
 
@@ -442,6 +449,8 @@ defmodule Factory.Kiro.Session do
   end
 
   def handle_info({port, {:exit_status, code}}, %{port: port} = state) do
+    # kiro-cli stopped on its own: what it started is left running unless stopped here.
+    Factory.OsProcess.kill_known(state.started)
     reason = Kiro.stop_reason(log_name(state), state.log_mark, code)
     # Signed out: every page says so until Kiro works again.
     if Kiro.signed_out?(reason), do: Factory.Kiro.Catalog.note_failure(reason)
@@ -498,6 +507,14 @@ defmodule Factory.Kiro.Session do
         {:noreply, state}
     end
   end
+
+  # Factory's tools took too long to load: the session carries on without waiting more.
+  def handle_info({:mcp_wait, sid}, %{session_id: sid, ready: false} = state) do
+    Logger.warning("Kiro session #{inspect(state.key)}: Factory's tools didn't load in time.")
+    {:noreply, tools_ready(%{state | mcp_timer: nil})}
+  end
+
+  def handle_info({:mcp_wait, _sid}, state), do: {:noreply, state}
 
   # The turn's text so far goes to the chat; a timer left from an earlier turn does nothing.
   def handle_info({:flush_stream, id}, %{turn: %Turn{request_id: id}} = state),
@@ -558,12 +575,22 @@ defmodule Factory.Kiro.Session do
         # A session opened, so Kiro is signed in again: a check clears the warning.
         if Factory.Kiro.Catalog.signed_out?(), do: Factory.Kiro.Catalog.check_later()
 
-        next(%{
+        state = %{
           state
           | session_id: sid,
             config: current_values(result["configOptions"]),
-            ready: true
-        })
+            started: Factory.OsProcess.descendants_with_start(state.port)
+        }
+
+        # Kiro loads Factory's tools after the session opens and says when: nothing is
+        # sent before they're there (a message could reach the model without them), or
+        # before a little while has passed.
+        if state.mcp_ready do
+          next(%{state | ready: true})
+        else
+          wait = Process.send_after(self(), {:mcp_wait, sid}, Kiro.config(:mcp_ready_timeout))
+          %{state | mcp_timer: wait}
+        end
 
       {{:config, id, value, rest}, %{"result" => result}} ->
         # Kiro answers with its settings. It's a refusal only if it reports a different
@@ -617,61 +644,42 @@ defmodule Factory.Kiro.Session do
         else: %{}
 
     kind = Kiro.Permission.kind(params, known)
-    command = state.turn && Kiro.Permission.command(params, commands(state.turn))
+    turn = state.turn
+    agent = turn && turn.agent
 
-    # A planner while it plans, and an agent that only reads and checks (a reviewer,
-    # a researcher), may run commands that only look: git log and diff, a search, the
-    # tests, a pull request's diff.
-    looking? =
-      kind == "execute" and kind not in allowed and state.turn != nil and
-        (state.turn.planning != nil or Agent.read_only?(state.turn.agent)) and
-        Kiro.Permission.looking?(command)
+    # A planner while it plans, and an agent that only reads and checks (a reviewer, a
+    # researcher), may run commands that only look; some of what it does goes to the
+    # person first (`Kiro.Permission.decide/4`). A troubleshooting run's attached files
+    # are there to read, except for an agent that searches the web.
+    decision =
+      Kiro.Permission.decide(
+        kind,
+        turn && Kiro.Permission.command(params, commands(turn)),
+        if(turn, do: paths(params, turn), else: []),
+        %{
+          allowed: allowed,
+          looks: turn != nil and (turn.planning != nil or Agent.read_only?(agent)),
+          reads_only: turn != nil and Agent.read_only?(agent),
+          web: turn != nil and Agent.web?(agent),
+          mcp: turn != nil and server == Factory.PlanTools.server_name(),
+          folder: state.workdir,
+          roots:
+            if(turn && not Agent.web?(agent), do: [Factory.Evidence.dir(turn.run_id)], else: [])
+        }
+      )
 
-    wanted =
-      if kind in allowed or looking? or
-           (state.turn != nil and server == Factory.PlanTools.server_name()),
-         do: "allow",
-         else: "reject"
+    case decision do
+      {:ask, reason} ->
+        ask_permission(state, id, params, reason)
 
-    # Some of what one that only reads may do goes to the person first
-    # (`Kiro.Permission.ask_first/4`): a web page (unless the agent is set to search the
-    # web, `Agent.web?/1`), a pull request's own code, a file outside the project.
-    # A troubleshooting run's attached files are there to read, except for an agent that
-    # searches the web.
-    roots =
-      if state.turn && not Agent.web?(state.turn.agent),
-        do: [Factory.Evidence.dir(state.turn.run_id)],
-        else: []
+      decision ->
+        wanted = if decision == :allow, do: "allow", else: "reject"
+        outcome = Kiro.Permission.outcome(options, wanted)
+        reply(state, id, %{outcome: outcome})
 
-    ask =
-      cond do
-        looking? ->
-          Kiro.Permission.ask_first(kind, command, [], state.workdir, roots)
-
-        state.turn != nil and Agent.read_only?(state.turn.agent) and
-            ((kind == "fetch" and not Agent.web?(state.turn.agent)) or
-               (wanted == "allow" and kind in ["read", "search"])) ->
-          Kiro.Permission.ask_first(
-            kind,
-            command,
-            paths(params, state.turn),
-            state.workdir,
-            roots
-          )
-
-        true ->
-          nil
-      end
-
-    if ask do
-      ask_permission(state, id, params, ask)
-    else
-      outcome = Kiro.Permission.outcome(options, wanted)
-      reply(state, id, %{outcome: outcome})
-
-      if wanted == "allow" and outcome.outcome == "selected",
-        do: state,
-        else: deny(state, params["toolCall"])
+        if wanted == "allow" and outcome.outcome == "selected",
+          do: state,
+          else: deny(state, params["toolCall"])
     end
   end
 
@@ -684,7 +692,20 @@ defmodule Factory.Kiro.Session do
     elicitation = params["elicitation"] || %{}
     run = state.turn && Runs.get_run(state.turn.run_id)
 
-    if run == nil or elicitation["mode"] not in [nil, "form"] do
+    # A form to fill in, or a link to open (only a web page's) before the tool goes on.
+    shape =
+      case elicitation["mode"] do
+        mode when mode in [nil, "form"] ->
+          %{"schema" => elicitation["requestedSchema"] || %{}}
+
+        "url" ->
+          if web_link?(elicitation["url"]), do: %{"mode" => "url", "url" => elicitation["url"]}
+
+        _ ->
+          nil
+      end
+
+    if run == nil or shape == nil do
       reply(state, id, %{action: "cancel"})
       state
     else
@@ -696,16 +717,12 @@ defmodule Factory.Kiro.Session do
           author: agent.name,
           meta: %{
             "agent_id" => agent.id,
-            "elicitation" => %{
-              "key" => key,
-              "schema" => elicitation["requestedSchema"] || %{},
-              "status" => "open"
-            }
+            "elicitation" => Map.merge(%{"key" => key, "status" => "open"}, shape)
           }
         )
 
       Agents.set_activity(agent.id, "waiting", "Waiting for your answer")
-      entry = %{rpc: id, message_id: message.id, run_id: run.id}
+      entry = %{rpc: id, message_id: message.id, run_id: run.id, url: shape["url"]}
       %{state | elicitations: Map.put(state.elicitations, key, entry)}
     end
   end
@@ -770,7 +787,33 @@ defmodule Factory.Kiro.Session do
     end
   end
 
+  # How Kiro's MCP servers are doing: once Factory's is connected (or has failed), the
+  # session is ready for its first message.
+  defp handle_message(%{"method" => "_kiro/mcp/status", "params" => params}, state) do
+    if Wire.mcp_settled?(params, [Factory.PlanTools.server_name()]) do
+      tools_ready(%{state | mcp_ready: true})
+    else
+      state
+    end
+  end
+
   defp handle_message(_msg, state), do: state
+
+  defp tools_ready(%{session_id: sid, ready: false} = state) when is_binary(sid) do
+    if state.mcp_timer, do: Process.cancel_timer(state.mcp_timer)
+    next(%{state | ready: true, mcp_timer: nil})
+  end
+
+  defp tools_ready(state), do: state
+
+  defp web_link?(url) when is_binary(url) do
+    match?(
+      %URI{scheme: scheme, host: host} when scheme in ["http", "https"] and host not in [nil, ""],
+      URI.parse(url)
+    )
+  end
+
+  defp web_link?(_url), do: false
 
   # A tool the person is asked about: a yes or no in the chat, the same form as a tool's
   # question, and the answer back to Kiro (`handle_call({:elicitation, …})`). Kiro
@@ -976,11 +1019,16 @@ defmodule Factory.Kiro.Session do
     cancel_requests(state)
     close_port(state.port)
 
+    if state.mcp_timer, do: Process.cancel_timer(state.mcp_timer)
+
     open(%{
       state
       | port: nil,
         session_id: nil,
         ready: false,
+        mcp_ready: false,
+        mcp_timer: nil,
+        started: [],
         buffer: "",
         pending: %{},
         config: %{},

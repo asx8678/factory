@@ -21,6 +21,16 @@ defmodule Factory.Kiro.Wire do
     end
   end
 
+  @doc """
+  Whether Kiro's MCP servers named `names` are settled, from a `_kiro/mcp/status`
+  notification's params: each one listed and past "connecting" (connected, with its
+  tools, or failed). Kiro loads them after `session/new` answers.
+  """
+  def mcp_settled?(params, names) do
+    servers = Map.new(List.wrap(params["servers"]), &{&1["name"], &1["status"]})
+    Enum.all?(names, &(Map.has_key?(servers, &1) and servers[&1] not in ["connecting", nil]))
+  end
+
   @doc "Sends `msg` as one line."
   def send_json(port, msg) do
     Port.command(port, [JSON.encode!(msg), "\n"])

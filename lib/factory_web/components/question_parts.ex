@@ -10,6 +10,62 @@ defmodule FactoryWeb.QuestionParts do
   attr :id, :string, required: true
   attr :message, :map, required: true
 
+  # A page a tool asks the person to open mid-turn (an MCP elicitation in URL mode, say to
+  # sign in somewhere): the page's host plainly, the link, and whether it's done.
+  def elicitation(%{message: %{meta: %{"elicitation" => %{"mode" => "url"} = e}}} = assigns) do
+    assigns = assign(assigns, e: e, host: URI.parse(e["url"] || "").host)
+
+    ~H"""
+    <form
+      :if={@e["status"] == "open"}
+      id={@id}
+      phx-submit="elicit_answer"
+      class="task-card-active mt-3 rounded-xl border px-3.5 py-3"
+    >
+      <input type="hidden" name="key" value={@e["key"]} />
+      <input type="hidden" name="agent_id" value={@message.meta["agent_id"]} />
+      <p class="flex items-center gap-1.5 text-xs font-medium text-base-content/60">
+        <.icon name="hero-arrow-top-right-on-square-mini" class="size-4" />
+        {@message.author} asks you to open a page on
+        <span class="font-semibold text-base-content">{@host}</span>
+      </p>
+      <a
+        id={"#{@id}-link"}
+        href={@e["url"]}
+        target="_blank"
+        rel="noopener noreferrer"
+        class="mt-2 block truncate font-mono text-[13px] text-primary hover:underline"
+      >
+        {@e["url"]}
+      </a>
+      <p class="mt-2 text-xs text-base-content/55">
+        Open it, do what it asks, then come back. It waits for you.
+      </p>
+      <div class="mt-3 flex justify-end gap-2">
+        <button
+          type="submit"
+          name="action"
+          value="decline"
+          formnovalidate
+          class="btn btn-ghost btn-sm"
+        >
+          Decline
+        </button>
+        <button type="submit" name="action" value="accept" class="btn btn-primary btn-sm">
+          I've done it
+        </button>
+      </div>
+    </form>
+    <p :if={@e["status"] != "open"} id={@id} class="mt-2 text-xs text-base-content/55">
+      {case @e["status"] do
+        "answered" -> "You opened the page on #{@host} and said it was done."
+        "declined" -> "You declined to open the page."
+        _ -> "No longer waiting: the turn ended before an answer."
+      end}
+    </p>
+    """
+  end
+
   # A question a tool asks mid-turn (MCP elicitation, `Factory.Kiro.Session`): a form
   # from its schema while it's open (the agent waits), then what was answered.
   def elicitation(assigns) do

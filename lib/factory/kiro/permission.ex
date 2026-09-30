@@ -115,6 +115,9 @@ defmodule Factory.Kiro.Permission do
 
   # What `sed -n` may print: a line, the last, a /pattern/, or a range of them, then `p`.
   @sed_print ~r{^(['"]?)(\d+|\$|/[^/]*/)(,(\d+|\$|/[^/]*/))?p\1$}
+  # What sed may change in what it prints: one `s/…/…/`, with flags that neither write
+  # (`w`) nor run the result (`e`).
+  @sed_substitute ~r{^(['"]?)s([/,#:@%])(?:\\.|(?!\2).)*\2(?:\\.|(?!\2).)*\2[gIip0-9]*\1$}
 
   @doc """
   Whether a shell command only looks: it reads files or the project's history, lists or
@@ -130,17 +133,56 @@ defmodule Factory.Kiro.Permission do
   program named by its path (`./cat`), and the options that write a file or run a
   program (`sort -o`, `find -fprint`, `rg --pre`, `git grep -O`, `--ext-diff`). `uniq`
   looks only with at most one file name (a second is written), and `sed` only when it
-  prints lines (`sed -n '5,9p' file`).
+  prints lines (`sed -n '5,9p' file`) or changes what it prints (`sed 's/a/b/g'`).
+  Comments (`# why`) don't count.
   """
   def looking?(nil), do: false
 
   def looking?(command) when is_binary(command) do
-    text = String.replace(command, ~r/\s*\d?>\s*&\d|\s*\d?>\s*\/dev\/null/, "")
+    text =
+      command
+      |> without_comments()
+      |> String.replace(~r/\s*\d?>\s*&\d|\s*\d?>\s*\/dev\/null/, "")
+
     parts = parts(text)
 
     not String.contains?(text, [">", "`", "$(", "<("]) and
       parts != [] and Enum.all?(parts, &looking_part?/1)
   end
+
+  # The command without its comments, which run nothing and may say anything
+  # (`# 50 slots => 150s`): a `#` that starts a word outside quotes, to the end of the
+  # line, as in the shell. With a here-document or `$'…'`, whose quoting this doesn't
+  # follow, nothing is taken out.
+  defp without_comments(command) do
+    if String.contains?(command, ["<<", "$'"]),
+      do: command,
+      else: uncomment(command, nil, ?\n, [])
+  end
+
+  defp uncomment("", _quote, _before, acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
+
+  defp uncomment(<<?#, rest::binary>>, nil, before, acc) when before in [?\s, ?\t, ?\n] do
+    case String.split(rest, "\n", parts: 2) do
+      [_comment, after_it] -> uncomment("\n" <> after_it, nil, ?#, acc)
+      [_comment] -> uncomment("", nil, ?#, acc)
+    end
+  end
+
+  # An escaped character is part of the word, even a space: `a\ #b` is one word.
+  defp uncomment(<<?\\, c::utf8, rest::binary>>, quote, _before, acc) when quote != ?',
+    do: uncomment(rest, quote, ?\\, [<<c::utf8>>, ?\\ | acc])
+
+  defp uncomment(<<q, rest::binary>>, nil, _before, acc) when q in [?', ?"],
+    do: uncomment(rest, q, q, [q | acc])
+
+  defp uncomment(<<q, rest::binary>>, q, _before, acc), do: uncomment(rest, nil, q, [q | acc])
+
+  defp uncomment(<<c::utf8, rest::binary>>, quote, _before, acc),
+    do: uncomment(rest, quote, c, [<<c::utf8>> | acc])
+
+  defp uncomment(<<c, rest::binary>>, quote, _before, acc),
+    do: uncomment(rest, quote, c, [c | acc])
 
   # The commands in a chain or pipeline.
   # A pipe escaped for grep's alternation (`grep "a\|b"`) isn't one.
@@ -181,6 +223,7 @@ defmodule Factory.Kiro.Permission do
     folder = Path.expand(folder)
 
     command
+    |> without_comments()
     |> String.split(~r/[\s=:,]+/)
     |> Enum.map(&String.trim(&1, "\"'"))
     |> Enum.any?(&outside?(&1, folder, roots))
@@ -330,16 +373,20 @@ defmodule Factory.Kiro.Permission do
 
   defp looking_words?(["find" | _]), do: true
 
-  # sed only prints: `-n` (with -E or -r), one address or range and `p`, then files. Its
-  # other commands may write (-i, `w`, `s///w`) or run a program (`e`, `s///e`), and
-  # GNU sed reads options after the files too (`sed -n 1p file -i`).
+  # sed only prints: `-n` (with -E or -r), one address or range and `p`, then files; or
+  # one substitution, printed. Its other commands may write (-i, `w`, `s///w`) or run a
+  # program (`e`, `s///e`), and GNU sed reads options after the files too
+  # (`sed -n 1p file -i`).
   defp looking_words?(["sed" | rest]) do
     {flags, rest} = Enum.split_while(rest, &String.starts_with?(&1, "-"))
 
     case rest do
       [script | files] ->
-        flags != [] and Enum.all?(flags, &Regex.match?(~r/^-[nEr]+$/, &1)) and
-          Enum.any?(flags, &String.contains?(&1, "n")) and Regex.match?(@sed_print, script) and
+        prints? =
+          Enum.any?(flags, &String.contains?(&1, "n")) and Regex.match?(@sed_print, script)
+
+        Enum.all?(flags, &Regex.match?(~r/^-[nEr]+$/, &1)) and
+          (prints? or Regex.match?(@sed_substitute, script)) and
           not Enum.any?(files, &String.starts_with?(&1, "-"))
 
       [] ->
@@ -372,6 +419,48 @@ defmodule Factory.Kiro.Permission do
   end
 
   defp git_branch_list?(_words), do: false
+
+  @doc """
+  What to answer a permission request for a tool of `kind` (with its `command` or the
+  `paths` it names): `:allow`, `:reject`, or `{:ask, reason}` when the person should say
+  yes first (`ask_first/5`). A session asks them in the chat; a one-off question, with
+  nobody to ask, takes it as no. `who` is the agent asking:
+
+    * `:allowed` - the tool kinds it may use (`Factory.Agents.Agent.tools/1`)
+    * `:looks` - whether it may run commands that only look (`looking?/1`): a planner
+      while it plans, an agent that only reads and checks
+    * `:reads_only` - whether it only reads, so a web page, a pull request's own code or
+      a file outside the project goes to the person first
+    * `:web` - whether it searches the web without asking
+    * `:mcp` - whether the request is for an MCP server of its own (Factory's tools),
+      which checks for itself what the agent may do
+    * `:folder` and `:roots` - the project folder, and folders that count as inside too
+  """
+  def decide(kind, command, paths, who) do
+    looking? =
+      kind == "execute" and kind not in who.allowed and who.looks and looking?(command)
+
+    allow? = kind in who.allowed or looking? or who.mcp
+
+    ask =
+      cond do
+        looking? ->
+          ask_first(kind, command, [], who.folder, who.roots)
+
+        who.reads_only and
+            ((kind == "fetch" and not who.web) or (allow? and kind in ["read", "search"])) ->
+          ask_first(kind, command, paths, who.folder, who.roots)
+
+        true ->
+          nil
+      end
+
+    cond do
+      ask -> {:ask, ask}
+      allow? -> :allow
+      true -> :reject
+    end
+  end
 
   # ACP permits cancellation when none of the offered options matches the decision. The
   # one-time answer comes first: `allow_always` would trust the tool for the rest of the

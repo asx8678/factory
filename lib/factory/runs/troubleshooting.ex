@@ -102,6 +102,8 @@ defmodule Factory.Runs.Troubleshooting do
       and blogs are leads to follow, not proof.
     - Open and read each source, not the search snippet. Quote the sentence that
       matters, briefly, and note which version it's about.
+    - Read the few sources that settle a signature, about three, fewer in a quick check,
+      and move on when two reliable ones agree: not every page a search finds.
     - Record each finding as W1…, with its source.
     - When a signature finds nothing reliable, say so, and what you searched.
 

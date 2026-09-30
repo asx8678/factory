@@ -7,7 +7,7 @@ defmodule FactoryWeb.SettingsLive do
   """
   use FactoryWeb, :live_view
 
-  @tabs [{"general", "General"}, {"models", "Models"}]
+  @tabs [{"general", "General"}, {"models", "Models"}, {"web", "Web searches"}]
 
   alias Factory.Kiro.Catalog
 
@@ -18,6 +18,8 @@ defmodule FactoryWeb.SettingsLive do
 
   defp catalog(socket) do
     assign(socket,
+      names_form:
+        to_form(%{"names" => Enum.join(Factory.Redact.saved_names(), "\n")}, as: :redact),
       models: Catalog.models() || [],
       modes: Catalog.modes() || [],
       checked_at: Catalog.checked_at(),
@@ -36,6 +38,26 @@ defmodule FactoryWeb.SettingsLive do
     end
 
     {:noreply, catalog(socket)}
+  end
+
+  # The names the agents that search the web never see (Factory.Redact).
+  def handle_event("redact_names", %{"redact" => %{"names" => text}}, socket) do
+    names =
+      text
+      |> String.split(~r/\R/)
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.uniq()
+
+    Factory.Prefs.put("redact_names", names)
+
+    {:noreply,
+     socket
+     |> assign(names_form: to_form(%{"names" => Enum.join(names, "\n")}, as: :redact))
+     |> put_flash(
+       :info,
+       "Saved #{length(names)} #{if length(names) == 1, do: "name", else: "names"}."
+     )}
   end
 
   # Asks Kiro which models it has; the answer comes back as {:kiro_catalog, _}.
@@ -244,6 +266,25 @@ defmodule FactoryWeb.SettingsLive do
                     </li>
                   </ul>
                 </details>
+              </section>
+            <% "web" -> %>
+              <section id="redact-names">
+                <h2 class="font-medium">Names to keep out of web searches</h2>
+                <p class="mt-0.5 text-sm text-base-content/55">
+                  The agents that search the web (the Error Researcher and the Fact Checker) are
+                  never shown these, nor hostnames, IDs or secrets. One per line: your company,
+                  its products, its customers. Each is matched as a whole word, in any case, so
+                  a name that's also a common word is taken out everywhere.
+                </p>
+                <.form for={@names_form} id="redact-names-form" phx-submit="redact_names" class="mt-3">
+                  <.input
+                    field={@names_form[:names]}
+                    type="textarea"
+                    rows="4"
+                    placeholder="Acme Corp\nAcme Orders\nContoso"
+                  />
+                  <button id="redact-names-save" class="btn btn-sm mt-2">Save</button>
+                </.form>
               </section>
             <% _ -> %>
               <dl id="settings-facts" class="divide-y divide-base-300/70">

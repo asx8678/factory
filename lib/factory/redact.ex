@@ -4,10 +4,15 @@ defmodule Factory.Redact do
   agent that searches the web (`Factory.Engine`), so it can't end up in a search or a
   URL however the agent is steered: internal hostnames and IP addresses, the tenant part
   of cloud hostnames (the service stays, so the error can still be looked up), email
-  addresses, IDs, keys, tokens and passwords.
+  addresses, user names given as `user=…`, paths in someone's home folder, IDs, keys,
+  tokens and passwords.
 
   What stays is what a search needs: product names, versions, error codes, the fixed
   part of messages, and public links such as documentation and issue trackers.
+
+  Names only the person knows are theirs (the company's, its products', its customers'):
+  they list them in Settings (`"redact_names"` in `Factory.Prefs`), and each is taken
+  out as a whole word, whatever its case.
   """
 
   # Cloud services whose hostnames start with the customer's own name: the service is
@@ -23,10 +28,14 @@ defmodule Factory.Redact do
   # Top-level names only used inside a network.
   @internal ~w(internal local localdomain corp lan intranet private home svc)
 
-  @doc "The text with what identifies anyone replaced by a marker such as `[host]`."
-  def text(nil), do: nil
+  @doc """
+  The text with what identifies anyone replaced by a marker such as `[host]`. `names`
+  are the words to take out too; by default, the ones saved in Settings.
+  """
+  def text(text, names \\ nil)
+  def text(nil, _names), do: nil
 
-  def text(text) when is_binary(text) do
+  def text(text, names) when is_binary(text) do
     text
     |> sub(~r/-----BEGIN [A-Z ]+-----.*?-----END [A-Z ]+-----/s, "[key]")
     |> sub(~r/\beyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}/, "[token]")
@@ -36,6 +45,11 @@ defmodule Factory.Redact do
       "\\1[secret]"
     )
     |> sub(~r/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/, "[email]")
+    |> sub(~r/\b((?:user(?:[ _-]?(?:name|id))?|uid|login)\s*=\s*)[^\s;,&"'<>)]+/i, "\\1[user]")
+    |> sub(
+      ~r{(?<![\w.:/~-])(?:/Users|/home)/[^/\s]+(?:/[^\s"'`<>()\[\]]*)?|[A-Za-z]:\\Users\\[^\s"'`<>]+},
+      "[path]"
+    )
     |> sub(~r/(dev\.azure\.com\/)[^\s\/?#]+/i, "\\1[org]")
     |> sub(tenant_hosts(), "[name].\\1")
     |> sub(internal_hosts(), "[host]")
@@ -46,6 +60,33 @@ defmodule Factory.Redact do
     )
     |> sub(~r/\b(?:[0-9a-f]{1,4}:){4,7}[0-9a-f]{1,4}\b/i, "[ip]")
     |> sub(~r/\b[0-9a-f]{24,}\b/i, "[id]")
+    |> names_out(names || saved_names())
+  end
+
+  @doc "The names saved in Settings to keep out of web searches."
+  def saved_names do
+    case Factory.Prefs.get("redact_names", []) do
+      names when is_list(names) -> names
+      _ -> []
+    end
+  end
+
+  # Longest first, so "Acme Corp" goes whole before "Acme" does.
+  defp names_out(text, names) do
+    names
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+    |> Enum.sort_by(&(-String.length(&1)))
+    |> Enum.reduce(text, fn name, text ->
+      word =
+        Regex.compile!(
+          "(?<![\\p{L}\\p{N}_])" <> Regex.escape(name) <> "(?![\\p{L}\\p{N}_])",
+          "iu"
+        )
+
+      Regex.replace(word, text, "[name]")
+    end)
   end
 
   defp sub(text, regex, marker), do: Regex.replace(regex, text, marker)

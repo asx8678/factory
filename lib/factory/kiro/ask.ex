@@ -69,8 +69,9 @@ defmodule Factory.Kiro.Ask do
       try do
         with {:ok, _, _} <-
                call(conn, 1, "initialize", %{protocolVersion: 1, clientCapabilities: %{}}),
-             {:ok, session, _} <-
+             {:ok, session, created} <-
                call(conn, 2, "session/new", %{cwd: workdir, mcpServers: opts[:mcp_servers] || []}),
+             :ok <- tools_loaded(conn, created),
              sid = session["sessionId"],
              :ok <- set_model(conn, sid, session, model) do
           call(conn, 4, "session/prompt", %{sessionId: sid, prompt: [%{type: "text", text: text}]})
@@ -151,6 +152,39 @@ defmodule Factory.Kiro.Ask do
     await(conn, id, "", acc)
   end
 
+  # Kiro loads the MCP servers it's given after session/new answers, and says when
+  # (`_kiro/mcp/status`, perhaps already while it answered): the question waits for
+  # them, a little while at most, so it doesn't reach the model before its tools.
+  defp tools_loaded(%{mcp: []}, _acc), do: :ok
+  defp tools_loaded(_conn, %{mcp_ready: true}), do: :ok
+
+  defp tools_loaded(conn, _acc),
+    do:
+      wait_tools(conn, "", System.monotonic_time(:millisecond) + Kiro.config(:mcp_ready_timeout))
+
+  defp wait_tools(%{port: port} = conn, buffer, deadline) do
+    receive do
+      {^port, {:data, data}} ->
+        case Wire.read(buffer, data) do
+          {:partial, buffer} ->
+            wait_tools(conn, buffer, deadline)
+
+          {:message, %{"method" => "_kiro/mcp/status", "params" => params}} ->
+            if Wire.mcp_settled?(params, conn.mcp), do: :ok, else: wait_tools(conn, "", deadline)
+
+          _ ->
+            wait_tools(conn, "", deadline)
+        end
+
+      # It stopped: the next call says why.
+      {^port, {:exit_status, _}} = stopped ->
+        send(self(), stopped)
+        :ok
+    after
+      max(deadline - System.monotonic_time(:millisecond), 0) -> :ok
+    end
+  end
+
   defp await(%{port: port} = conn, id, buffer, acc) do
     timeout = max(conn.deadline - System.monotonic_time(:millisecond), 0)
 
@@ -197,33 +231,26 @@ defmodule Factory.Kiro.Ask do
     # Kiro names the MCP server a tool comes from; its request has no kind then.
     server = get_in(p, ["_meta", "kiro", "mcpTool", "identity", "serverName"])
 
-    kind = Kiro.Permission.kind(p, acc.kinds)
+    # What a chat would ask the person about first (`Kiro.Permission.decide/4`) is a no
+    # here, with nobody to ask: a web page, a pull request's own code, a file outside the
+    # folder.
+    decision =
+      Kiro.Permission.decide(
+        Kiro.Permission.kind(p, acc.kinds),
+        Kiro.Permission.command(p, acc.commands),
+        Kiro.Permission.paths_of(p["toolCall"]),
+        %{
+          allowed: conn.allow,
+          looks: "look" in conn.allow,
+          reads_only: "execute" not in conn.allow,
+          web: false,
+          mcp: server != nil and server in conn.mcp,
+          folder: conn.workdir,
+          roots: conn.roots
+        }
+      )
 
-    command = Kiro.Permission.command(p, acc.commands)
-
-    looking? =
-      kind == "execute" and "look" in conn.allow and Kiro.Permission.looking?(command)
-
-    # What a chat would ask the person about first (`Kiro.Permission.ask_first/4`) is a
-    # no here, with nobody to ask: a pull request's own code, a file outside the folder.
-    asks_first? =
-      cond do
-        kind == "execute" and kind not in conn.allow and looking? ->
-          Kiro.Permission.ask_first(kind, command, [], conn.workdir, conn.roots) != nil
-
-        kind in ["read", "search"] and "execute" not in conn.allow ->
-          paths = Kiro.Permission.paths_of(p["toolCall"])
-          Kiro.Permission.ask_first(kind, command, paths, conn.workdir, conn.roots) != nil
-
-        true ->
-          false
-      end
-
-    wanted =
-      if (kind in conn.allow or looking? or (server != nil and server in conn.mcp)) and
-           not asks_first?,
-         do: "allow",
-         else: "reject"
+    wanted = if decision == :allow, do: "allow", else: "reject"
 
     Wire.send_json(conn.port, %{
       jsonrpc: "2.0",
@@ -318,6 +345,11 @@ defmodule Factory.Kiro.Ask do
 
     {:cont, %{acc | last: "", tooled: true, kinds: kinds, commands: commands}}
   end
+
+  defp handle(conn, %{"method" => "_kiro/mcp/status", "params" => params}, _id, acc),
+    do:
+      {:cont,
+       if(Wire.mcp_settled?(params, conn.mcp), do: Map.put(acc, :mcp_ready, true), else: acc)}
 
   defp handle(_conn, _msg, _id, acc), do: {:cont, acc}
 end

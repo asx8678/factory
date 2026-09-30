@@ -118,7 +118,16 @@ Verified on Kiro 2.26 (30 Sep 2026): after a run finished, the planner added a t
 - An agent set to search the web (`web` on its card, like the troubleshooting
   workflow's Error Researcher and Fact Checker) fetches without asking. It isn't shown
   the person's own material (the job), and what it's handed is filtered first
-  (`Factory.Redact`: internal hosts, IPs, emails, IDs, keys and tokens come out).
+  (`Factory.Redact`: internal hosts, IPs, emails, `user=` names, paths in a home folder,
+  IDs, keys and tokens come out, and the names listed under Settings → Web searches, as
+  whole words).
+- Comments in a command (`# why`) don't count when deciding whether it only looks, as
+  the shell ignores them; nor does a `sed 's/…/…/'` that only changes what it prints.
+- Factory waits for Kiro to say its tools are loaded (`_kiro/mcp/status`, at most
+  `:mcp_ready_timeout`) before an agent's first message, and when kiro-cli stops, ends
+  what it started (`OsProcess.kill_known/1`), such as MCP servers.
+- A tool may ask the person to open a web page (URL-mode elicitation): the card shows the
+  link, for http and https only, and says when it's done or declined.
 - Kiro's own working files (`~/.kiro/sessions/…`, where it keeps big tool results to read
   back) and a troubleshooting run's attached files (`Factory.Evidence`, not for the web
   agents) count as inside the project.
