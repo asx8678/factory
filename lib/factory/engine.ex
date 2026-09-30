@@ -510,6 +510,7 @@ defmodule Factory.Engine do
       tag("<job>", run.description || run.title, "</job>", 16 * 1024),
       base_specs(run),
       run.spec && tag("<spec>", run.spec, "</spec>", 96 * 1024),
+      task_status(run),
       handoffs != [] && ["What the agents before you handed over:" | handoffs],
       feedback &&
         [
@@ -536,6 +537,20 @@ defmodule Factory.Engine do
     |> List.flatten()
     |> Enum.reject(&(&1 in [nil, false, ""]))
     |> Factory.Context.fit()
+  end
+
+  # When some tasks are done already (a run run again for tasks added later), which
+  # ones: the agents work on the rest.
+  defp task_status(%Run{tasks: tasks}) do
+    if Enum.any?(tasks, &(&1.status == "done")) and Enum.any?(tasks, &(&1.status != "done")) do
+      tag(
+        "<task-status>",
+        Factory.RunTools.describe(tasks) <>
+          "\nWork on the open ones; the done ones are built already.",
+        "</task-status>",
+        8 * 1024
+      )
+    end
   end
 
   # A step with an arrow back decides whether the work goes round again.

@@ -146,9 +146,19 @@ defmodule Factory.Runs do
     broadcast("runs", {:runs_changed})
   end
 
-  @doc "Stores the spec files and replaces the run's tasks with the ones found in them."
-  def attach_spec(%Run{} = run, files, tasks) do
+  @doc """
+  Stores the spec files and replaces the run's tasks with the ones found in them. With
+  `keep_status: true`, tasks with the same title keep their status.
+  """
+  def attach_spec(%Run{} = run, files, tasks, opts \\ []) do
     with_locked_run(run.id, fn run ->
+      # A run already under way keeps what's done: a task with the same title keeps
+      # its status (`keep_status: true`, when its plan changes after the start).
+      statuses =
+        if opts[:keep_status],
+          do: Map.new(run.tasks, &{&1.title, &1.status}),
+          else: %{}
+
       Repo.delete_all(from t in Task, where: t.run_id == ^run.id)
       now = DateTime.utc_now(:second)
 
@@ -159,6 +169,7 @@ defmodule Factory.Runs do
             position: i,
             ref: task.ref,
             title: task.title,
+            status: Map.get(statuses, task.title, "pending"),
             inserted_at: now,
             updated_at: now
           }

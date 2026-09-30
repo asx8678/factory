@@ -214,6 +214,72 @@ defmodule Factory.PlanTools do
 
   def call(_token, _name, _args), do: {:error, "The arguments must be an object."}
 
+  @doc """
+  Runs tool `name` for a planner talking in its own Kiro session: a message in the chat,
+  before or after the run started (`Factory.RunTools` passes session calls here). Only
+  the agent that plans the run (`Factory.Chat.planner_for/1`) may change it. Once the
+  run has started, the plan can be added to and changed but not replaced, and the
+  run's tasks follow it, keeping what's done. Questions go in the reply.
+  """
+  def call_in_turn(run_id, agent, name, args) when is_map(args) do
+    with true <- Enum.any?(@tools, &(&1.name == name)) || {:error, "There's no tool #{name}."} do
+      result =
+        Runs.with_locked_run(run_id, fn run ->
+          planner = Factory.Chat.planner_for(run)
+
+          cond do
+            run.status == "cancelled" ->
+              {:error, "This run was cancelled. End your turn."}
+
+            planner == nil or planner.id != agent.id ->
+              {:error,
+               "Only #{(planner && planner.name) || "the workflow's planner"} changes this run's plan."}
+
+            name == "ask_user" ->
+              {:ok, {:read, "Ask them in your reply; the person answers in the chat."}}
+
+            name == "create_plan" and run.status != "draft" ->
+              {:error,
+               "The run has started, so its plan can't be replaced. Change it with add_tasks, update_task and remove_tasks."}
+
+            true ->
+              apply_in_turn(name, args, run)
+          end
+        end)
+
+      case result do
+        {:ok, {_event, text}} -> {:ok, text}
+        {:error, text} when is_binary(text) -> {:error, text}
+        {:error, _} -> {:error, "This chat no longer exists. End your turn."}
+      end
+    end
+  end
+
+  def call_in_turn(_run_id, _agent, _name, _args),
+    do: {:error, "The arguments must be an object."}
+
+  # Before the start the spec change carries over to the run by itself
+  # (`Factory.Specs.update_spec/2`); after it, the run's tasks follow here.
+  defp apply_in_turn(name, args, %{status: "draft"} = run), do: apply_tool(name, args, run)
+
+  defp apply_in_turn(name, args, run) do
+    with {:ok, {:changed, text}} <- apply_tool(name, args, run) do
+      spec = Specs.for_run(run)
+
+      {:ok, run} =
+        Runs.attach_spec(run, Specs.files(spec), Specs.tasks(spec), keep_status: true)
+
+      open = Enum.count(run.tasks, &(&1.status != "done"))
+
+      next =
+        if run.status == "done",
+          do: " The run has finished: #{open} open; typing /run in the chat builds them.",
+          else: " The run is under way: #{open} open; new ones are built when it's run again."
+
+      {:ok, {:changed, text <> next}}
+    end
+  end
+
   defp verify(token) do
     case Phoenix.Token.verify(FactoryWeb.Endpoint, @salt, token || "", max_age: 86_400) do
       {:ok, grant} -> {:ok, grant}

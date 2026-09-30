@@ -66,6 +66,12 @@ defmodule Factory.Kiro.Session do
   def current_step(pid), do: GenServer.call(pid, :current_step)
 
   @doc """
+  What the session is answering, for Factory's tools: `%{run_id:, agent:, step:}` (step
+  nil for a chat message), or nil between turns.
+  """
+  def current_turn(pid), do: GenServer.call(pid, :current_turn)
+
+  @doc """
   Compacts this session's conversation now (see the moduledoc). Not while it is
   answering. `{:error, :no_gain}` when the result wouldn't be smaller. The note goes to
   the chat `run_id`, else to the chat of the last turn.
@@ -209,6 +215,11 @@ defmodule Factory.Kiro.Session do
     do: {:reply, %{run_id: turn.run_id, step: step}, state}
 
   def handle_call(:current_step, _from, state), do: {:reply, nil, state}
+
+  def handle_call(:current_turn, _from, %{turn: %Turn{} = turn} = state),
+    do: {:reply, %{run_id: turn.run_id, agent: turn.agent, step: turn.step}, state}
+
+  def handle_call(:current_turn, _from, state), do: {:reply, nil, state}
 
   def handle_call(:idle?, _from, state),
     do:

@@ -74,7 +74,7 @@ defmodule Factory.RunTools do
   """
   def tools(token) do
     case verify(token) do
-      {:ok, %{session: _}} -> @tools
+      {:ok, %{session: key}} -> @tools ++ plan_tools(key)
       {:ok, grant} -> Enum.filter(@tools, &allowed?(grant, &1.name))
       _ -> []
     end
@@ -95,6 +95,21 @@ defmodule Factory.RunTools do
       verdict: Keyword.get(opts, :verdict, false)
     })
   end
+
+  # A session whose agent can plan (a planner, researcher or orchestrator, or the
+  # shared one) also has the planner's tools, for chat messages (`Factory.PlanTools`).
+  @planning ~w(planner researcher orchestrator)
+
+  defp plan_tools(:shared), do: Factory.PlanTools.tools()
+
+  defp plan_tools(agent_id) do
+    case Factory.Agents.get_agent(agent_id) do
+      %{kind: kind} when kind in @planning -> Factory.PlanTools.tools()
+      _ -> []
+    end
+  end
+
+  defp plan_tool?(name), do: Enum.any?(Factory.PlanTools.tools(), &(&1.name == name))
 
   @doc "A token for a Kiro session (`:shared` or an agent id): calls act on the step it's answering."
   def grant_session(key), do: Phoenix.Token.sign(FactoryWeb.Endpoint, @salt, %{session: key})
@@ -126,6 +141,49 @@ defmodule Factory.RunTools do
   Kiro, or `{:error, text}` saying what to do instead.
   """
   def call(token, name, args) when is_map(args) do
+    case verify(token) do
+      {:ok, %{session: key}} ->
+        cond do
+          plan_tool?(name) -> plan_in_session(key, name, args)
+          name == "get_tasks" -> tasks_in_session(key, token)
+          true -> call_step(token, name, args)
+        end
+
+      _ ->
+        call_step(token, name, args)
+    end
+  end
+
+  def call(_token, _name, _args), do: {:error, "The arguments must be an object."}
+
+  # A planner's tool from a session: for the chat message it's answering, not a run step.
+  defp plan_in_session(key, name, args) do
+    with pid when is_pid(pid) <- Factory.Kiro.whereis(key),
+         %{run_id: run_id, agent: agent, step: nil} <- Factory.Kiro.Session.current_turn(pid) do
+      Factory.PlanTools.call_in_turn(run_id, agent, name, args)
+    else
+      %{step: %{}} -> {:error, "During a run step, work on the tasks as they are."}
+      _ -> {:error, "These tools only work while you're answering a message."}
+    end
+  catch
+    :exit, _ -> {:error, "These tools only work while you're answering a message."}
+  end
+
+  # Reading the tasks is fine in a chat message too; in a run step it's the step's.
+  defp tasks_in_session(key, token) do
+    with pid when is_pid(pid) <- Factory.Kiro.whereis(key),
+         %{run_id: run_id, step: nil} <- Factory.Kiro.Session.current_turn(pid),
+         %{} = run <- Runs.get_run(run_id) do
+      {:ok, describe(run.tasks)}
+    else
+      %{step: %{}} -> call_step(token, "get_tasks", %{})
+      _ -> {:error, "These tools only work while you're answering a message."}
+    end
+  catch
+    :exit, _ -> {:error, "These tools only work while you're answering a message."}
+  end
+
+  defp call_step(token, name, args) do
     with {:ok, grant} <- verify(token) |> or_error("Factory didn't recognise this step."),
          {:ok, grant} <- resolve(grant),
          true <-
@@ -155,15 +213,16 @@ defmodule Factory.RunTools do
     end
   end
 
-  def call(_token, _name, _args), do: {:error, "The arguments must be an object."}
-
   # A session's token stands for the step the session is answering right now.
   defp resolve(%{session: key}) do
     with pid when is_pid(pid) <- Factory.Kiro.whereis(key),
          %{run_id: run_id, step: step} <- Factory.Kiro.Session.current_step(pid) do
       {:ok, %{run_id: run_id, step_id: step.id, tasks: step.tasks, verdict: step.verdict}}
     else
-      _ -> {:error, "These tools only work while you're on a step of a factory run."}
+      _ ->
+        {:error,
+         "These tools only work on a step of a factory run. To change a run's plan from " <>
+           "the chat, use get_plan, add_tasks, update_task and remove_tasks."}
     end
   catch
     :exit, _ -> {:error, "These tools only work while you're on a step of a factory run."}

@@ -12,7 +12,7 @@ defmodule Factory.Chat do
     {"/help", "Show the commands"},
     {"/ask", "Ask an agent on Kiro, e.g. /ask Coder what does mix.exs do?"},
     {"/compact", "Shorten an agent's conversation to save context, e.g. /compact Coder"},
-    {"/run", "Start the run with the attached spec"},
+    {"/run", "Start the run, or run a finished one again for tasks added since"},
     {"/status", "Show progress"},
     {"/tasks", "List the tasks"},
     {"/pause", "Pause the run"},
@@ -171,6 +171,14 @@ defmodule Factory.Chat do
 
   defp run_command(%Run{status: "draft"} = run, "run", _) do
     queue(run, "draft")
+  end
+
+  # Tasks added after the run finished: it runs again, for the ones still open.
+  defp run_command(%Run{status: "done"} = run, "run", _) do
+    if Enum.any?(run.tasks, &(&1.status != "done")),
+      do: queue(run, "done"),
+      else:
+        say(run, "Every task of this run is done. Add tasks first, e.g. by asking the planner.")
   end
 
   defp run_command(run, "run", _),
@@ -333,8 +341,9 @@ defmodule Factory.Chat do
 
           true ->
             with {:ok, steps} <- Engine.executable_steps(run) do
+              # From the start: a new run, or one run again for tasks added after it.
               attrs =
-                if expected_status == "draft",
+                if expected_status in ["draft", "done"],
                   do: %{status: "queued", progress: %{}},
                   else: %{status: "queued"}
 
@@ -346,11 +355,18 @@ defmodule Factory.Chat do
 
     case result do
       {:ok, {run, steps}} ->
-        if expected_status == "draft" do
-          order = "Following the workflow: " <> Enum.map_join(steps, " → ", & &1.name) <> "."
-          say(run, "Queued #{length(run.tasks)} #{plural(run.tasks, "task")}. #{order}")
-        else
-          say(run, "Resumed.")
+        order = "Following the workflow: " <> Enum.map_join(steps, " → ", & &1.name) <> "."
+
+        case expected_status do
+          "draft" ->
+            say(run, "Queued #{length(run.tasks)} #{plural(run.tasks, "task")}. #{order}")
+
+          "done" ->
+            open = Enum.reject(run.tasks, &(&1.status == "done"))
+            say(run, "Running again for #{length(open)} open #{plural(open, "task")}. #{order}")
+
+          _ ->
+            say(run, "Resumed.")
         end
 
         Engine.start(run)
@@ -361,9 +377,22 @@ defmodule Factory.Chat do
   end
 
   # Sends a question to an agent's Kiro session; its reply is posted by the session.
+  # The run's planner is reminded that the plan changes only through its tools.
   defp ask_agent(run, agent, question) do
+    text =
+      case planner_for(run) do
+        %{id: id} when id == agent.id ->
+          question <>
+            "\n\n(You plan this run. If this asks for tasks to be added or changed, change the " <>
+            "plan with the factory tools: get_plan to see it, then add_tasks, update_task or " <>
+            "remove_tasks. Writing a plan in your reply doesn't change it.)"
+
+        _ ->
+          question
+      end
+
     tagged(agent, fn ->
-      case Kiro.prompt(agent, run.id, question) do
+      case Kiro.prompt(agent, run.id, text) do
         :ok ->
           :ok
 
