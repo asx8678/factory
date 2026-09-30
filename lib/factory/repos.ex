@@ -24,7 +24,7 @@ defmodule Factory.Repos do
   and `label` "owner/repo". `{:error, reason}` when it isn't a repository's link.
   """
   def parse(link) do
-    link = link |> to_string() |> String.trim() |> String.trim_trailing("/")
+    link = clean(link)
 
     cond do
       link == "" ->
@@ -32,17 +32,15 @@ defmodule Factory.Repos do
 
       m =
           Regex.run(
-            ~r{^(?:ssh://)?[\w.-]+@([\w.-]+)[:/](?:\d+/)?([\w.-]+)/([\w.-]+?)(?:\.git)?$},
+            ~r{^(?:ssh://)?[\w.-]+@([\w.-]+)[:/](?:\d+/)?((?:[\w.-]+/)+)([\w.-]+?)(?:\.git)?$},
             link
           ) ->
         [_, _host, owner, repo] = m
-        found(link, owner, repo, nil)
+        found(link, String.trim_trailing(owner, "/"), repo, nil)
 
-      m = Regex.run(~r{^https?://([\w.-]+)/([\w.-]+)/([\w.-]+?)(?:\.git)?(?:/(.*))?$}, link) ->
-        [_, host, owner, repo | rest] = m
-        path = List.first(rest) || ""
-        pr = with [_, n] <- Regex.run(~r{^pull/(\d+)}, path), do: String.to_integer(n)
-        found("git@#{host}:#{owner}/#{repo}.git", owner, repo, if(is_integer(pr), do: pr))
+      m = Regex.run(~r{^https?://([\w.-]+)/(.+)$}, link) ->
+        [_, host, path] = m
+        web(String.replace_prefix(host, "www.", ""), path)
 
       # A repository on this computer.
       String.starts_with?(link, ["file://", "/", "~"]) ->
@@ -52,9 +50,74 @@ defmodule Factory.Repos do
           do: found(path, "local", path |> Path.basename() |> String.trim_trailing(".git"), nil),
           else: {:error, "There's no folder at #{path}."}
 
+      # "github.com/owner/repo", without the https://.
+      Regex.match?(~r{^(www\.)?[\w-]+(\.[\w-]+)+/}, link) ->
+        parse("https://" <> link)
+
+      # "owner/repo": on GitHub.
+      Regex.match?(~r{^[\w.-]+/[\w.-]+$}, link) ->
+        parse("https://github.com/" <> link)
+
       true ->
         {:error,
-         "That isn't a repository's link. Paste one like git@github.com:owner/repo.git or https://github.com/owner/repo."}
+         "That isn't a repository's link. Paste one like git@github.com:owner/repo.git, https://github.com/owner/repo or owner/repo."}
+    end
+  end
+
+  # A link as pasted: without quotes, angle brackets, a query or an anchor.
+  defp clean(link) do
+    link
+    |> to_string()
+    |> String.trim()
+    |> String.trim("\"")
+    |> String.trim("'")
+    |> String.trim_leading("<")
+    |> String.trim_trailing(">")
+    |> String.split(~r/[?#]/, parts: 2)
+    |> hd()
+    |> String.trim_trailing("/")
+  end
+
+  # A web link: GitHub's and Bitbucket's name the repository in their first two parts
+  # (`/owner/repo/pull/12`); GitLab's may have groups in groups, up to its "/-/".
+  defp web(host, path) do
+    parts = path |> String.split("/-/", parts: 2) |> hd() |> String.split("/", trim: true)
+
+    {owner, repo, rest} =
+      case {host, parts} do
+        {"gitlab" <> _, [_, _ | _]} ->
+          {Enum.join(Enum.drop(parts, -1), "/"), List.last(parts), []}
+
+        {_, [owner, repo | rest]} ->
+          {owner, repo, rest}
+
+        _ ->
+          {nil, nil, []}
+      end
+
+    if owner do
+      repo = String.trim_trailing(repo, ".git")
+
+      pr =
+        case rest do
+          ["pull", n | _] -> with {n, ""} <- Integer.parse(n), do: n, else: (_ -> nil)
+          _ -> nil
+        end
+
+      found("git@#{host}:#{owner}/#{repo}.git", owner, repo, pr)
+    else
+      {:error,
+       "That link doesn't name a repository: it needs its owner and name, like https://#{host}/owner/repo."}
+    end
+  end
+
+  @doc "The repository a review clone holds (\"owner/repo\"), or nil for any other folder."
+  def label(dir) do
+    root = root()
+    dir = Path.expand(dir || "")
+
+    if String.starts_with?(dir, root <> "/") do
+      dir |> Path.relative_to(root)
     end
   end
 
@@ -113,8 +176,15 @@ defmodule Factory.Repos do
   # The same repository, whichever way its address was written.
   defp same?(a, b), do: normal(a) == normal(b)
 
-  defp normal(url),
-    do: url |> String.trim() |> String.trim_trailing("/") |> String.trim_trailing(".git")
+  defp normal(url) do
+    url = url |> String.trim() |> String.trim_trailing("/") |> String.trim_trailing(".git")
+
+    # ssh://git@host/owner/repo is git@host:owner/repo.
+    case Regex.run(~r{^ssh://([^/]+@[^/:]+)(?::\d+)?/(.+)$}, url) do
+      [_, who, path] -> "#{who}:#{path}"
+      _ -> url
+    end
+  end
 
   defp refetch(repo, dir) do
     with {:ok, _} <- git(dir, ~w(fetch --all --prune --quiet)),

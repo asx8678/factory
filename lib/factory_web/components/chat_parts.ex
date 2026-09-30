@@ -28,7 +28,7 @@ defmodule FactoryWeb.ChatParts do
   def placeholder(agent, run, planner, job) do
     cond do
       planner && planner.id == agent.id && settable?(run) && job == "review" ->
-        "Paste a pull request's link, or name the branch to review…"
+        "Paste a repository or pull request link to clone it, or name the branch to review…"
 
       planner && planner.id == agent.id && settable?(run) ->
         "Describe a change, e.g. add an export button to the invoices page…"
@@ -393,7 +393,8 @@ defmodule FactoryWeb.ChatParts do
     assigns =
       assign(assigns,
         picks: if(assigns.dir_ok, do: review_picks(assigns.scout), else: []),
-        root: Factory.Repos.root() |> String.replace_prefix(System.user_home!(), "~")
+        root: Factory.Repos.root() |> String.replace_prefix(System.user_home!(), "~"),
+        cloned: assigns.dir_ok && Factory.Repos.label(assigns.dir)
       )
 
     ~H"""
@@ -402,12 +403,23 @@ defmodule FactoryWeb.ChatParts do
         Review · {Calendar.strftime(Date.utc_today(), "%-d %b")}
       </p>
       <h1 class="mt-1 text-2xl font-semibold leading-tight tracking-tight">
-        <%= if @dir_ok do %>
-          What should we review in <span class="text-primary">{Path.basename(@dir)}</span>?
-        <% else %>
-          What should we review?
+        <%= cond do %>
+          <% @cloned -> %>
+            What should we review in <span class="text-primary">{@cloned}</span>?
+          <% @dir_ok -> %>
+            What should we review in <span class="text-primary">{Path.basename(@dir)}</span>?
+          <% true -> %>
+            What should we review?
         <% end %>
       </h1>
+      <p
+        :if={@cloned}
+        id="review-clone-path"
+        class="mt-1 flex items-center gap-1.5 text-xs text-base-content/50"
+      >
+        <.icon name="hero-arrow-down-tray-micro" class="size-3.5" />
+        The clone in {String.replace_prefix(@dir, System.user_home!(), "~")}, fetched from its server
+      </p>
       <p class="mt-2 text-base-content/60">
         Paste the repository's link, or a pull request's. Factory clones it and lists its
         branches, latest changes first; pick one, and the Scout plans what to check before
@@ -463,7 +475,20 @@ defmodule FactoryWeb.ChatParts do
         <span class="text-xs text-base-content/55">Browse…</span>
       </button>
 
-      <section :if={@dir_ok} id="review-scout" class="mt-4 rounded-xl border border-base-300">
+      <div
+        :if={@cloning}
+        id="review-cloning-list"
+        class="mt-4 flex items-center gap-2.5 rounded-xl border border-dashed border-base-300 px-3.5 py-4 text-[13px] text-base-content/60"
+      >
+        <span class="loading loading-spinner loading-xs text-primary"></span>
+        Cloning {@cloning}. Its branches show here, latest changes first, when it's done.
+      </div>
+
+      <section
+        :if={@dir_ok && !@cloning}
+        id="review-scout"
+        class="mt-4 rounded-xl border border-base-300"
+      >
         <header class="flex items-center gap-2 border-b border-base-content/10 px-3.5 py-2">
           <.icon name="hero-code-bracket-square-mini" class="size-4 shrink-0 text-base-content/50" />
           <h2 class="min-w-0 flex-1 truncate text-xs font-medium text-base-content/70">

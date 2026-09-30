@@ -140,6 +140,17 @@ defmodule FactoryWeb.ChatLive do
   defp default_to(agents),
     do: Enum.find(agents, &(&1.kind == "planner")) || List.first(agents) || :factory
 
+  # A message that's only a repository's or pull request's link (not a local path), in
+  # a review chat nothing has been said in yet.
+  defp review_link?(socket, body) do
+    text = String.trim(body || "")
+
+    Workflows.kind(socket.assigns.workflow) == "review" and socket.assigns[:count] in [nil, 0] and
+      socket.assigns.focus == nil and text != "" and not String.contains?(text, [" ", "\n"]) and
+      not String.starts_with?(text, ["/", "~", "file://"]) and
+      match?({:ok, _}, Factory.Repos.parse(text))
+  end
+
   # A new chat looks at its folder in the background (Factory.Scout): for a review, what
   # there is to review; otherwise what there is to pick up (unfinished work, notes in the
   # code), for its suggestions.
@@ -269,20 +280,14 @@ defmodule FactoryWeb.ChatLive do
   end
 
   # Commands work anywhere; anything for the agents needs the folder they work in.
-  def handle_event("send", %{"chat" => %{"body" => body}}, socket) do
-    if socket.assigns.dir_ok or String.starts_with?(String.trim(body), "/") do
-      socket =
-        if String.starts_with?(String.trim(body), "/"), do: socket, else: remember_plan(socket)
-
-      send_message(socket, body)
+  # In a review that hasn't started, a repository or pull request link in the message
+  # box is cloned (or fetched) like one pasted in the card, rather than sent on.
+  def handle_event("send", %{"chat" => %{"body" => body}} = params, socket) do
+    if review_link?(socket, body) do
+      socket = socket |> assign(draft: "") |> push_event("chat:sent", %{})
+      handle_event("review_link", %{"link" => String.trim(body)}, socket)
     else
-      {:noreply,
-       socket
-       |> assign(folder_warn: true)
-       |> put_flash(
-         :error,
-         "Choose the project folder first: the agents need to know where to work."
-       )}
+      send_chat(params, socket)
     end
   end
 
@@ -898,6 +903,23 @@ defmodule FactoryWeb.ChatLive do
   defp spec_path(socket, query) do
     spec = Factory.Specs.for_run(socket.assigns.run || new_run(socket))
     ~p"/specs/#{spec.id}?#{query}"
+  end
+
+  defp send_chat(%{"chat" => %{"body" => body}}, socket) do
+    if socket.assigns.dir_ok or String.starts_with?(String.trim(body), "/") do
+      socket =
+        if String.starts_with?(String.trim(body), "/"), do: socket, else: remember_plan(socket)
+
+      send_message(socket, body)
+    else
+      {:noreply,
+       socket
+       |> assign(folder_warn: true)
+       |> put_flash(
+         :error,
+         "Choose the project folder first: the agents need to know where to work."
+       )}
+    end
   end
 
   defp send_message(socket, body) do
