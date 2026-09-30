@@ -7,7 +7,7 @@ defmodule Factory.WorkflowsTest do
     workflows = Workflows.list()
 
     assert Enum.map(Enum.filter(workflows, & &1.key), & &1.key) ==
-             ~w(feature bug review)
+             ~w(feature bug review incident)
 
     bug = Workflows.standard("bug")
     assert bug.name == "Fix a bug"
@@ -180,7 +180,9 @@ defmodule Factory.WorkflowsTest do
     })
 
     {:ok, copy} = Workflows.clone(workflow)
-    assert [%{kind: "folder", config: %{"path" => "/nowhere/that/exists"}}] = Sources.list(copy.id)
+
+    assert [%{kind: "folder", config: %{"path" => "/nowhere/that/exists"}}] =
+             Sources.list(copy.id)
   end
 
   test "a clone that can't be named fails without leaving a workflow behind" do

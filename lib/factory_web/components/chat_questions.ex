@@ -2,34 +2,95 @@ defmodule FactoryWeb.ChatQuestions do
   @moduledoc """
   An agent's questions in the chat (`FactoryWeb.ChatMessages`), answered by picking
   options or writing: a question a tool asks mid-turn (MCP elicitation, answered with
-  `elicit_answer`), and a planner's questions with options (answered with `answer`).
+  `elicit_answer`), a page it asks the person to open (an elicitation in URL mode), and a
+  planner's questions with options (answered with `answer`).
   """
   use FactoryWeb, :html
 
   attr :id, :string, required: true
   attr :message, :map, required: true
 
+  # A page a tool asks the person to open mid-turn (an MCP elicitation in URL mode, say to
+  # sign in somewhere): the page's host plainly, the link, and whether it's done.
+  def elicitation(%{message: %{meta: %{"elicitation" => %{"mode" => "url"} = e}}} = assigns) do
+    assigns = assign(assigns, e: e, host: URI.parse(e["url"] || "").host, form: to_form(%{}))
+
+    ~H"""
+    <.form
+      :if={@e["status"] == "open"}
+      for={@form}
+      id={@id}
+      phx-submit="elicit_answer"
+      class="task-card-active mt-3 rounded-xl border px-3.5 py-3"
+    >
+      <input type="hidden" name="key" value={@e["key"]} />
+      <input type="hidden" name="agent_id" value={@message.meta["agent_id"]} />
+      <p class="flex items-center gap-1.5 text-xs font-medium text-base-content/60">
+        <.icon name="hero-arrow-top-right-on-square-mini" class="size-4" />
+        {@message.author} asks you to open a page on
+        <span class="font-semibold text-base-content">{@host}</span>
+      </p>
+      <a
+        id={"#{@id}-link"}
+        href={@e["url"]}
+        target="_blank"
+        rel="noopener noreferrer"
+        class="mt-2 block truncate font-mono text-[13px] text-primary hover:underline"
+      >
+        {@e["url"]}
+      </a>
+      <p class="mt-2 text-xs text-base-content/55">
+        Open it, do what it asks, then come back. It waits for you.
+      </p>
+      <div class="mt-3 flex justify-end gap-2">
+        <button
+          type="submit"
+          name="action"
+          value="decline"
+          formnovalidate
+          class="btn btn-ghost btn-sm"
+        >
+          Decline
+        </button>
+        <button type="submit" name="action" value="accept" class="btn btn-primary btn-sm">
+          I've done it
+        </button>
+      </div>
+    </.form>
+    <p :if={@e["status"] != "open"} id={@id} class="mt-2 text-xs text-base-content/55">
+      {case @e["status"] do
+        "answered" -> "You opened the page on #{@host} and said it was done."
+        "declined" -> "You declined to open the page."
+        _ -> "No longer waiting: the turn ended before an answer."
+      end}
+    </p>
+    """
+  end
+
   # A question a tool asks mid-turn (MCP elicitation, `Factory.Kiro.Session`): a form
   # from its schema while it's open (the agent waits), then what was answered.
   def elicitation(assigns) do
     e = assigns.message.meta["elicitation"]
-    schema = e["schema"] || %{}
-    required = schema["required"] || []
-    props = schema["properties"] || %{}
+    # The schema is the other MCP server's, as it wrote it: what isn't the shape a
+    # schema has (a field that isn't an object, a choice of nothing) is left out.
+    schema = map_or_empty(e["schema"])
+    required = if is_list(schema["required"]), do: schema["required"], else: []
+    props = map_or_empty(schema["properties"])
 
     # A planner's question with options comes with an answer of your own beside it
     # (`answer_N_other`, `Factory.PlanTools`): shown under its options, not on its own.
     fields =
-      for {name, prop} <- props, not own_answer_field?(name, props) do
+      for {name, %{} = prop} <- props, not own_answer_field?(name, props) do
         other = if Map.has_key?(props, name <> "_other"), do: name <> "_other"
+        options = choices(prop["enum"])
 
         %{
           name: name,
           label: prop["title"] || prop["description"] || humanize(name),
           hint: if(prop["title"], do: prop["description"]),
           type: prop["type"],
-          options: prop["enum"],
-          labels: prop["enumNames"] || prop["enum"],
+          options: options,
+          labels: choice_labels(prop["enumNames"], options),
           default: prop["default"],
           required: name in required,
           other: other
@@ -66,7 +127,7 @@ defmodule FactoryWeb.ChatQuestions do
               <.option_list
                 name={"fields[#{f.name}]"}
                 options={Enum.zip(f.options, f.labels)}
-                checked={f.default || hd(f.options)}
+                checked={f.default || List.first(f.options)}
                 own={f.other && "fields[#{f.other}]"}
               />
             <% f.type == "boolean" -> %>
@@ -134,7 +195,7 @@ defmodule FactoryWeb.ChatQuestions do
   # Each answer with its question's title, or its field name when it has none: the
   # option picked, with the answer of your own written beside it.
   defp answers(answer, schema) when is_map(answer) do
-    props = (schema || %{})["properties"] || %{}
+    props = map_or_empty(map_or_empty(schema)["properties"])
 
     answer
     |> Enum.reject(fn {k, _} -> own_answer_field?(k, props) end)
@@ -153,11 +214,32 @@ defmodule FactoryWeb.ChatQuestions do
         |> Enum.reject(&(&1 == ""))
         |> Enum.join(": ")
 
-      {get_in(props, [k, "title"]) || humanize(k), v}
+      title = with %{"title" => title} <- props[k], do: title, else: (_ -> nil)
+      {title || humanize(k), v}
     end)
   end
 
   defp answers(_answer, _schema), do: []
+
+  defp map_or_empty(%{} = map), do: map
+  defp map_or_empty(_other), do: %{}
+
+  # A question's options, when it has some to pick from.
+  defp choices([_ | _] = options) do
+    case Enum.filter(options, &(is_binary(&1) or is_number(&1) or is_boolean(&1))) do
+      [] -> nil
+      options -> options
+    end
+  end
+
+  defp choices(_options), do: nil
+
+  # What each option is called, when the schema names them all; else the options.
+  defp choice_labels(names, options)
+       when is_list(names) and is_list(options) and length(names) == length(options),
+       do: names
+
+  defp choice_labels(_names, options), do: options
 
   defp humanize(name), do: name |> to_string() |> String.replace("_", " ") |> String.capitalize()
 
@@ -166,9 +248,17 @@ defmodule FactoryWeb.ChatQuestions do
   run is still being planned.
   """
   def answerable?(%{meta: meta}, run) do
-    run != nil and run.status == "draft" and
-      Enum.any?(meta["questions"] || [], &(&1["options"] not in [nil, []]))
+    run != nil and run.status == "draft" and questions(meta) != []
   end
+
+  # The planner's questions that have options, each with its place among all of them.
+  defp questions(%{"questions" => [_ | _] = questions}) do
+    for {%{} = q, i} <- Enum.with_index(questions),
+        options = choices(q["options"]),
+        do: {Map.put(q, "options", options), i}
+  end
+
+  defp questions(_meta), do: []
 
   attr :id, :string, required: true
   attr :message, :map, required: true
@@ -176,16 +266,7 @@ defmodule FactoryWeb.ChatQuestions do
   # The planner's questions as choices: pick one option per question, or write your
   # own, then send them all as one message to the planner.
   def question_form(assigns) do
-    assigns =
-      assign(assigns,
-        form: to_form(%{}),
-        questions:
-          for(
-            {q, i} <- Enum.with_index(assigns.message.meta["questions"] || []),
-            q["options"] not in [nil, []],
-            do: {q, i}
-          )
-      )
+    assigns = assign(assigns, form: to_form(%{}), questions: questions(assigns.message.meta))
 
     ~H"""
     <.form for={@form} id={@id} phx-submit="answer" class="task-card-active mt-3 rounded-xl border">
@@ -196,7 +277,7 @@ defmodule FactoryWeb.ChatQuestions do
           <.option_list
             name={"answers[#{i}]"}
             options={Enum.map(q["options"], &{&1, &1})}
-            checked={hd(q["options"])}
+            checked={List.first(q["options"])}
             own={"others[#{i}]"}
           />
         </.question_row>

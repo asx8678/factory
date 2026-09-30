@@ -26,7 +26,7 @@ defmodule Factory.Repos do
   and `label` "owner/repo". `{:error, reason}` when it isn't a repository's link.
   """
   def parse(link) do
-    link = link |> to_string() |> String.trim() |> String.trim_trailing("/")
+    link = clean(link)
 
     cond do
       link == "" ->
@@ -34,17 +34,15 @@ defmodule Factory.Repos do
 
       m =
           Regex.run(
-            ~r{^(?:ssh://)?[\w.-]+@([\w.-]+)[:/](?:\d+/)?([\w.-]+)/([\w.-]+?)(?:\.git)?$},
+            ~r{^(?:ssh://)?[\w.-]+@([\w.-]+)[:/](?:\d+/)?((?:[\w.-]+/)+)([\w.-]+?)(?:\.git)?$},
             link
           ) ->
         [_, _host, owner, repo] = m
-        found(link, owner, repo, nil)
+        found(link, String.trim_trailing(owner, "/"), repo, nil)
 
-      m = Regex.run(~r{^https?://([\w.-]+)/([\w.-]+)/([\w.-]+?)(?:\.git)?(?:/(.*))?$}, link) ->
-        [_, host, owner, repo | rest] = m
-        path = List.first(rest) || ""
-        pr = with [_, n] <- Regex.run(~r{^pull/(\d+)}, path), do: String.to_integer(n)
-        found("git@#{host}:#{owner}/#{repo}.git", owner, repo, if(is_integer(pr), do: pr))
+      m = Regex.run(~r{^https?://([\w.-]+)/(.+)$}, link) ->
+        [_, host, path] = m
+        web(String.replace_prefix(host, "www.", ""), path)
 
       # A repository on this computer.
       String.starts_with?(link, ["file://", "/", "~"]) ->
@@ -54,9 +52,74 @@ defmodule Factory.Repos do
           do: found(path, "local", path |> Path.basename() |> String.trim_trailing(".git"), nil),
           else: {:error, "There's no folder at #{path}."}
 
+      # "github.com/owner/repo", without the https://.
+      Regex.match?(~r{^(www\.)?[\w-]+(\.[\w-]+)+/}, link) ->
+        parse("https://" <> link)
+
+      # "owner/repo": on GitHub.
+      Regex.match?(~r{^[\w.-]+/[\w.-]+$}, link) ->
+        parse("https://github.com/" <> link)
+
       true ->
         {:error,
-         "That isn't a repository's link. Paste one like git@github.com:owner/repo.git or https://github.com/owner/repo."}
+         "That isn't a repository's link. Paste one like git@github.com:owner/repo.git, https://github.com/owner/repo or owner/repo."}
+    end
+  end
+
+  # A link as pasted: without quotes, angle brackets, a query or an anchor.
+  defp clean(link) do
+    link
+    |> to_string()
+    |> String.trim()
+    |> String.trim("\"")
+    |> String.trim("'")
+    |> String.trim_leading("<")
+    |> String.trim_trailing(">")
+    |> String.split(~r/[?#]/, parts: 2)
+    |> hd()
+    |> String.trim_trailing("/")
+  end
+
+  # A web link: GitHub's and Bitbucket's name the repository in their first two parts
+  # (`/owner/repo/pull/12`); GitLab's may have groups in groups, up to its "/-/".
+  defp web(host, path) do
+    parts = path |> String.split("/-/", parts: 2) |> hd() |> String.split("/", trim: true)
+
+    {owner, repo, rest} =
+      case {host, parts} do
+        {"gitlab" <> _, [_, _ | _]} ->
+          {Enum.join(Enum.drop(parts, -1), "/"), List.last(parts), []}
+
+        {_, [owner, repo | rest]} ->
+          {owner, repo, rest}
+
+        _ ->
+          {nil, nil, []}
+      end
+
+    if owner do
+      repo = String.trim_trailing(repo, ".git")
+
+      pr =
+        case rest do
+          ["pull", n | _] -> with {n, ""} <- Integer.parse(n), do: n, else: (_ -> nil)
+          _ -> nil
+        end
+
+      found("git@#{host}:#{owner}/#{repo}.git", owner, repo, pr)
+    else
+      {:error,
+       "That link doesn't name a repository: it needs its owner and name, like https://#{host}/owner/repo."}
+    end
+  end
+
+  @doc "The repository a review clone holds (\"owner/repo\"), or nil for any other folder."
+  def label(dir) do
+    root = root()
+    dir = Path.expand(dir || "")
+
+    if String.starts_with?(dir, root <> "/") do
+      dir |> Path.relative_to(root)
     end
   end
 
@@ -67,37 +130,41 @@ defmodule Factory.Repos do
   Clones the repository a link points to into `root/0`, or fetches it again when it's
   there already: `{:ok, %{dir:, label:, fresh:, pr_branch:}}`, `fresh` when it was just
   cloned and `pr_branch` the pull request's branch (`pr-12`) when the link was to one.
-  A folder there that holds another repository is left alone.
+  A folder there that holds another repository is left alone. The git commands share
+  one deadline; git still going at it is stopped.
   """
   def clone(link) do
     with {:ok, repo} <- parse(link) do
       dir = Path.join([root(), safe(repo.owner), safe(repo.repo)])
 
-      task = Task.async(fn -> clone_or_fetch(repo, dir) end)
+      case clone_or_fetch(repo, dir, System.monotonic_time(:millisecond) + @timeout) do
+        {:error, :timeout} ->
+          {:error, "git took more than #{div(@timeout, 60_000)} minutes, so Factory stopped it."}
 
-      # Past the timeout the task is killed, but the git process it started (a child
-      # of the VM, not of the task) keeps running until it finishes or fails on its
-      # own; there's no port to close from here. A later clone of the same link finds
-      # whatever it left in `dir` and either fetches it again or refuses to touch it.
-      case Task.yield(task, @timeout) || Task.shutdown(task, :brutal_kill) do
-        {:ok, result} ->
+        result ->
           result
-
-        _ ->
-          {:error,
-           "git took more than #{div(@timeout, 60_000)} minutes, so Factory stopped waiting."}
       end
     end
   end
 
-  defp clone_or_fetch(repo, dir) do
+  defp clone_or_fetch(repo, dir, deadline) do
     cond do
       File.dir?(Path.join(dir, ".git")) ->
-        case git(dir, ~w(remote get-url origin)) do
+        case git(dir, ~w(remote get-url origin), deadline) do
           {:ok, url} when is_binary(url) ->
-            if same?(url, repo.url),
-              do: refetch(repo, dir),
-              else: {:error, "#{dir} already holds another repository, so Factory left it alone."}
+            cond do
+              not same?(url, repo.url) ->
+                {:error, "#{dir} already holds another repository, so Factory left it alone."}
+
+              # A clone stopped partway, before clones were made beside it and moved
+              # into place (`fresh_clone/3`): nothing checked out, so it starts again.
+              not checked_out?(dir, deadline) ->
+                File.rm_rf!(dir)
+                clone_or_fetch(repo, dir, deadline)
+
+              true ->
+                refetch(repo, dir, deadline)
+            end
 
           _ ->
             {:error, "#{dir} already holds another repository, so Factory left it alone."}
@@ -108,37 +175,88 @@ defmodule Factory.Repos do
         {:error, "#{dir} already exists and isn't this repository, so Factory left it alone."}
 
       true ->
-        File.mkdir_p!(Path.dirname(dir))
-
-        with {:ok, _} <- git(nil, ["clone", "--quiet", repo.url, dir]),
-             {:ok, pr_branch} <- fetch_pr(repo, dir) do
+        with :ok <- fresh_clone(repo, dir, deadline),
+             {:ok, pr_branch} <- fetch_pr(repo, dir, deadline) do
           {:ok, %{dir: dir, label: repo.label, fresh: true, pr_branch: pr_branch}}
         end
+    end
+  end
+
+  # Cloned into a folder beside it and moved into place once complete, so a clone that
+  # was stopped partway (the deadline, Factory quitting) never passes for the repository;
+  # the next try starts it again.
+  defp fresh_clone(repo, dir, deadline) do
+    partial = Path.join(Path.dirname(dir), ".#{Path.basename(dir)}.cloning")
+    File.mkdir_p!(Path.dirname(dir))
+    File.rm_rf!(partial)
+
+    with {:ok, _} <- git(nil, ["clone", "--quiet", repo.url, partial], deadline),
+         :ok <- move(partial, dir) do
+      :ok
+    else
+      error ->
+        File.rm_rf(partial)
+        error
+    end
+  end
+
+  defp move(from, to) do
+    case File.rename(from, to) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        {:error, "The clone couldn't be moved to #{to}: #{:file.format_error(reason)}"}
     end
   end
 
   # The same repository, whichever way its address was written.
   defp same?(a, b), do: normal(a) == normal(b)
 
-  defp normal(url),
-    do: url |> String.trim() |> String.trim_trailing("/") |> String.trim_trailing(".git")
+  defp normal(url) do
+    url = url |> String.trim() |> String.trim_trailing("/") |> String.trim_trailing(".git")
 
-  defp refetch(repo, dir) do
-    with {:ok, _} <- git(dir, ~w(fetch --all --prune --quiet)),
-         {:ok, pr_branch} <- fetch_pr(repo, dir) do
+    # ssh://git@host/owner/repo is git@host:owner/repo.
+    case Regex.run(~r{^ssh://([^/]+@[^/:]+)(?::\d+)?/(.+)$}, url) do
+      [_, who, path] -> "#{who}:#{path}"
+      _ -> url
+    end
+  end
+
+  # Whether the clone has a commit checked out. When git can't say (it took too long,
+  # or isn't there), it's taken as yes, so a good clone is never removed for that.
+  defp checked_out?(dir, deadline) do
+    case git(dir, ~w(rev-parse --verify --quiet HEAD), deadline) do
+      {:ok, _} -> true
+      {:error, :timeout} -> true
+      {:error, "git isn't installed."} -> true
+      {:error, _} -> false
+    end
+  end
+
+  defp refetch(repo, dir, deadline) do
+    with {:ok, _} <- git(dir, ~w(fetch --all --prune --quiet), deadline),
+         {:ok, pr_branch} <- fetch_pr(repo, dir, deadline) do
       {:ok, %{dir: dir, label: repo.label, fresh: false, pr_branch: pr_branch}}
     end
   end
 
   # A GitHub pull request, as a local branch: `pr-12`.
-  defp fetch_pr(%{pr: nil}, _dir), do: {:ok, nil}
+  defp fetch_pr(%{pr: nil}, _dir, _deadline), do: {:ok, nil}
 
-  defp fetch_pr(%{pr: n}, dir) do
+  defp fetch_pr(%{pr: n}, dir, deadline) do
     branch = "pr-#{n}"
 
-    case git(dir, ["fetch", "--quiet", "origin", "+pull/#{n}/head:refs/heads/#{branch}"]) do
+    case git(
+           dir,
+           ["fetch", "--quiet", "origin", "+pull/#{n}/head:refs/heads/#{branch}"],
+           deadline
+         ) do
       {:ok, _} ->
         {:ok, branch}
+
+      {:error, :timeout} = timeout ->
+        timeout
 
       {:error, _} ->
         {:error,
@@ -149,18 +267,31 @@ defmodule Factory.Repos do
   # A folder name from an owner or repository name.
   defp safe(name), do: String.replace(name, ~r/[^\w.-]/, "-")
 
-  # git without a terminal, over SSH that won't ask anything (see the moduledoc).
-  @git_env [
-    {"GIT_TERMINAL_PROMPT", "0"},
-    {"GIT_SSH_COMMAND",
-     "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15"}
-  ]
+  # git with what's left of the deadline: one still going then is stopped, with ssh.
+  defp git(dir, args, deadline) do
+    args = if dir, do: ["-C", dir | args], else: args
 
-  defp git(dir, args) do
-    case Factory.GitCmd.run(dir, args, env: @git_env) do
-      {:ok, out} -> {:ok, out}
-      {:error, :not_installed} -> {:error, "git isn't installed."}
-      {:error, out} -> {:error, explain(out)}
+    env = [
+      {"GIT_TERMINAL_PROMPT", "0"},
+      {"SSH_ASKPASS_REQUIRE", "never"},
+      {"GIT_SSH_COMMAND",
+       "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15"}
+    ]
+
+    timeout = deadline - System.monotonic_time(:millisecond)
+
+    case Factory.OsProcess.run("git", args, env: env, timeout: timeout) do
+      {:ok, out, 0} ->
+        {:ok, String.trim(out)}
+
+      {:ok, out, _} ->
+        {:error, explain(out)}
+
+      {:error, :timeout} = timeout ->
+        timeout
+
+      {:error, _} ->
+        {:error, "git isn't installed."}
     end
   end
 

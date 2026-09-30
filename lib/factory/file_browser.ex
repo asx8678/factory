@@ -71,43 +71,6 @@ defmodule Factory.FileBrowser do
 
   def text_file?(name), do: String.downcase(Path.extname(name)) in @text_ext
 
-  # What a project is built with, by the files at its top.
-  @stacks [
-    {"Elixir", ~w(mix.exs)},
-    {"Node.js", ~w(package.json)},
-    {"Python", ~w(pyproject.toml requirements.txt setup.py)},
-    {"Ruby", ~w(Gemfile)},
-    {"Go", ~w(go.mod)},
-    {"Rust", ~w(Cargo.toml)},
-    {"Java", ~w(pom.xml build.gradle build.gradle.kts)},
-    {".NET", ~w(.sln .csproj)},
-    {"PHP", ~w(composer.json)},
-    {"Swift", ~w(Package.swift)}
-  ]
-
-  @doc """
-  What a folder looks like as a project: `%{git: boolean, stack: ["Elixir", …]}`, or
-  nil when there's no folder there. Only the folder's own entries are looked at.
-  """
-  def project(dir) do
-    dir = Path.expand(dir)
-
-    case File.ls(dir) do
-      {:ok, names} ->
-        exts = MapSet.new(names, &Path.extname/1)
-
-        stack =
-          for {label, markers} <- @stacks,
-              Enum.any?(markers, &(&1 in names or MapSet.member?(exts, &1))),
-              do: label
-
-        %{git: ".git" in names, stack: stack}
-
-      {:error, _} ->
-        nil
-    end
-  end
-
   # `ext`: nil for text files, :any for every file, or a list like [".json"].
   defp wanted?(name, nil), do: text_file?(name)
   defp wanted?(_name, :any), do: true

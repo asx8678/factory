@@ -32,7 +32,7 @@
     onclick={() => (open = !open)}
     aria-expanded={open}
   >
-    <span class="hero-bolt-micro size-3.5 text-warning"></span>
+    <span class="hero-bolt-micro size-3.5 text-base-content/55"></span>
     <span class="text-[11px] font-semibold text-base-content/65">Actions</span>
     <span class={["hero-chevron-down-micro ml-auto size-3.5 opacity-50 transition-transform", !open && "-rotate-90"]}></span>
   </button>
@@ -46,11 +46,11 @@
       {#each items as t (t.type)}
         <button
           type="button"
-          class="flex w-full items-center gap-2 rounded-lg px-1.5 py-1 text-left text-[12.5px] transition-colors hover:bg-warning/10"
+          class="flex w-full items-center gap-2 rounded-lg px-1.5 py-1 text-left text-[12.5px] transition-colors hover:bg-base-content/[0.05]"
           title={t.blurb}
           onclick={() => onadd(t.type)}
         >
-          <span class="grid size-5 shrink-0 place-items-center rounded-md bg-warning/15 text-warning">
+          <span class="grid size-5 shrink-0 place-items-center rounded-md bg-base-content/[0.06] text-base-content/65">
             <span class={[icons[t.type] ?? "hero-bolt-micro", "size-3"]}></span>
           </span>
           <span class="truncate">{t.label}</span>

@@ -18,6 +18,9 @@ defmodule FactoryWeb.ChatParts do
       planner && settable?(run) && job == "review" ->
         "Paste a pull request's link or name a branch for #{planner.name}, or type / for commands"
 
+      planner && settable?(run) && job == "incident" ->
+        "Paste the error or logs for #{planner.name}, or type / for commands"
+
       planner && settable?(run) ->
         "Describe a change for #{planner.name} to plan, or type / for commands"
 
@@ -29,7 +32,10 @@ defmodule FactoryWeb.ChatParts do
   def placeholder(agent, run, planner, job) do
     cond do
       planner && planner.id == agent.id && settable?(run) && job == "review" ->
-        "Paste a pull request's link, or name the branch to review…"
+        "Paste a repository or pull request link to clone it, or name the branch to review…"
+
+      planner && planner.id == agent.id && settable?(run) && job == "incident" ->
+        "Paste the error, a stack trace or logs, and say where it happens…"
 
       planner && planner.id == agent.id && settable?(run) ->
         "Describe a change, e.g. add an export button to the invoices page…"

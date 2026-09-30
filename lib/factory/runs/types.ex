@@ -8,7 +8,12 @@ defmodule Factory.Runs.Types do
 
   A workflow step is `%{"kind" => agent kind, "name" => name, "does" => what it does}`;
   the kinds are `Factory.Agents.Agent.kinds/0`. A step with its own instructions has
-  `"prompt"` too; the others start from their kind's (`Factory.Agents.Kinds`).
+  `"prompt"` too; the others start from their kind's (`Factory.Agents.Kinds`). A step
+  whose agent searches the web without asking has `"web" => true`.
+
+  A type's `loop`, `{from, to}` by agent name, is its arrow back: `from` can send the
+  work back to `to` (`Factory.Engine`). Without one, a workflow with one reviewer and
+  one coder gets the arrow from the reviewer to the coder.
   """
 
   @types [
@@ -53,6 +58,36 @@ defmodule Factory.Runs.Types do
       ]
     },
     %{
+      id: "incident",
+      label: "Troubleshoot an issue",
+      short: "Troubleshooting",
+      blurb:
+        "Paste an error or logs: find what it means on the web, trace the root cause, check the facts, and plan the fix.",
+      describe:
+        "Paste the error message, stack trace or logs you have (Grafana, Azure DevOps…), and say where it happens and since when, if you know.",
+      workflow: [
+        {"planner", "Triage Lead", "Works out what it is and which way to troubleshoot it",
+         {:incident, :triage}},
+        {"researcher", "Error Researcher", "Looks up what the error means and its known causes",
+         {:incident, :researcher}, web: true},
+        {"researcher", "Evidence Analyst",
+         "Reads the errors, traces and logs for what failed first", {:incident, :evidence}},
+        {"researcher", "Code Investigator",
+         "Traces the failure through the code and its recent changes", {:incident, :code}},
+        {"researcher", "Root Cause Analyst", "Asks why until it reaches the root cause",
+         {:incident, :root_cause}},
+        {"researcher", "Solution Architect", "Plans the mitigation, the fix and the prevention",
+         {:incident, :solution}},
+        {"researcher", "Fact Checker", "Checks the claims the diagnosis and the fix rest on",
+         {:incident, :fact_checker}, web: true},
+        {"reviewer", "Devil's Advocate", "Tries to prove the diagnosis wrong before anyone acts",
+         {:incident, :devils_advocate}},
+        {"researcher", "Incident Reporter", "Writes the answer the team acts on",
+         {:incident, :reporter}}
+      ],
+      loop: {"Devil's Advocate", "Root Cause Analyst"}
+    },
+    %{
       id: "other",
       label: "Something else",
       short: "Other",
@@ -81,6 +116,15 @@ defmodule Factory.Runs.Types do
 
   defp step({kind, name, does, prompt}),
     do: %{"kind" => kind, "name" => name, "does" => does, "prompt" => prompt(prompt)}
+
+  defp step({kind, name, does, prompt, opts}),
+    do: Map.put(step({kind, name, does, prompt}), "web", opts[:web] == true)
+
+  @doc "A type's arrow back, `{from, to}` by agent name, or nil (see the moduledoc)."
+  def loop(id), do: (get(id) || %{})[:loop]
+
+  # The troubleshooting agents' prompts live with the rest of that workflow.
+  defp prompt({:incident, key}), do: Factory.Runs.Troubleshooting.prompt(key)
 
   # The review workflow's agents: what a Scout and a pull request's Reviewer do.
   defp prompt(:scout) do

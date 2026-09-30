@@ -1,9 +1,12 @@
 defmodule FactoryWeb.Usage do
   @moduledoc """
   Formats a Kiro session's context use for display. Credits and tokens are formatted
-  by `FactoryWeb.UsageMeter`.
+  by `FactoryWeb.UsageMeter`; `credits/1` and `tokens/1` here are the same, for the
+  pages that format all their usage numbers through this module.
   """
-  import FactoryWeb.UsageMeter, only: [tokens: 1]
+
+  defdelegate credits(n), to: FactoryWeb.UsageMeter
+  defdelegate tokens(n), to: FactoryWeb.UsageMeter
 
   def pct(nil), do: "0%"
   def pct(p) when p < 10, do: "#{:erlang.float_to_binary(p / 1, decimals: 1)}%"

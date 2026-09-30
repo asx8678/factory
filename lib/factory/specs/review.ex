@@ -22,8 +22,6 @@ defmodule Factory.Specs.Review do
      "tasks are small, ordered and trace back to requirements (warn if there are no tasks yet)"}
   ]
 
-  def checks, do: @checks
-
   def label(id), do: Enum.find_value(@checks, id, fn {i, label, _} -> i == id && label end)
 
   @doc "The verdict for a score: strong at 80 and up, needs work from 50, weak below."
@@ -34,10 +32,7 @@ defmodule Factory.Specs.Review do
   def prompt(files) do
     checks = Enum.map_join(@checks, "\n", fn {id, _, what} -> "- #{id}: #{what}" end)
 
-    spec =
-      Enum.map_join(files, "\n\n", fn {name, text} ->
-        ~s(<file name="#{name}">\n#{text}\n</file>)
-      end)
+    spec = Factory.PromptText.files(files)
 
     """
     <spec-review>
@@ -59,7 +54,8 @@ defmodule Factory.Specs.Review do
 
   @doc "Reads Kiro's reply. Returns `{:ok, review}` or `{:error, reason}`."
   def parse(reply) do
-    with {:ok, %{"score" => score} = data} when is_number(score) <- Text.decode_json(reply) do
+    with {:ok, %{"score" => score} = data} when is_number(score) <-
+           Factory.PromptText.json_object(reply) do
       score = score |> round() |> max(0) |> min(100)
       known = Enum.map(@checks, &elem(&1, 0))
 
@@ -82,5 +78,4 @@ defmodule Factory.Specs.Review do
       _ -> {:error, "Kiro's reply wasn't a review Factory could read."}
     end
   end
-
 end

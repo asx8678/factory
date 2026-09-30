@@ -122,7 +122,7 @@ defmodule FactoryWeb.ChatComposer do
       </ul>
 
       <div class={[
-        "composer-box rounded-xl border border-base-content/15 shadow-[0_1px_2px_rgb(0_0_0/0.06),0_8px_28px_-8px_rgb(0_0_0/0.28)] transition-[border-color,box-shadow] focus-within:border-base-content/30 focus-within:shadow-[0_1px_2px_rgb(0_0_0/0.06),0_10px_32px_-8px_rgb(0_0_0/0.36)]",
+        "composer-box rounded-xl border border-base-content/15 shadow-[0_1px_2px_rgb(0_0_0/0.05),0_6px_20px_-10px_rgb(0_0_0/0.22)] transition-[border-color,box-shadow] focus-within:border-base-content/30 focus-within:shadow-[0_1px_2px_rgb(0_0_0/0.05),0_8px_24px_-10px_rgb(0_0_0/0.3)]",
         @glow && "is-glow"
       ]}>
         <div :if={@uploads.spec.entries != []} class="flex flex-wrap gap-2 px-4 pt-4">
@@ -229,11 +229,11 @@ defmodule FactoryWeb.ChatComposer do
     >
       <summary class={[
         "flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-full px-3 text-sm transition-colors hover:bg-base-content/[0.06] hover:text-base-content",
-        if(@current, do: "bg-primary/10 text-base-content", else: "text-base-content/70")
+        if(@current, do: "bg-base-content/[0.06] text-base-content", else: "text-base-content/70")
       ]}>
         <.icon
           name={if @current, do: FactoryWeb.RunParts.kind_icon(@current.kind), else: "hero-bolt-mini"}
-          class={["size-4", @current && "text-primary"]}
+          class={["size-4", @current && "text-base-content/65"]}
         />
         <span class="max-w-40 truncate">{if @current, do: @current.name, else: "Factory"}</span>
         <.icon name="hero-chevron-down-mini" class="size-4 opacity-50" />

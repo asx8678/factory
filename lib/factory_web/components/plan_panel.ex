@@ -59,7 +59,7 @@ defmodule FactoryWeb.PlanPanel do
       class="task-card-active rounded-xl border"
     >
       <header class="flex items-center gap-2 border-b border-base-content/10 px-3.5 py-2.5">
-        <.icon name="hero-clipboard-document-list-mini" class="size-4 shrink-0 text-primary" />
+        <.icon name="hero-clipboard-document-list-mini" class="size-4 shrink-0 text-base-content/55" />
         <h2 id="chat-plan-title" class="min-w-0 flex-1 truncate text-sm font-medium">
           {@run.title}
         </h2>
@@ -116,6 +116,7 @@ defmodule FactoryWeb.PlanPanel do
           {cond do
             @checking -> "Checking the scope"
             @job == "review" -> "Reviewing"
+            @job == "incident" -> "Triaging"
             true -> "Reworking the plan"
           end}
         </span>
@@ -129,7 +130,7 @@ defmodule FactoryWeb.PlanPanel do
         <li
           :for={{{task, mark}, i} <- Enum.with_index(Enum.zip(@tasks, @marks))}
           id={"chat-plan-task-#{i}"}
-          class={["group px-3.5 py-2.5", mark && "bg-amber-400/[0.035]"]}
+          class={["group px-3.5 py-2.5", mark && "bg-warning/[0.05]"]}
         >
           <.edit_form :if={@editing == i} task={task} i={i} builders={@builders} />
           <div :if={@editing != i} class="flex gap-2.5">
@@ -163,7 +164,7 @@ defmodule FactoryWeb.PlanPanel do
                     :if={mark}
                     id={"chat-plan-mark-#{i}"}
                     class={[
-                      "ml-1.5 inline-block rounded bg-amber-400/15 px-1 align-[1px] text-[10px] font-medium",
+                      "ml-1.5 inline-block rounded bg-warning/15 px-1 align-[1px] text-[10px] font-medium",
                       gold(true)
                     ]}
                   >
@@ -262,7 +263,7 @@ defmodule FactoryWeb.PlanPanel do
                 <li :for={{c, j} <- Enum.with_index(TaskList.checks(task))} class="flex gap-1.5">
                   <.icon
                     name="hero-check-circle-micro"
-                    class="mt-[2px] size-3.5 shrink-0 text-teal-500"
+                    class="mt-[2px] size-3.5 shrink-0 text-success"
                   />
                   <.inline_field
                     :if={@inline == {i, "check-#{j}"}}
@@ -352,7 +353,7 @@ defmodule FactoryWeb.PlanPanel do
         id="chat-plan-changes"
         class="flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-base-content/10 px-3.5 py-2 text-xs text-base-content/60"
       >
-        <span class="size-2 shrink-0 rounded-full bg-amber-400"></span>
+        <span class="size-2 shrink-0 rounded-full bg-warning"></span>
         <span>Gold marks what the planner changed: {changes_summary(@marks, @removed)}</span>
         <span :for={t <- @removed} class="text-base-content/40 line-through">{t}</span>
         <button
@@ -431,7 +432,11 @@ defmodule FactoryWeb.PlanPanel do
 
       <footer class="flex flex-wrap items-center gap-2 border-t border-base-content/10 px-3.5 py-2.5">
         <span class="mr-auto text-sm">
-          {if @job == "review", do: "Start the review?", else: "Implement this plan?"}
+          {case @job do
+            "review" -> "Start the review?"
+            "incident" -> "Start the investigation?"
+            _ -> "Implement this plan?"
+          end}
         </span>
         <button
           type="button"
@@ -448,7 +453,11 @@ defmodule FactoryWeb.PlanPanel do
           class="btn btn-primary btn-sm phx-click-loading:pointer-events-none phx-click-loading:opacity-60"
         >
           <.icon name="hero-play-micro" class="size-3.5" />
-          {if @job == "review", do: "Yes, review", else: "Yes, implement"}
+          {case @job do
+            "review" -> "Yes, review"
+            "incident" -> "Yes, investigate"
+            _ -> "Yes, implement"
+          end}
         </button>
       </footer>
     </section>
@@ -705,14 +714,14 @@ defmodule FactoryWeb.PlanPanel do
     """
   end
 
-  # What the plan's items are called: a review's are checks.
-  defp count_word("review", 1), do: "check"
-  defp count_word("review", _n), do: "checks"
+  # What the plan's items are called: a review's and an investigation's are checks.
+  defp count_word(job, 1) when job in ["review", "incident"], do: "check"
+  defp count_word(job, _n) when job in ["review", "incident"], do: "checks"
   defp count_word(_job, 1), do: "task"
   defp count_word(_job, _n), do: "tasks"
 
   # Gold, for what the planner changed since the plan was last read.
-  defp gold(true), do: "text-amber-600 dark:text-amber-300"
+  defp gold(true), do: "text-warning"
   defp gold(_), do: nil
 
   defp part_changed?(nil, _part), do: false

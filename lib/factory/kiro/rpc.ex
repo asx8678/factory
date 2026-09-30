@@ -1,9 +1,9 @@
 defmodule Factory.Kiro.RPC do
   @moduledoc """
-  JSON-RPC 2.0 framing over a `kiro-cli acp` port, shared by `Factory.Kiro.Session`,
-  `Factory.Kiro.Ask` and `Factory.Kiro.Catalog`: one JSON object per line out, and
-  the port's lines decoded coming in. Who waits for what differs between the three, so
-  each keeps its own receive loop.
+  JSON-RPC 2.0 framing over a `kiro-cli acp` port (`Factory.Kiro.open_port/2`), shared
+  by `Factory.Kiro.Session`, `Factory.Kiro.Ask` and `Factory.Kiro.Catalog`: one JSON
+  object per line out, and the port's lines read back coming in. Who waits for what
+  differs between the three, so each keeps its own receive loop.
   """
 
   @doc "Sends `msg` (a map without `jsonrpc`) as one line. Nothing when there's no port."
@@ -33,32 +33,61 @@ defmodule Factory.Kiro.RPC do
   def error_message(other), do: inspect(other)
 
   @doc """
-  Decodes one line from the port: `{:ok, msg}` for a JSON object, `:skip` for anything
-  else (kiro-cli's own output on stdout).
+  Takes what the port sent (`{:eol | :noeol, text}`) after `buffer`, the start of a line
+  so far: `{:partial, buffer}` while the line goes on, `{:message, msg}` once it's a
+  complete JSON object, or `:invalid` for a complete line that isn't one (kiro-cli's own
+  output on stdout). After a complete line the buffer starts empty again.
   """
-  def decode(line) do
-    case JSON.decode(line) do
-      {:ok, %{} = msg} -> {:ok, msg}
-      _ -> :skip
+  def read(buffer, {:noeol, part}), do: {:partial, buffer <> part}
+
+  def read(buffer, {:eol, part}) do
+    case JSON.decode(buffer <> part) do
+      {:ok, %{} = msg} -> {:message, msg}
+      _ -> :invalid
     end
   end
 
   @doc """
-  Closes the port, then ends the process behind it (`os_pid`, from
-  `Port.info(port, :os_pid)` while it was open) with SIGTERM, in case closing stdin
-  didn't stop it. Either may be gone already.
+  Whether Kiro's MCP servers named `names` are settled, from a `_kiro/mcp/status`
+  notification's params: each one listed and past "connecting" (connected, with its
+  tools, or failed). Kiro loads them after `session/new` answers.
+  """
+  def mcp_settled?(params, names) do
+    servers = Map.new(List.wrap(params["servers"]), &{&1["name"], &1["status"]})
+    Enum.all?(names, &(Map.has_key?(servers, &1) and servers[&1] not in ["connecting", nil]))
+  end
+
+  @doc """
+  Stops kiro-cli for good: it and everything it started (MCP servers, shells, their
+  commands) are killed while it still runs, then the port is closed and what it sent
+  before is dropped from the mailbox. Last, the process behind it (`os_pid`, from
+  `Port.info(port, :os_pid)` while it was open) gets SIGTERM, in case the port was
+  closed already and closing stdin didn't stop it. Either may be gone already.
   """
   def close_port(port, os_pid \\ nil)
   def close_port(nil, _os_pid), do: :ok
 
   def close_port(port, os_pid) do
+    # While kiro-cli still runs: once it has gone its children belong to init, where
+    # they can't be told from anyone else's.
+    Factory.OsProcess.kill_tree(port)
+
     try do
       Port.close(port)
     rescue
       ArgumentError -> :ok
     end
 
+    flush(port)
     terminate(os_pid)
+  end
+
+  defp flush(port) do
+    receive do
+      {^port, _} -> flush(port)
+    after
+      0 -> :ok
+    end
   end
 
   defp terminate(os_pid) when is_integer(os_pid) do

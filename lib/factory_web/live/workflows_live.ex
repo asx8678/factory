@@ -155,17 +155,24 @@ defmodule FactoryWeb.WorkflowsLive do
 
   defp open_sources(socket, _params), do: socket
 
-  # A different workflow gets a fresh canvas (its element id changes with it).
+  # A different workflow gets a fresh canvas (its element id changes with it), and
+  # none of the last one's windows.
   defp open_workflow(socket, workflow) do
     if socket.assigns.workflow && socket.assigns.workflow.id == workflow.id do
       assign(socket, workflow: workflow)
     else
+      sources = Sources.list(workflow.id)
+
       assign(socket,
         workflow: workflow,
         workflows: Workflows.list(),
-        sources: Sources.list(workflow.id),
+        sources: sources,
         sources_view: nil,
-        graph: canvas_graph(workflow.id, nil, Sources.list(workflow.id)),
+        editing_source: nil,
+        browser: nil,
+        link_prompt: nil,
+        base_window: false,
+        graph: canvas_graph(workflow.id, nil, sources),
         page_title: workflow.name,
         selected: nil,
         naming: nil
@@ -242,6 +249,19 @@ defmodule FactoryWeb.WorkflowsLive do
         {:noreply, put_flash(socket, :error, "Couldn't add the action. Try again.")}
     end
   end
+
+  # The side panel's events with no card open (closed, or deleted in another tab
+  # meanwhile) change nothing.
+  def handle_event(event, _, %{assigns: %{selected: nil}} = socket)
+      when event in [
+             "save",
+             "save_context",
+             "stop_kiro",
+             "delete_agent",
+             "action_change",
+             "action_save"
+           ],
+      do: {:noreply, socket}
 
   def handle_event("action_change", %{"action" => params}, socket),
     do: {:noreply, assign(socket, action_draft: draft(socket.assigns.selected, params))}
@@ -495,6 +515,7 @@ defmodule FactoryWeb.WorkflowsLive do
   end
 
   def handle_event("source_edit", %{"id" => id}, socket) do
+    # Deleted meanwhile (in another tab): there's nothing to edit.
     case Sources.get(id) do
       nil ->
         {:noreply, socket |> put_flash(:error, "That source is gone.") |> reload_sources()}
@@ -606,6 +627,11 @@ defmodule FactoryWeb.WorkflowsLive do
     current = form_params(socket.assigns.source_form)["config"][field]
     {:noreply, FolderBrowser.open(socket, current, %{field: field, mode: mode})}
   end
+
+  # Once the browser is closed, a late or double click changes nothing.
+  def handle_event(event, _, %{assigns: %{browser: nil}} = socket)
+      when event in ["browse_go", "browse_hidden", "browse_cancel", "browse_pick"],
+      do: {:noreply, socket}
 
   def handle_event("browse_go", %{"path" => path}, socket),
     do: {:noreply, FolderBrowser.go(socket, path)}
@@ -990,6 +1016,7 @@ defmodule FactoryWeb.WorkflowsLive do
       flash={@flash}
       usage={@usage_meter}
       active_runs={@active_runs}
+      kiro={@kiro}
       active={:workflows}
       full
     >

@@ -5,10 +5,9 @@ defmodule Factory.Agents.Agent do
   @statuses ~w(idle running waiting error done)
   @kinds ~w(general orchestrator planner coder tester reviewer researcher writer action)
 
-  # Agents that only look: they read and search the project, never change it. They
-  # have no web access (`fetch`): an agent that can read any file and also reach the
-  # web could carry what it read out of the machine, so only agents a person already
-  # trusts to edit and run commands may fetch.
+  # Agents that only look: they read and search the project, never change it. What they
+  # read may be a stranger's pull request, so fetching a web page is asked about first:
+  # an injected prompt could otherwise send what they read to any address.
   @read_only ~w(planner researcher reviewer)
   @read_tools ~w(read search think)
   @all_tools ~w(read search think fetch edit delete move execute other)
@@ -24,10 +23,14 @@ defmodule Factory.Agents.Agent do
     field :usage, :map, default: %{}
     field :session, :string, default: "own"
     field :kiro_mode, :string, default: "vibe"
+    # An agent that only reads asks before it fetches a web page, unless this is set.
+    field :web, :boolean, default: false
     field :x, :float, default: 0.0
     field :y, :float, default: 0.0
     # For kind "action": %{"type" => …, "config" => %{…}} (see Factory.Actions).
     field :action, :map, default: %{}
+    # The prompt a standard workflow last gave it, set by Factory.Workflows only.
+    field :default_prompt, :string
     belongs_to :workflow, Factory.Agents.Workflow
 
     timestamps(type: :utc_datetime)
@@ -35,13 +38,24 @@ defmodule Factory.Agents.Agent do
 
   @doc """
   The Kiro tool kinds an agent may use, the same in a chat and in a run: reading and
-  searching for the kinds that only look (planner, researcher, reviewer), everything,
-  the web included, for the rest. Kiro asks before it edits or runs a command; other
-  requests are denied. Reading, searching and editing are also kept to the project
-  folder and the agent's attached sources (`Factory.Kiro.Session`).
+  searching for the kinds that only look (planner, researcher, reviewer), everything
+  for the rest. Kiro asks before it edits or runs a command; other requests are denied,
+  except that the person is asked when one that only looks wants to fetch a web page
+  (see `Factory.Kiro.Session`), unless it's set to search the web (`web?/1`). Reading,
+  searching and editing are also kept to the project folder and the agent's attached
+  sources (`Factory.Kiro.Session`).
   """
-  def tools(%{kind: kind}) when kind in @read_only, do: @read_tools
+  def tools(%{kind: kind} = agent) when kind in @read_only,
+    do: if(web?(agent), do: @read_tools ++ ["fetch"], else: @read_tools)
+
   def tools(_agent), do: @all_tools
+
+  @doc """
+  Whether the agent searches the web without asking. The ones that only look ask first
+  (their reading could be steered to send what they read anywhere), except one set to
+  (`web`), given claims to check rather than the raw material, like the Fact Checker.
+  """
+  def web?(agent), do: Map.get(agent, :web) == true
 
   @doc "Whether the agent only reads and checks, never changes the project."
   def read_only?(%{kind: kind}), do: kind in @read_only
@@ -52,8 +66,9 @@ defmodule Factory.Agents.Agent do
   def action?(%__MODULE__{kind: kind}), do: kind == "action"
 
   # What a person may change on an agent's card and in its side panel. The rest
-  # (`status`, `activity`, `usage`, `workflow_id`) is Factory's own and set in code.
-  @editable [:name, :role, :kind, :prompt, :model, :kiro_mode, :session, :x, :y, :action]
+  # (`status`, `activity`, `usage`, `workflow_id`, `default_prompt`) is Factory's own
+  # and set in code.
+  @editable [:name, :role, :kind, :prompt, :model, :kiro_mode, :session, :x, :y, :action, :web]
 
   @doc """
   The full changeset for Factory's own use (`Factory.Agents.create_agent/1`): it also
@@ -65,7 +80,7 @@ defmodule Factory.Agents.Agent do
     |> validate()
   end
 
-  @doc "The changeset for what a person edits: name, role, kind, prompt, model, mode, session, place and action."
+  @doc "The changeset for what a person edits: name, role, kind, prompt, model, mode, session, place, action and web."
   def edit_changeset(agent, attrs) do
     agent
     |> cast(attrs, @editable)

@@ -45,7 +45,9 @@ config :factory, :kiro,
   cli: Path.expand("../test/support/fake_kiro.mjs", __DIR__),
   workspace: Path.expand("../tmp/test-workspace", __DIR__),
   log_dir: Path.expand("../tmp/test-kiro-logs", __DIR__),
-  prompt_timeout: 5_000
+  prompt_timeout: 5_000,
+  # The fake kiro-cli never says its tools are there.
+  mcp_ready_timeout: 200
 
 # Repositories added as data sources are cloned here in tests.
 config :factory, :sources_dir, Path.expand("../tmp/test-sources", __DIR__)

@@ -34,6 +34,7 @@ defmodule FactoryWeb.PlanDiffTest do
 
   test "a task the snapshot doesn't have is new; every task is, against an empty snapshot" do
     snapshot = PlanDiff.snapshot([@button])
+
     empty = %{
       title: "Test an empty month",
       details: ["Returns just the header row."],

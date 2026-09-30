@@ -69,7 +69,7 @@ defmodule FactoryWeb.ChatMessages do
         Answer below, and I'll make the tasks.
       </p>
       <ChatQuestions.elicitation
-        :if={@message.meta["elicitation"]}
+        :if={is_map(@message.meta["elicitation"])}
         id={"elicitation-#{@message.id}"}
         message={@message}
       />
@@ -78,6 +78,7 @@ defmodule FactoryWeb.ChatMessages do
         id={"answers-#{@message.id}"}
         message={@message}
       />
+      <.retry_button message={@message} run={@run} />
       <.plan_card
         :if={@message.meta["tasks"] not in [nil, []]}
         id={"plan-#{@message.id}"}
@@ -96,7 +97,7 @@ defmodule FactoryWeb.ChatMessages do
     ~H"""
     <div id={@id}>
       <p class="mb-1.5 flex items-center gap-2 text-sm">
-        <span class="grid size-5 place-items-center rounded-md bg-primary text-primary-content">
+        <span class="grid size-5 place-items-center rounded-md bg-base-content text-base-100">
           <.icon name="hero-bolt-solid" class="size-3" />
         </span>
         <span class="font-semibold">Factory</span>
@@ -104,6 +105,7 @@ defmodule FactoryWeb.ChatMessages do
       <div id={"md-#{@id}"} class="md" phx-hook="Markdown" phx-update="ignore">
         {FactoryWeb.Markdown.render(@message.body)}
       </div>
+      <.retry_button message={@message} run={@run} />
       <button
         :if={"start" in @message.actions and startable?(@run)}
         id={"start-#{@message.id}"}
@@ -112,6 +114,23 @@ defmodule FactoryWeb.ChatMessages do
         class="mt-3 flex items-center gap-1.5 rounded-full bg-primary px-4 py-1.5 text-sm font-medium text-primary-content hover:opacity-90"
       >
         <.icon name="hero-play-mini" class="size-4" /> Start run
+      </button>
+      <button
+        :if={("continue" in @message.actions and @run) && @run.status == "paused"}
+        id={"continue-#{@message.id}"}
+        phx-click="action"
+        phx-value-action="continue"
+        class="mt-3 flex items-center gap-1.5 rounded-full bg-primary px-4 py-1.5 text-sm font-medium text-primary-content transition-opacity hover:opacity-90"
+      >
+        <.icon name="hero-play-mini" class="size-4" /> Continue
+      </button>
+      <button
+        :if={("fix_it" in @message.actions and @run) && @run.status == "done"}
+        id={"fix-it-#{@message.id}"}
+        phx-click="fix_it"
+        class="mt-3 flex items-center gap-1.5 rounded-full bg-primary px-4 py-1.5 text-sm font-medium text-primary-content transition-opacity hover:opacity-90"
+      >
+        <.icon name="hero-wrench-screwdriver-mini" class="size-4" /> Fix it
       </button>
     </div>
     """
@@ -128,7 +147,7 @@ defmodule FactoryWeb.ChatMessages do
     ~H"""
     <details id={@id} class="group mt-2 rounded-lg border border-base-content/10 text-sm">
       <summary class="flex cursor-pointer list-none items-center gap-2 px-3 py-1.5 text-xs text-base-content/60 hover:text-base-content [&::-webkit-details-marker]:hidden">
-        <.icon name="hero-clipboard-document-list-micro" class="size-3.5 text-primary" />
+        <.icon name="hero-clipboard-document-list-micro" class="size-3.5 text-base-content/55" />
         Created {length(@tasks)} {if length(@tasks) == 1, do: "task", else: "tasks"}
         <span :if={@startable} class="text-base-content/45">· the plan is below</span>
         <.icon
@@ -230,6 +249,30 @@ defmodule FactoryWeb.ChatMessages do
   end
 
   defp startable?(run), do: run && run.status == "draft" && run.tasks != []
+
+  attr :message, :map, required: true
+  attr :run, :map, default: nil
+
+  # Under a failure Kiro couldn't take (signed out, say): sends it again, once. A plan
+  # is planned again only while the run is a draft.
+  defp retry_button(assigns) do
+    ~H"""
+    <button
+      :if={retryable?(@message, @run)}
+      id={"retry-#{@message.id}"}
+      phx-click="retry"
+      phx-value-id={@message.id}
+      class="mt-3 inline-flex items-center gap-1.5 rounded-full border border-base-content/15 px-3.5 py-1 text-sm font-medium transition-colors hover:border-primary/40 hover:bg-primary/5"
+    >
+      <.icon name="hero-arrow-path-mini" class="size-4" /> Try again
+    </button>
+    """
+  end
+
+  defp retryable?(message, run) do
+    "retry" in message.actions and !message.meta["retried"] and run != nil and
+      (message.meta["retry"]["kind"] != "plan" or run.status == "draft")
+  end
 
   attr :names, :list, required: true
 

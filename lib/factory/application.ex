@@ -17,14 +17,19 @@ defmodule Factory.Application do
       {Task.Supervisor, name: Factory.TaskSupervisor},
       # No Kiro session, review or run worker survives a restart: clear leftover context
       # and statuses, and pause the runs left queued or running, telling their chats
-      # (`Factory.Engine.recover/0`). Runs after the Repo and PubSub above are up. Off
-      # in tests, where the sandbox owns the database.
+      # (`Factory.Engine.recover/0`). Runs after the Repo and PubSub above are up. And
+      # make the standard workflows now, so no page makes them while it's viewed, with
+      # the prompts Factory has now where nobody changed them. Off in tests, where the
+      # sandbox owns the database.
       {Task,
        fn ->
          if Application.get_env(:factory, :reset_on_boot, true) do
            Factory.Agents.reset_sessions()
            Factory.Specs.reset_reviews()
            Factory.Engine.recover()
+           Factory.Workflows.ensure_standard()
+           Factory.Workflows.update_prompts()
+           Factory.Workflows.current()
          end
 
          # The models Kiro offers: the last list at once, then a fresh check.

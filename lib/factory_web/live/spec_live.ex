@@ -4,6 +4,7 @@ defmodule FactoryWeb.SpecLive do
   import FactoryWeb.SpecPageParts
   alias Factory.{Runs, Specs}
   alias Factory.Specs.Spec
+  alias FactoryWeb.TaskImprove
 
   def mount(%{"id" => id}, _session, socket) do
     case spec_by_id(id) do
@@ -19,7 +20,7 @@ defmodule FactoryWeb.SpecLive do
          |> FactoryWeb.UsageMeter.scope({:spec, spec.id})
          |> assign(home_run: Specs.home_run(spec))
          |> put_spec(spec)
-         |> assign(page_title: spec.name, preview: false, saved: false, undo: nil)
+         |> assign(preview: false, saved: false, undo: nil)
          |> assign(suggest: false, activity: [], answers: %{}, others: %{}, add_mode: "append")
          |> assign(question: 0)
          |> assign(selected: MapSet.new(), expanded: MapSet.new(), filter: "", editing: nil)
@@ -44,12 +45,12 @@ defmodule FactoryWeb.SpecLive do
     end
   end
 
-  # The spec, and its tasks parsed once (Factory.Specs.task_list/1) for the list, the
-  # queue and the handlers, rather than on every render.
-  defp put_spec(socket, spec),
-    do: assign(socket, spec: spec, task_list: Specs.task_list(spec))
-
   # Saves from this page and the background review and task suggestions all arrive here.
+  # A save made on this page comes back as the very spec the page has: nothing changed.
+  # (Not told apart by updated_at: it's to the second, and two saves can share one.)
+  def handle_info({:spec_updated, spec}, %{assigns: %{spec: spec}} = socket),
+    do: {:noreply, socket}
+
   def handle_info({:spec_updated, spec}, socket) do
     socket =
       if task_structure(socket.assigns.spec) != task_structure(spec),
@@ -59,24 +60,15 @@ defmodule FactoryWeb.SpecLive do
     {:noreply,
      socket
      |> plan_defaults(socket.assigns.spec.plan, spec.plan)
-     |> put_spec(spec)
-     |> assign(page_title: spec.name)}
+     |> put_spec(spec)}
   end
 
-  # Improving one task with Kiro. Keyed by the task's title when it was asked, so
-  # moving tasks around meanwhile doesn't lose the answer.
+  # Improving one task with Kiro (FactoryWeb.TaskImprove).
   def handle_info({:task_activity, title, text}, socket),
-    do: {:noreply, update_improve(socket, title, &Map.put(&1, :activity, text))}
+    do: {:noreply, update(socket, :improve, &TaskImprove.activity(&1, title, text))}
 
-  def handle_info({:task_improved, title, result}, socket) do
-    {:noreply,
-     update_improve(socket, title, fn entry ->
-       case result do
-         {:ok, suggestion} -> %{entry | status: :done, suggestion: suggestion}
-         {:error, reason} -> %{entry | status: :error, error: reason}
-       end
-     end)}
-  end
+  def handle_info({:task_improved, title, result}, socket),
+    do: {:noreply, update(socket, :improve, &TaskImprove.result(&1, title, result))}
 
   # A new task Kiro is writing. The ref tells this draft's answer from an older one.
   def handle_info({:draft_activity, ref, text}, socket),
@@ -130,7 +122,8 @@ defmodule FactoryWeb.SpecLive do
     step = if step in Spec.steps(), do: step, else: default_step(spec)
 
     {:noreply,
-     assign(socket,
+     socket
+     |> assign(
        step: step,
        # Tasks open as the list once there are some; other steps open on Write until approved.
        preview:
@@ -138,7 +131,8 @@ defmodule FactoryWeb.SpecLive do
        saved: false,
        undo: nil,
        suggest: Map.has_key?(params, "suggest") and step == "tasks" and Spec.open?(spec, step)
-     )}
+     )
+     |> put_spec(spec)}
   end
 
   defp default_step(spec) do
@@ -150,7 +144,7 @@ defmodule FactoryWeb.SpecLive do
 
   def handle_event("rename", %{"name" => name}, socket) do
     case Specs.update_spec(socket.assigns.spec, %{name: name}) do
-      {:ok, spec} -> {:noreply, socket |> put_spec(spec) |> assign(page_title: spec.name)}
+      {:ok, spec} -> {:noreply, put_spec(socket, spec)}
       # A blank name isn't saved; the old one comes back on the next render.
       {:error, _} -> {:noreply, socket}
     end
@@ -203,22 +197,24 @@ defmodule FactoryWeb.SpecLive do
     {:noreply, assign(socket, expanded: expanded)}
   end
 
-  def handle_event("task_move", %{"i" => i, "by" => by}, socket),
-    do:
-      tasks_changed(
-        socket,
-        Specs.move_task(socket.assigns.spec, String.to_integer(i), String.to_integer(by))
-      )
+  # Each change names the tasks it was made on, so it doesn't land on another task when
+  # the planner has changed the list meanwhile.
+  def handle_event("task_move", %{"i" => i, "by" => by}, socket) do
+    i = String.to_integer(i)
+    spec = socket.assigns.spec
+    tasks_changed(socket, Specs.move_task(spec, i, String.to_integer(by), title_at(socket, i)))
+  end
 
-  def handle_event("task_delete", %{"i" => i}, socket),
-    do: tasks_changed(socket, Specs.delete_tasks(socket.assigns.spec, [String.to_integer(i)]))
+  def handle_event("task_delete", %{"i" => i}, socket) do
+    i = String.to_integer(i)
+    tasks_changed(socket, Specs.delete_tasks(socket.assigns.spec, [i], [title_at(socket, i)]))
+  end
 
-  def handle_event("tasks_delete", _, socket),
-    do:
-      tasks_changed(
-        socket,
-        Specs.delete_tasks(socket.assigns.spec, MapSet.to_list(socket.assigns.selected))
-      )
+  def handle_event("tasks_delete", _, socket) do
+    indices = MapSet.to_list(socket.assigns.selected)
+    titles = Enum.map(indices, &title_at(socket, &1))
+    tasks_changed(socket, Specs.delete_tasks(socket.assigns.spec, indices, titles))
+  end
 
   def handle_event("task_edit", %{"i" => i}, socket),
     do: {:noreply, assign(socket, editing: String.to_integer(i))}
@@ -231,7 +227,7 @@ defmodule FactoryWeb.SpecLive do
     if socket.assigns.editing == i do
       old = Enum.at(socket.assigns.task_list, i)
 
-      case Specs.update_task(socket.assigns.spec, i, params) do
+      case Specs.update_task(socket.assigns.spec, i, params, old && old.title) do
         {:error, :blank_title} ->
           {:noreply, put_flash(socket, :error, "A task needs a title.")}
 
@@ -266,10 +262,7 @@ defmodule FactoryWeb.SpecLive do
   def handle_event("improve_send", %{"title" => title, "instruction" => instruction}, socket) do
     with i when is_integer(i) <- task_index(socket, title),
          {:ok, _} <- Specs.improve_task(socket.assigns.spec, i, instruction) do
-      {:noreply,
-       update_improve(socket, title, fn entry ->
-         %{entry | status: :thinking, instruction: instruction, error: nil, activity: nil}
-       end)}
+      {:noreply, update(socket, :improve, &TaskImprove.thinking(&1, title, instruction))}
     else
       _ -> {:noreply, close_improve(socket, title)}
     end
@@ -282,13 +275,11 @@ defmodule FactoryWeb.SpecLive do
     do: {:noreply, close_improve(socket, title)}
 
   def handle_event("improve_apply", %{"title" => title}, socket) do
-    with %{status: :done, suggestion: s} <- socket.assigns.improve[title],
+    with {:ok, params} <- TaskImprove.suggestion(socket.assigns.improve, title),
          i when is_integer(i) <- task_index(socket, title) do
-      params = Specs.task_params(s)
-
       tasks_changed(
         close_improve(socket, title),
-        Specs.update_task(socket.assigns.spec, i, params)
+        Specs.update_task(socket.assigns.spec, i, params, title)
       )
     else
       _ -> {:noreply, close_improve(socket, title)}
@@ -623,8 +614,22 @@ defmodule FactoryWeb.SpecLive do
 
   def handle_event("start", _, socket) do
     case Specs.start_run(socket.assigns.spec) do
-      {:ok, run} -> {:noreply, push_navigate(socket, to: ~p"/chat/#{run.id}")}
-      {:error, _} -> {:noreply, put_flash(socket, :error, "Approve all three steps first.")}
+      {:ok, run} ->
+        {:noreply, push_navigate(socket, to: ~p"/chat/#{run.id}")}
+
+      {:error, :not_approved} ->
+        {:noreply, put_flash(socket, :error, "Approve all three steps first.")}
+
+      {:error, :queue_gone} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "None of the queued tasks are in the spec any more, so the queue was cleared. Queue them again, or start to run them all."
+         )}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Couldn't start a run. Try again.")}
     end
   end
 
@@ -657,13 +662,27 @@ defmodule FactoryWeb.SpecLive do
   defp tasks_changed(socket, {:error, :locked}),
     do: {:noreply, put_flash(socket, :error, "Click Edit to change approved tasks.")}
 
+  defp tasks_changed(socket, {:error, :stale}),
+    do:
+      {:noreply,
+       put_flash(socket, :error, "The tasks changed meanwhile. Check the list and try again.")}
+
+  # Nothing is saved: the task is gone, or the change isn't valid.
+  defp tasks_changed(socket, {:error, reason})
+       when reason in [:not_found, :gone] or is_struct(reason, Ecto.Changeset),
+       do: {:noreply, put_flash(socket, :error, "That change couldn't be saved. Try again.")}
+
   # The tasks are saved; a draft run couldn't follow them.
   defp tasks_changed(socket, {:error, reason}),
     do:
       {:noreply,
        put_flash(socket, :error, "Saved, but a run couldn't follow the change: #{why(reason)}")}
 
-  defp queue_changed(socket, {:ok, spec}, opts \\ []) do
+  defp title_at(socket, i), do: (Enum.at(socket.assigns.task_list, i) || %{})[:title]
+
+  defp queue_changed(socket, result, opts \\ [])
+
+  defp queue_changed(socket, {:ok, spec}, opts) do
     socket = put_spec(socket, spec)
     {:noreply, if(opts[:clear], do: assign(socket, selected: MapSet.new()), else: socket)}
   end
@@ -682,8 +701,6 @@ defmodule FactoryWeb.SpecLive do
     do: {:noreply, put_flash(socket, :error, "A task needs a title.")}
 
   defp added(socket, {:error, reason}), do: tasks_changed(socket, {:error, reason})
-
-  defp added(socket, error), do: tasks_changed(socket, error)
 
   defp update_draft(socket, ref, fun) do
     case socket.assigns.draft do
@@ -773,18 +790,57 @@ defmodule FactoryWeb.SpecLive do
 
   defp text(spec, step), do: Map.fetch!(spec, String.to_existing_atom(step))
 
-  def render(assigns) do
-    assigns =
-      assign(assigns,
-        text: text(assigns.spec, assigns.step),
-        open: Spec.open?(assigns.spec, assigns.step),
-        approved: Spec.approved?(assigns.spec, assigns.step),
-        ready: Spec.current_step(assigns.spec) == "ready",
-        name_form: to_form(%{"name" => assigns.spec.name})
+  # Every change to the spec, and to the step shown, comes through here, so what the
+  # page shows from it is worked out once per change rather than on every render: its
+  # tasks parsed once (Factory.Specs.task_list/1) for the list, the queue and the
+  # handlers, the step's text and state, and on Tasks the agents a task can be given
+  # to (which takes a few queries, so it's worked out once per visit: a workflow's
+  # agents seldom change while its spec is open). Mount has no step yet; handle_params
+  # puts the spec again once it has one.
+  defp put_spec(socket, spec) do
+    socket =
+      assign(socket,
+        spec: spec,
+        page_title: spec.name,
+        task_list: Specs.task_list(spec),
+        name_form: to_form(%{"name" => spec.name})
       )
 
+    case socket.assigns[:step] do
+      nil -> socket
+      step -> put_step(socket, spec, step)
+    end
+  end
+
+  defp put_step(socket, spec, step) do
+    tasks? = step == "tasks"
+
+    socket =
+      if tasks? and socket.assigns[:builder_names] == nil,
+        do:
+          assign(socket,
+            builder_names: Enum.map(Specs.builders(spec, socket.assigns[:home_run]), & &1.name)
+          ),
+        else: socket
+
+    assign(socket,
+      text: text(spec, step),
+      open: Spec.open?(spec, step),
+      approved: Spec.approved?(spec, step),
+      ready: Spec.current_step(spec) == "ready",
+      builders: if(tasks?, do: socket.assigns.builder_names, else: [])
+    )
+  end
+
+  def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} usage={@usage_meter} active_runs={@active_runs} active={:specs}>
+    <Layouts.app
+      flash={@flash}
+      usage={@usage_meter}
+      active_runs={@active_runs}
+      kiro={@kiro}
+      active={:specs}
+    >
       <Layouts.back_link :if={!@home_run} to={~p"/specs"}>Specs</Layouts.back_link>
       <Layouts.back_link :if={@home_run} to={~p"/chat/#{@home_run.id}"}>
         {@home_run.title}
@@ -864,7 +920,7 @@ defmodule FactoryWeb.SpecLive do
             editing={@editing}
             expanded={@expanded}
             filter={@filter}
-            builders={if @step == "tasks", do: Enum.map(Specs.builders(@spec), & &1.name), else: []}
+            builders={@builders}
             improve={@improve}
             selected={@selected}
           />

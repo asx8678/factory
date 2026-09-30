@@ -72,9 +72,6 @@ defmodule Factory.RunTools do
 
   @task_tools ~w(get_tasks complete_tasks)
 
-  @doc "Every run tool, as MCP `tools/list` gives them."
-  def tools, do: @tools
-
   @doc """
   The tools `token` offers. A session's lists them all, as Kiro reads them once when
   the session starts; each call is checked against the step then (`call/3`).
@@ -179,10 +176,10 @@ defmodule Factory.RunTools do
   """
   def call(token, name, args) when is_map(args) do
     case verify(token) do
-      {:ok, %{session: key}} ->
+      {:ok, %{session: _} = grant} ->
         cond do
-          plan_tool?(name) -> plan_in_session(key, name, args)
-          name == "get_tasks" -> tasks_in_session(key, token)
+          plan_tool?(name) -> plan_in_session(grant, name, args)
+          name == "get_tasks" -> tasks_in_session(grant, token)
           true -> call_step(token, name, args)
         end
 
@@ -194,10 +191,10 @@ defmodule Factory.RunTools do
   def call(_token, _name, _args), do: {:error, "The arguments must be an object."}
 
   # A planner's tool from a session: for the chat message it's answering, not a run step.
-  defp plan_in_session(key, name, args) do
+  defp plan_in_session(%{session: key} = grant, name, args) do
     with pid when is_pid(pid) <- Factory.Kiro.whereis(key),
          %{run_id: run_id, agent: agent, step: nil} = turn <-
-           Factory.Kiro.Session.current_turn(pid) do
+           Factory.Kiro.Session.current_turn(pid, grant[:nonce]) do
       Factory.PlanTools.call_in_turn(run_id, agent, name, args, turn[:planning])
     else
       %{step: %{}} -> {:error, "During a run step, work on the tasks as they are."}
@@ -208,9 +205,9 @@ defmodule Factory.RunTools do
   end
 
   # Reading the tasks is fine in a chat message too; in a run step it's the step's.
-  defp tasks_in_session(key, token) do
+  defp tasks_in_session(%{session: key} = grant, token) do
     with pid when is_pid(pid) <- Factory.Kiro.whereis(key),
-         %{run_id: run_id, step: nil} <- Factory.Kiro.Session.current_turn(pid),
+         %{run_id: run_id, step: nil} <- Factory.Kiro.Session.current_turn(pid, grant[:nonce]),
          %{} = run <- Runs.get_run(run_id) do
       {:ok, describe(run.tasks)}
     else
@@ -251,10 +248,11 @@ defmodule Factory.RunTools do
     end
   end
 
-  # A session's token stands for the step the session is answering right now.
-  defp resolve(%{session: key}) do
+  # A session's token stands for the step the session is answering right now, if the
+  # token was given to the kiro-cli it runs now.
+  defp resolve(%{session: key} = grant) do
     with pid when is_pid(pid) <- Factory.Kiro.whereis(key),
-         %{run_id: run_id, step: step} <- Factory.Kiro.Session.current_step(pid) do
+         %{run_id: run_id, step: step} <- Factory.Kiro.Session.current_step(pid, grant[:nonce]) do
       {:ok, %{run_id: run_id, step_id: step.id, tasks: step.tasks, verdict: step.verdict}}
     else
       _ ->

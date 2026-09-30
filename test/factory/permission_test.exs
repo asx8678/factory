@@ -20,8 +20,6 @@ defmodule Factory.Kiro.PermissionTest do
     "git log && git diff",
     "cat mix.exs | grep deps",
     "grep -rn foo lib; wc -l lib/factory.ex",
-    "MIX_ENV=test mix test",
-    "FOO=bar ls",
     "sed -n 1,20p lib/factory.ex",
     "find lib -name '*.ex'",
     "elixir --version",
@@ -34,6 +32,9 @@ defmodule Factory.Kiro.PermissionTest do
   @refused [
     "env rm -rf x",
     "env",
+    # Settings before a command (GIT_EXTERNAL_DIFF=…) can make it run another program.
+    "MIX_ENV=test mix test",
+    "FOO=bar ls",
     "ls & rm x",
     "/tmp/x/cat file",
     "/usr/bin/git log",

@@ -15,6 +15,7 @@ defmodule Factory.PlanTools do
   """
   alias Factory.{Runs, Spec, Specs, Text}
   alias Factory.Specs.Planner
+  alias Factory.Specs.Spec, as: SpecDoc
 
   @server "factory"
   @salt "factory plan tools"
@@ -237,6 +238,7 @@ defmodule Factory.PlanTools do
   end
 
   @reading_tools ~w(get_plan ask_user)
+  @writing_tools ~w(create_plan add_tasks update_task remove_tasks)
 
   # What a button's turn may not do: a scope check changes nothing, and Refine keeps the
   # plan it reworks, with the person's edits. nil when the call may go ahead.
@@ -546,102 +548,17 @@ defmodule Factory.PlanTools do
     with_spec(run, fn spec -> {:ok, {:read, describe(spec)}} end)
   end
 
-  defp apply_tool("create_plan", args, run) do
-    summary = Text.text(args["summary"])
-    approach = Text.text(args["approach"])
-
+  # While the run is planned, tasks approved on the Spec page are closed to the planner
+  # as they are to the chat's own edits (`Factory.Specs.edit_plan_task/4`). Once the run
+  # has started, its plan grows as before (`call_in_turn/5`).
+  defp apply_tool(name, args, run) when name in @writing_tools do
     with_spec(run, fn spec ->
-      if summary == "" do
-        {:error, "Give the plan a summary."}
-      else
-        attrs = %{tasks: ""}
-
-        attrs =
-          if planner_design?(spec.design),
-            do: Map.put(attrs, :design, "#{@approach}\n\n#{summary}\n\n#{approach}" |> finish()),
-            else: attrs
-
-        write(spec, attrs, "Plan created. Now add its tasks with add_tasks.")
-      end
-    end)
-  end
-
-  defp apply_tool("add_tasks", args, run) do
-    with_spec(run, fn spec ->
-      {preamble, blocks} = checklist(spec.tasks)
-
-      # No two tasks share a title (a run finds its tasks by it): a repeat gets a count.
-      new =
-        Planner.tasks(args["tasks"])
-        |> Enum.map(&task_block/1)
-        |> Spec.unique_titles(Enum.map(blocks, & &1.title))
-
-      at = if is_integer(args["after"]), do: args["after"] |> max(0) |> min(length(blocks))
-
-      cond do
-        new == [] ->
-          {:error, "Give each task a title."}
-
-        length(blocks) + length(new) > @max_tasks ->
-          {:error, "A plan holds at most #{@max_tasks} tasks. Merge small ones instead."}
-
-        true ->
-          blocks =
-            if at, do: Enum.take(blocks, at) ++ new ++ Enum.drop(blocks, at), else: blocks ++ new
-
-          write(spec, %{tasks: Spec.render_blocks(preamble, blocks)}, "Added.")
-      end
-    end)
-  end
-
-  defp apply_tool("update_task", args, run) do
-    with_spec(run, fn spec ->
-      {preamble, blocks} = checklist(spec.tasks)
-      number = args["number"]
-
-      case is_integer(number) && number >= 1 && Enum.at(blocks, number - 1) do
-        block when is_map(block) ->
-          # Only what's given changes; the rest, maybe the person's edits, stays.
-          changes =
-            %{
-              title: Text.text(args["title"]) != "" && Text.text(args["title"]),
-              objective: is_binary(args["objective"]) && Text.text(args["objective"]),
-              details: is_list(args["details"]) && Text.lines(args["details"]),
-              verify: is_list(args["verify"]) && Text.lines(args["verify"]) |> Enum.take(6),
-              agent: is_binary(args["agent"]) && Text.text(args["agent"]),
-              model: is_binary(args["model"]) && task_model(args["model"]),
-              requirements:
-                is_list(args["requirements"]) && Text.lines(args["requirements"]) |> Enum.take(8)
-            }
-            |> Map.reject(fn {_, v} -> v == false end)
-
-          # Renamed to another task's title, it gets a count.
-          others = for {b, i} <- Enum.with_index(blocks, 1), i != number, do: b.title
-          block = Spec.edit_block(block, changes)
-          title = Spec.unique_title(block.title, others)
-          block = if title == block.title, do: block, else: Spec.edit_block(block, %{title: title})
-          blocks = List.replace_at(blocks, number - 1, block)
-          write(spec, %{tasks: Spec.render_blocks(preamble, blocks)}, "Changed task #{number}.")
-
-        _ ->
-          {:error, "There's no task #{inspect(number)}. #{describe(spec)}"}
-      end
-    end)
-  end
-
-  defp apply_tool("remove_tasks", args, run) do
-    with_spec(run, fn spec ->
-      {preamble, blocks} = checklist(spec.tasks)
-      numbers = for n <- List.wrap(args["numbers"]), is_integer(n), do: n
-
-      kept = for {block, i} <- Enum.with_index(blocks, 1), i not in numbers, do: block
-
-      if length(kept) == length(blocks) do
-        {:error, "None of those tasks exist. #{describe(spec)}"}
-      else
-        tasks = if kept == [], do: "", else: Spec.render_blocks(preamble, kept)
-        write(spec, %{tasks: tasks}, "Removed.")
-      end
+      if run.status == "draft" and SpecDoc.approved?(spec, "tasks"),
+        do:
+          {:error,
+           "The tasks were approved on the Spec page, so the plan can't change until they're " <>
+             "reopened there. Say what you'd change in your reply and end your turn."},
+        else: write_tool(name, args, spec)
     end)
   end
 
@@ -656,6 +573,103 @@ defmodule Factory.PlanTools do
           "They'll be shown when your turn ends. End it now with a short message."}}
   end
 
+  defp write_tool("create_plan", args, spec) do
+    summary = Text.text(args["summary"])
+    approach = Text.text(args["approach"])
+
+    if summary == "" do
+      {:error, "Give the plan a summary."}
+    else
+      attrs = %{tasks: ""}
+
+      attrs =
+        if planner_design?(spec.design),
+          do: Map.put(attrs, :design, "#{@approach}\n\n#{summary}\n\n#{approach}" |> finish()),
+          else: attrs
+
+      write(spec, attrs, "Plan created. Now add its tasks with add_tasks.")
+    end
+  end
+
+  defp write_tool("add_tasks", args, spec) do
+    {preamble, blocks} = checklist(spec.tasks)
+
+    # No two tasks share a title (a run finds its tasks by it): a repeat gets a count.
+    new =
+      Planner.tasks(args["tasks"])
+      |> Enum.map(&task_block/1)
+      |> Spec.unique_titles(Enum.map(blocks, & &1.title))
+
+    at = if is_integer(args["after"]), do: args["after"] |> max(0) |> min(length(blocks))
+
+    cond do
+      new == [] ->
+        {:error, "Give each task a title."}
+
+      length(blocks) + length(new) > @max_tasks ->
+        {:error, "A plan holds at most #{@max_tasks} tasks. Merge small ones instead."}
+
+      true ->
+        blocks =
+          if at, do: Enum.take(blocks, at) ++ new ++ Enum.drop(blocks, at), else: blocks ++ new
+
+        write(spec, %{tasks: Spec.render_blocks(preamble, blocks)}, "Added.")
+    end
+  end
+
+  defp write_tool("update_task", args, spec) do
+    {preamble, blocks} = checklist(spec.tasks)
+    number = args["number"]
+
+    case is_integer(number) && number >= 1 && Enum.at(blocks, number - 1) do
+      block when is_map(block) ->
+        # Only what's given changes; the rest, maybe the person's edits, stays.
+        changes =
+          %{
+            title: Text.text(args["title"]) != "" && Text.text(args["title"]),
+            objective: is_binary(args["objective"]) && Text.text(args["objective"]),
+            details: is_list(args["details"]) && Text.lines(args["details"]),
+            verify: is_list(args["verify"]) && Text.lines(args["verify"]) |> Enum.take(6),
+            agent: is_binary(args["agent"]) && Text.text(args["agent"]),
+            model: is_binary(args["model"]) && task_model(args["model"]),
+            requirements:
+              is_list(args["requirements"]) && Text.lines(args["requirements"]) |> Enum.take(8)
+          }
+          |> Map.reject(fn {_, v} -> v == false end)
+
+        # Renamed to another task's title, it gets a count.
+        others = for {b, i} <- Enum.with_index(blocks, 1), i != number, do: b.title
+        edited = Spec.edit_block(block, changes)
+        title = Spec.unique_title(edited.title, others)
+
+        edited =
+          if title == edited.title, do: edited, else: Spec.edit_block(edited, %{title: title})
+
+        blocks = List.replace_at(blocks, number - 1, edited)
+
+        write(spec, %{tasks: Spec.render_blocks(preamble, blocks)}, "Changed task #{number}.", %{
+          block.title => edited.title
+        })
+
+      _ ->
+        {:error, "There's no task #{inspect(number)}. #{describe(spec)}"}
+    end
+  end
+
+  defp write_tool("remove_tasks", args, spec) do
+    {preamble, blocks} = checklist(spec.tasks)
+    numbers = for n <- List.wrap(args["numbers"]), is_integer(n), do: n
+
+    kept = for {block, i} <- Enum.with_index(blocks, 1), i not in numbers, do: block
+
+    if length(kept) == length(blocks) do
+      {:error, "None of those tasks exist. #{describe(spec)}"}
+    else
+      tasks = if kept == [], do: "", else: Spec.render_blocks(preamble, kept)
+      write(spec, %{tasks: tasks}, "Removed.")
+    end
+  end
+
   defp questions(args) do
     for q <- List.wrap(args["questions"]),
         is_map(q),
@@ -666,9 +680,13 @@ defmodule Factory.PlanTools do
     |> Enum.take(5)
   end
 
-  defp write(spec, attrs, done) do
-    case Specs.update_spec(spec, attrs) do
-      {:ok, spec} -> {:ok, {:changed, done <> " " <> describe(spec)}}
+  # The queue follows the tasks: a renamed one (`renames`, old title => new) keeps its
+  # place, and removed ones leave it (`Factory.Specs.follow_tasks/2`).
+  defp write(spec, attrs, done, renames \\ %{}) do
+    with {:ok, spec} <- Specs.update_spec(spec, attrs),
+         {:ok, spec} <- Specs.follow_tasks(spec, renames) do
+      {:ok, {:changed, done <> " " <> describe(spec)}}
+    else
       {:error, _} -> {:error, "Factory couldn't save that change."}
     end
   end
@@ -699,7 +717,8 @@ defmodule Factory.PlanTools do
   end
 
   # The tasks as checklist blocks. A plain numbered list (from an attached tasks.md) is
-  # turned into a checklist first, so tasks added to it are read back as tasks.
+  # turned into a checklist first, so tasks added to it are read back as tasks; every
+  # part of each task goes with it.
   defp checklist(markdown) do
     {preamble, blocks} = Spec.blocks(markdown || "")
 
@@ -711,7 +730,11 @@ defmodule Factory.PlanTools do
          task_block(
            Planner.task(%{
              "title" => b.title,
+             "objective" => b.objective,
              "details" => b.details,
+             "verify" => b.verify,
+             "agent" => b.agent,
+             "model" => b.model,
              "requirements" => b.requirements
            })
          )

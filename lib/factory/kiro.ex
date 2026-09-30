@@ -134,7 +134,9 @@ defmodule Factory.Kiro do
   `text` only when the session hasn't had it.
 
   The wait ends when the session answers, when it stops, or after the prompt timeout
-  twice over plus a minute (it may first finish another message).
+  twice over plus a minute (it may first finish another message). A step given up on
+  is withdrawn from the session (`Session.withdraw/2`), so Kiro doesn't go on with it;
+  the same happens if the calling process ends.
   """
   def run_step(agent, run_id, text, opts \\ []) do
     dir = workdir(Factory.Runs.get_run(run_id))
@@ -147,12 +149,12 @@ defmodule Factory.Kiro do
     queued =
       locked(key, fn ->
         with {:ok, pid} <- ensure_session(key, dir),
-             {:ok, job} <- safe(fn -> Session.prompt(pid, agent, run_id, text, opts) end),
-             do: {:ok, pid, job}
+             {:ok, _job} <- safe(fn -> Session.prompt(pid, agent, run_id, text, opts) end),
+             do: {:ok, pid}
       end)
 
     case queued do
-      {:ok, pid, job} ->
+      {:ok, pid} ->
         monitor = Process.monitor(pid)
         wait = 2 * config(:prompt_timeout) + 60_000
 
@@ -172,7 +174,7 @@ defmodule Factory.Kiro do
           wait ->
             Process.demonitor(monitor, [:flush])
             # The job is withdrawn, so the session doesn't answer into the void later.
-            safe(fn -> Session.cancel(pid, job) end)
+            Session.withdraw(pid, ref)
             {:error, "#{agent.name} didn't answer within #{div(wait, 60_000)} minutes."}
         end
 
@@ -184,14 +186,19 @@ defmodule Factory.Kiro do
          "#{agent.name}'s Kiro session is working in another project folder. " <>
            "Try again when it's idle."}
 
-      {:error, reason} when is_binary(reason) ->
-        {:error, "Couldn't start Kiro for #{agent.name}: #{reason}"}
-
       {:error, reason} ->
-        {:error, "Couldn't start Kiro for #{agent.name}: #{inspect(reason)}"}
+        {:error, "Couldn't start Kiro for #{agent.name}: #{reason_text(reason)}"}
     end
   end
 
+  # A session says why it couldn't start in words (`Factory.Kiro.Session`); anything else
+  # is shown as it is.
+  defp reason_text(reason) when is_binary(reason), do: reason
+  defp reason_text(reason), do: inspect(reason)
+
+  # The session for `key`, working in `dir`, started if needed. A session working in
+  # another folder (a chat on another project) starts again in `dir` once it's idle (or
+  # has stopped meanwhile); until then `{:error, :busy}`.
   defp ensure_session(key, dir) do
     case Registry.lookup(Factory.Kiro.Registry, key) do
       [] ->
@@ -202,7 +209,7 @@ defmodule Factory.Kiro do
 
       [{pid, _elsewhere}] ->
         # A session that stopped between the lookup and the call counts as idle.
-        if safe(fn -> Session.idle?(pid) end, true) do
+        if Session.idle?(pid) or not Process.alive?(pid) do
           stop_session(key)
           start(key, dir)
         else
@@ -294,7 +301,9 @@ defmodule Factory.Kiro do
   """
   def answer_elicitation(agent, key, action, content \\ %{}) do
     case whereis(session_key(agent)) do
-      nil -> {:error, :gone}
+      nil ->
+        {:error, :gone}
+
       pid ->
         safe(fn -> Session.answer_elicitation(pid, key, action, content) end, {:error, :gone})
     end
@@ -309,12 +318,76 @@ defmodule Factory.Kiro do
   @doc "Asks Kiro one question in a throwaway session and waits for the reply. See `Factory.Kiro.Ask`."
   defdelegate ask(text, opts \\ []), to: Factory.Kiro.Ask, as: :run
 
+  @signed_out "Kiro isn't signed in. Run `kiro-cli login` in a terminal, then try again."
+
+  @doc """
+  Why kiro-cli stopped with exit `code`, in words, from what it wrote to `log`, its own
+  log (the name `open_port/2` gave): not signed in, or else the last error it gave.
+  What it says on any way out (its output closed, its engine slow to stop) isn't a
+  reason. Failing both, the exit code and where the log is.
+  """
+  def stop_reason(log, code) do
+    lines =
+      log
+      |> log_tail()
+      |> String.split(~r/\R/)
+      |> Enum.map(&String.trim/1)
+
+    error =
+      lines
+      |> Enum.filter(&String.starts_with?(&1, "error:"))
+      |> Enum.reject(&(&1 =~ ~r/failed to forward|did not exit within/))
+      |> List.last()
+
+    cond do
+      Enum.any?(lines, &(&1 =~ ~r/not logged in/i)) ->
+        @signed_out
+
+      error ->
+        "Kiro stopped: #{error |> String.replace_prefix("error:", "") |> String.trim()} " <>
+          "(exit code #{code}). Details are in tmp/kiro-logs/#{log}."
+
+      true ->
+        "Kiro stopped unexpectedly (exit code #{code}). Details are in tmp/kiro-logs/#{log}."
+    end
+  end
+
+  @doc "Whether `reason` (`stop_reason/2`) is that Kiro isn't signed in."
+  def signed_out?(reason), do: reason == @signed_out
+
+  @doc """
+  Whether Kiro refused for its usage limit ("You've reached your monthly usage limit"):
+  nothing gets an answer until it resets.
+  """
+  def usage_limited?(reason), do: is_binary(reason) and reason =~ ~r/usage limit/i
+
+  # What kiro-cli wrote to its log, at most the last 64 KB of it.
+  defp log_tail(log) do
+    path = Path.join(config(:log_dir), log)
+
+    with {:ok, %{size: size}} <- File.stat(path),
+         from = max(size - 65_536, 0),
+         {:ok, file} <- File.open(path, [:read, :binary]) do
+      try do
+        case :file.pread(file, from, size - from) do
+          {:ok, data} -> data
+          _ -> ""
+        end
+      after
+        File.close(file)
+      end
+    else
+      _ -> ""
+    end
+  end
+
   @doc """
   Starts `kiro-cli acp --agent-engine v3` in `workdir`, with its stderr going to a
   fresh log in the log folder: `log_name` with the start time before its extension
   (`agent-7.log` → `agent-7-20260930-141500.log`). Older logs of the same name beyond
   `config :factory, :kiro, log_keep` (default 5) are removed (`prune_logs/2`).
-  Messages arrive as `{port, {:data, {:eol | :noeol, text}}}`.
+  `{port, log}`, with the log's name for `stop_reason/2`. Messages arrive as
+  `{port, {:data, {:eol | :noeol, text}}}`.
   """
   def open_port(workdir, log_name) do
     # The logs hold what Kiro was sent, prompts and request headers among it: the
@@ -331,18 +404,30 @@ defmodule Factory.Kiro do
     args = ["acp", "--agent-engine", "v3", "--auth-method", "cli"]
 
     # sh only redirects stderr to the log; exec replaces it with kiro-cli.
-    Port.open({:spawn_executable, "/bin/sh"}, [
-      :binary,
-      :exit_status,
-      {:line, 1_048_576},
-      {:cd, workdir},
-      {:env,
-       [
-         {~c"KIRO_FABRIC_LAUNCH_WORKSPACE", ~c"#{workdir}"},
-         {~c"KIRO_LOG", ~c"#{log}"}
-       ]},
-      {:args, ["-c", ~s(exec "$0" "$@" 2>"$KIRO_LOG"), config(:cli) | args]}
-    ])
+    port =
+      Port.open({:spawn_executable, "/bin/sh"}, [
+        :binary,
+        :exit_status,
+        {:line, 1_048_576},
+        {:cd, workdir},
+        {:env,
+         [
+           {~c"KIRO_FABRIC_LAUNCH_WORKSPACE", ~c"#{workdir}"},
+           {~c"KIRO_LOG", ~c"#{log}"}
+         ] ++ ceiling(workdir)},
+        {:args, ["-c", ~s(exec "$0" "$@" 2>"$KIRO_LOG"), config(:cli) | args]}
+      ])
+
+    {port, Path.basename(log)}
+  end
+
+  # The default workspace is scratch space inside Factory's own folder: git there must
+  # say it isn't a repository, rather than find Factory's, so an agent working from
+  # pasted text never takes Factory's code for the code it's about.
+  defp ceiling(workdir) do
+    if Path.expand(workdir) == Path.expand(config(:workspace)),
+      do: [{~c"GIT_CEILING_DIRECTORIES", ~c"#{Path.dirname(Path.expand(workdir))}"}],
+      else: []
   end
 
   @doc """

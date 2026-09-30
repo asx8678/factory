@@ -118,15 +118,18 @@ defmodule Factory.Sources.Source do
       not File.regular?(Path.expand(config["path"])) ->
         [{"path", "isn't a file on this machine"}]
 
-      match?({:error, _}, Factory.Sources.PageIndex.load(config["path"])) ->
-        {:error, why} = Factory.Sources.PageIndex.load(config["path"])
-        [{"path", why}]
-
-      not blank?(config["document"]) and not File.regular?(Path.expand(config["document"])) ->
-        [{"document", "isn't a file on this machine"}]
-
       true ->
-        []
+        # Read once: a tree can be large.
+        case Factory.Sources.PageIndex.load(config["path"]) do
+          {:error, why} ->
+            [{"path", why}]
+
+          {:ok, _tree} ->
+            if not blank?(config["document"]) and
+                 not File.regular?(Path.expand(config["document"])),
+               do: [{"document", "isn't a file on this machine"}],
+               else: []
+        end
     end
   end
 

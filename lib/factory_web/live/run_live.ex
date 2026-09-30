@@ -6,7 +6,7 @@ defmodule FactoryWeb.RunLive do
   use FactoryWeb, :live_view
   import FactoryWeb.RunParts
   alias Factory.{Agents, Engine, Runs, Specs, Usage}
-  alias FactoryWeb.UsageMeter, as: Fmt
+  alias FactoryWeb.Usage, as: Fmt
   alias FactoryWeb.WorkflowMap
 
   def mount(%{"id" => id}, _session, socket) do
@@ -19,8 +19,8 @@ defmodule FactoryWeb.RunLive do
         if connected?(socket) do
           Runs.subscribe(run.id)
           if run.spec_id, do: Specs.subscribe(run.spec_id)
-          # Agents say when they start and finish, for the workflow map.
-          Agents.subscribe()
+          # The run's agents say when they start and finish, for the workflow map.
+          if workflow = Factory.Workflows.for_run(run), do: Agents.subscribe(workflow.id)
         end
 
         {:ok,
@@ -65,6 +65,17 @@ defmodule FactoryWeb.RunLive do
   def handle_info({:graph_changed}, socket),
     do: {:noreply, assign(socket, steps: Engine.steps(socket.assigns.run))}
 
+  # An agent started, finished or is waiting: its card on the map follows, in place.
+  def handle_info({:agent_activity, agent}, socket) do
+    steps =
+      Enum.map(socket.assigns.steps, fn
+        %{agent: %{id: id}} = step when id == agent.id -> %{step | agent: agent}
+        step -> step
+      end)
+
+    {:noreply, assign(socket, steps: steps)}
+  end
+
   def handle_info(_msg, socket), do: {:noreply, socket}
 
   @doc "Usage figures follow new calls to Kiro (called by FactoryWeb.UsageMeter)."
@@ -75,7 +86,13 @@ defmodule FactoryWeb.RunLive do
 
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} usage={@usage_meter} active_runs={@active_runs} active={:runs}>
+    <Layouts.app
+      flash={@flash}
+      usage={@usage_meter}
+      active_runs={@active_runs}
+      kiro={@kiro}
+      active={:runs}
+    >
       <Layouts.back_link to={~p"/runs"}>Runs</Layouts.back_link>
 
       <div class="mb-8 flex flex-wrap items-start justify-between gap-4">

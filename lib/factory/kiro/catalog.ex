@@ -28,6 +28,16 @@ defmodule Factory.Kiro.Catalog do
   @doc "The error from the last check, if it failed."
   def error, do: get()["error"]
 
+  @doc "Whether the last check, or a Kiro that stopped since, found Kiro signed out."
+  def signed_out?, do: Kiro.signed_out?(error())
+
+  @doc """
+  Whether Kiro refused a prompt for its usage limit, and hasn't answered one since. Kept
+  apart from `error/0`: a check of the models works during a usage limit, as it sends
+  no prompt, so it can't tell.
+  """
+  def limited?, do: get()["limit"] != nil
+
   defp get, do: :persistent_term.get(@key, %{})
 
   @doc "Loads the catalog remembered from the last check. Called at startup."
@@ -45,26 +55,68 @@ defmodule Factory.Kiro.Catalog do
   def check do
     case probe() do
       {:ok, options} ->
-        catalog = %{
-          "models" => options["model"] || [],
-          "modes" => options["mode"] || [],
-          "checked_at" => DateTime.utc_now(:second) |> DateTime.to_iso8601()
-        }
+        catalog =
+          %{
+            "models" => options["model"] || [],
+            "modes" => options["mode"] || [],
+            "checked_at" => DateTime.utc_now(:second) |> DateTime.to_iso8601()
+          }
+          |> Map.merge(Map.take(get(), ["limit", "limited_at"]))
 
         save(catalog)
         {:ok, catalog}
 
       {:error, reason} ->
-        save(
-          Map.merge(get(), %{
-            "error" => reason,
-            "failed_at" => DateTime.utc_now(:second) |> DateTime.to_iso8601()
-          })
-        )
-
+        note_failure(reason)
         Logger.warning("Couldn't check Kiro's models: #{reason}")
         {:error, reason}
     end
+  end
+
+  @doc """
+  Remembers why Kiro couldn't be used, keeping the last good list: a failed check, or
+  a session that found Kiro signed out. Pages show it until a check works again.
+  """
+  def note_failure(reason) do
+    save(
+      Map.merge(get(), %{
+        "error" => reason,
+        "failed_at" => DateTime.utc_now(:second) |> DateTime.to_iso8601()
+      })
+    )
+  end
+
+  @doc "Remembers that Kiro refused a prompt for its usage limit: pages say so until it answers."
+  def note_limit(reason) do
+    save(
+      Map.merge(get(), %{
+        "limit" => reason,
+        "limited_at" => DateTime.utc_now(:second) |> DateTime.to_iso8601()
+      })
+    )
+  end
+
+  @doc "Forgets the usage limit once Kiro has answered a prompt."
+  def clear_limit do
+    if limited?(), do: save(Map.drop(get(), ["limit", "limited_at"]))
+    :ok
+  end
+
+  @doc """
+  Whether the usage limit has reset, in the background: Kiro is asked for one word. Refused,
+  that costs nothing; answered, a fraction of a credit, and the warning goes.
+  """
+  def check_limit_later do
+    Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
+      case Kiro.Ask.run("Reply with the single word OK.", usage: %{source: "other"}) do
+        # Kiro.Ask forgot the limit itself.
+        {:ok, _} ->
+          :ok
+
+        {:error, reason} ->
+          if Kiro.usage_limited?(reason), do: note_limit(reason), else: save(get())
+      end
+    end)
   end
 
   @doc "Checks in the background, e.g. at startup."
@@ -86,14 +138,14 @@ defmodule Factory.Kiro.Catalog do
     workdir = Kiro.config(:workspace)
     File.mkdir_p!(workdir)
     File.mkdir_p!(Kiro.config(:log_dir))
-    port = Kiro.open_port(workdir, "catalog.log")
+    {port, log} = Kiro.open_port(workdir, "catalog.log")
 
     try do
       RPC.request(port, 1, "initialize", %{protocolVersion: 1, clientCapabilities: %{}})
 
-      with {:ok, _} <- await(port, 1, ""),
+      with {:ok, _} <- await(port, 1, log),
            :ok <- RPC.request(port, 2, "session/new", %{cwd: workdir, mcpServers: []}),
-           {:ok, result} <- await(port, 2, "") do
+           {:ok, result} <- await(port, 2, log) do
         options =
           for %{"id" => id, "options" => opts} <- List.wrap(result["configOptions"]),
               id in ["model", "mode"],
@@ -121,23 +173,33 @@ defmodule Factory.Kiro.Catalog do
     end
   end
 
-  # Waits for the reply to request `id`, gathering lines split by the port.
-  defp await(port, id, partial) do
-    receive do
-      {^port, {:data, {:noeol, chunk}}} ->
-        await(port, id, partial <> chunk)
+  # Waits for the reply to request `id`, at most @timeout in all however much else Kiro
+  # sends meanwhile. `log` is this kiro-cli's log, for why it stopped.
+  defp await(port, id, log),
+    do: await(port, id, log, "", System.monotonic_time(:millisecond) + @timeout)
 
-      {^port, {:data, {:eol, chunk}}} ->
-        case RPC.decode(partial <> chunk) do
-          {:ok, %{"id" => ^id, "result" => result}} -> {:ok, result}
-          {:ok, %{"id" => ^id, "error" => error}} -> {:error, RPC.error_message(error)}
-          _ -> await(port, id, "")
+  defp await(port, id, log, buffer, deadline) do
+    receive do
+      {^port, {:data, data}} ->
+        case RPC.read(buffer, data) do
+          {:partial, buffer} ->
+            await(port, id, log, buffer, deadline)
+
+          {:message, %{"id" => ^id, "result" => result}} ->
+            {:ok, result}
+
+          {:message, %{"id" => ^id, "error" => error}} ->
+            {:error, RPC.error_message(error)}
+
+          _ ->
+            await(port, id, log, "", deadline)
         end
 
       {^port, {:exit_status, status}} ->
-        {:error, "kiro-cli stopped (exit #{status}). Is it installed and signed in?"}
+        {:error, Kiro.stop_reason(log, status)}
     after
-      @timeout -> {:error, "Kiro didn't answer within #{div(@timeout, 1000)} seconds."}
+      max(deadline - System.monotonic_time(:millisecond), 0) ->
+        {:error, "Kiro didn't answer within #{div(@timeout, 1000)} seconds."}
     end
   end
 end

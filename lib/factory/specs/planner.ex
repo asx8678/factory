@@ -10,21 +10,28 @@ defmodule Factory.Specs.Planner do
   The first turn's summary of the project is passed to the second, so Kiro doesn't
   start from nothing. Replies are JSON; the parsers keep only what they understand.
   """
-  alias Factory.Text
+  alias Factory.{PromptText, Text}
 
   # The one shape a task has wherever Kiro writes one: suggestions, a run's plan, a chat
   # plan without tools, an improved or drafted task, and `Factory.PlanTools.add_tasks`.
   @task_json ~s|{"title": "<imperative, under 80 characters>", "objective": "<one or two sentences: what is true when it's done>", "details": ["<a step of the approach, in order, naming the files and functions it changes; 1 to 8 items; code and paths in backticks>"], "verify": ["<a check that proves it's done: a command and what it must show, a test that must pass, or what to look at; 1 to 4 items>"], "agent": "<who builds it, from the list>", "model": "<the model to build it with, from the list>", "requirements": ["<requirement number, e.g. 1.2>"]}|
 
   @doc """
-  What Kiro may do in the project while it plans: read anything, and run commands that
-  only look (`Factory.Kiro.Permission.looking?/2`), never change anything.
+  What Kiro may do in the project while it plans, and an agent that only reads in a run
+  (`Factory.Engine`): read anything, and run commands that only look, as
+  `Factory.Kiro.Permission.looking?/2` decides; never change anything. Named exactly,
+  so an agent doesn't spend its turns on commands that are refused.
   """
   def looking_rule do
-    "Don't change any files. You may run commands that only look: `git status` and " <>
-      "`git log`, listing and searching files, a tool's version, or the project's tests " <>
-      "when they run quickly. Factory refuses anything that installs, writes, moves, " <>
-      "deletes or commits."
+    "Don't change any files. You may run commands that only look: ls, cat, head, tail, " <>
+      "wc, grep, rg, find, sort, uniq, cut and diff; `sed -n '5,9p'` or one " <>
+      "`sed 's/a/b/g'`; git log, diff, show, status, blame and grep; `gh pr view` and " <>
+      "the like; a tool's version; and the project's tests when they run quickly (in a " <>
+      "pull request cloned for review, the person is asked first). Join them with pipes, " <>
+      "`&&` or `;`, with `#` comments as you like. Factory refuses anything else: awk, " <>
+      "xargs, shell loops, `python -c` and the like, writing into a file (`> out`), " <>
+      "`$(…)` and backticks, a setting before the command (`VAR=x cmd`), and anything " <>
+      "that installs, writes, moves, deletes or commits."
   end
 
   @doc "The task shape Kiro is asked for, as JSON with placeholders."
@@ -45,19 +52,34 @@ defmodule Factory.Specs.Planner do
         %{
           "title" => String.slice(title, 0, 200),
           "objective" =>
-            t["objective"] |> Text.text() |> String.replace(~r/\s*\R\s*/u, " ") |> String.slice(0, 500),
+            t["objective"]
+            |> Text.text()
+            |> String.replace(~r/\s*\R\s*/u, " ")
+            |> String.slice(0, 500),
           # Only text: a number among the details is noise, unlike a requirement's "1.2".
           "details" =>
-            t["details"] |> List.wrap() |> Enum.filter(&is_binary/1) |> Text.lines() |> Enum.take(12),
+            t["details"]
+            |> List.wrap()
+            |> Enum.filter(&is_binary/1)
+            |> Text.lines()
+            |> Enum.take(12),
           "verify" =>
-            t["verify"] |> List.wrap() |> Enum.filter(&is_binary/1) |> Text.lines() |> Enum.take(6),
+            t["verify"]
+            |> List.wrap()
+            |> Enum.filter(&is_binary/1)
+            |> Text.lines()
+            |> Enum.take(6),
           "agent" =>
             if(is_binary(t["agent"]) and String.trim(t["agent"]) != "",
               do: String.trim(t["agent"])
             ),
           "model" => if(t["model"] in Factory.Kiro.task_models(), do: t["model"]),
           "requirements" =>
-            t["requirements"] |> List.wrap() |> Enum.map(&to_string/1) |> Text.lines() |> Enum.take(8)
+            t["requirements"]
+            |> List.wrap()
+            |> Enum.map(&to_string/1)
+            |> Text.lines()
+            |> Enum.take(8)
         }
     end
   end
@@ -406,10 +428,21 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
   `chat_prompt/5` in two parts for a planner's own Kiro session: `{brief, ask}`, the
   spec files and the rest. The session sends the brief only when it hasn't yet.
   """
-  def chat_prompt_parts(name, requests, files, current, action \\ nil, job \\ nil, agents \\ []),
-    do:
-      {spec_text(files),
-       name |> chat_prompt(requests, [], current, action, job, agents) |> String.trim_trailing()}
+  def chat_prompt_parts(
+        name,
+        requests,
+        files,
+        current,
+        action \\ nil,
+        job \\ nil,
+        agents \\ [],
+        mode_line \\ nil
+      ),
+      do:
+        {spec_text(files),
+         name
+         |> chat_prompt(requests, [], current, action, job, agents, mode_line)
+         |> String.trim_trailing()}
 
   @doc """
   Prompt for planning in a chat: the planner reads the project, rethinks how the
@@ -428,7 +461,16 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
   "review", the planner (the Scout) finds a pull request or branch and plans what to
   check in it, not changes to make.
   """
-  def chat_prompt(name, requests, files, current, action \\ nil, job \\ nil, agents \\ []) do
+  def chat_prompt(
+        name,
+        requests,
+        files,
+        current,
+        action \\ nil,
+        job \\ nil,
+        agents \\ [],
+        mode_line \\ nil
+      ) do
     asked = requests |> Enum.with_index(1) |> Enum.map_join("\n\n", fn {r, i} -> "#{i}. #{r}" end)
 
     current =
@@ -441,6 +483,7 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
     """
     <task-planning step="#{step(mode)}">
     You are #{name}, the planner in a software factory. #{about(job)} #{looking_rule()}
+    #{mode_line}
 
     #{String.trim(instructions(mode, job, agents))}
 
@@ -464,6 +507,11 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
     do:
       "The person wants a change to the project in the current folder reviewed: a pull " <>
         "request, or a branch."
+
+  defp about("incident"),
+    do:
+      "The person has something to troubleshoot: an error message, a stack trace, logs, " <>
+        "a failing pipeline or something misbehaving."
 
   defp about(_job),
     do: "The person is chatting with you about a change to the project in the current folder."
@@ -513,7 +561,78 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
     """
   end
 
+  defp instructions(nil, "incident", _agents) do
+    """
+    You're the Triage Lead. Work out what this is and how to troubleshoot it, the way an \
+    experienced incident lead would in the first minutes, in this order:
+
+    1. Note the mode, stated above. With no repository there's no code: work from what \
+    the person gave, and never take the folder you're in (or anything above it) for the \
+    code. With a repository, the code is the folder you're in.
+    2. Work out what they gave: a single error message, a stack trace, logs (Grafana, \
+    Loki, Prometheus, Application Insights), a failing Azure DevOps pipeline or release, \
+    an alert or metric, or a description in words.
+    3. Work out which system it comes from: the product, framework or service that \
+    raises it (codes and prefixes often say: ORA-, AADSTS, HTTP status, exception \
+    names), their own application, the environment. With a repository, search it for \
+    the fixed part of the message to see whether it's raised in their code.
+    4. Ask only what changes the plan, with ask_user, 1 to 4 short questions with \
+    options: which system or environment when it can't be told; whether the code is in \
+    a repository they can give (then they choose "With the code" above the chat), when \
+    the error points into their own code and there's none; when it started, when that \
+    matters. When you can tell, decide yourself and say what you assumed.
+    5. If it isn't something to troubleshoot (a feature request, or a bug they want \
+    changed in their code right away), say which Factory workflow fits better (Fix a \
+    bug, Build a feature, Review a PR) and why, and plan nothing.
+    6. Decide the track: a **quick check** for an error message or a short trace with \
+    little else (what it means, the likely cause here, the fix), or a **full \
+    investigation** for logs over time, metrics, a pipeline run or an outage.
+    7. Write the plan with the factory tools: create_plan with a one-sentence summary \
+    (the symptom and the leading theory) and the approach, which starts with **Track:**, \
+    **System:** and **Mode:** lines, then the error signatures S1… (each error's fixed \
+    part with the product and version, and nothing that identifies the company, its \
+    systems or its people: no hostnames, IPs, internal URLs, IDs, names, tokens or \
+    keys, since the agents that search the web see only these), and the hypotheses \
+    H1… with why each is plausible. Then add_tasks, one per check, most likely and most \
+    damaging first; a quick check is two or three. You plan checks, not changes: \
+    nothing in the plan edits code.
+       - title: the check, e.g. "Look up what ORA-12514 means and its known causes", or \
+    "Check whether the connection pool runs out at the first timeout".
+       - objective: what would confirm it, and what would rule it out.
+       - details: where to look: the signatures to research on the web, the log lines \
+    or queries, the files and functions, the commits.
+       - verify: the evidence that settles it: a source, a log line or count, a line of \
+    code.
+       - model: #{model_guide()}
+    8. Check it: call get_plan and read it as the Error Researcher, the Evidence \
+    Analyst and the Code Investigator who'll follow it.
+
+    End with a short reply to the person, 2 to 4 sentences: what you think it is, the \
+    track you chose and why, and anything that would help most if they have it (the \
+    exact query or export). Don't list the tasks: Factory shows them.
+    """
+  end
+
+  # Scope and Refine are written for a plan of work to build. A review's plan and an
+  # investigation's are checks, so they're told how to read that first.
+  defp instructions(mode, job, agents)
+       when mode in [:scope, :refine] and job in ["review", "incident"],
+       do: checks_note(job) <> "\n\n" <> instructions(mode, agents)
+
   defp instructions(mode, _job, agents), do: instructions(mode, agents)
+
+  defp checks_note("review"),
+    do:
+      "This plan is a review: its tasks are checks of a change, not changes to build. Read " <>
+        "\"built\" as \"checked\" below, and judge whether the checks cover the change's " <>
+        "risks, in the order a careful reviewer would take them. Nothing in it may edit code."
+
+  defp checks_note("incident"),
+    do:
+      "This plan is an investigation: its tasks are checks that confirm or rule out causes, " <>
+        "not changes to build. Read \"built\" as \"checked\" below, and judge whether the " <>
+        "checks cover the likely causes, with what the person gave and the mode and track the " <>
+        "approach states. Nothing in it may edit code."
 
   defp instructions(nil, agents) do
     """
@@ -741,12 +860,6 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
     end
   end
 
-  defp spec_text(files) do
-    Enum.map_join(files, "\n\n", fn {name, text} ->
-      ~s(<file name="#{name}">\n#{text}\n</file>)
-    end)
-  end
-
   @doc "Reads turn 1's reply: `{:ok, %{\"project\" => …, \"questions\" => […]}}`."
   def parse_questions(reply) do
     with {:ok, data} <- decode(reply) do
@@ -865,9 +978,11 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
   end
 
   defp decode(reply) do
-    case Text.decode_json(reply) do
+    case PromptText.json_object(reply) do
       {:ok, data} -> {:ok, data}
       :error -> {:error, "Kiro's reply wasn't something Factory could read."}
     end
   end
+
+  defp spec_text(files), do: PromptText.files(files)
 end

@@ -60,11 +60,11 @@ defmodule Factory.Chat do
           say(run, reason)
 
         planner = planning?(run, agent, text) ->
-          run = if files != [], do: Factory.ChatPlanner.keep_files(run, files), else: run
+          run = keep(run, files, &Factory.ChatPlanner.keep_files/2)
           Factory.ChatPlanner.start(run, planner)
 
         true ->
-          run = if files != [], do: attach(run, files), else: run
+          run = keep(run, files, &attach/2)
 
           cond do
             text == "" -> :ok
@@ -114,15 +114,78 @@ defmodule Factory.Chat do
   Runs a button action shown under a factory message: `:ok`, or `{:error, :gone}` when
   the run no longer exists.
   """
-  def action(%Run{} = run, "start") do
+  def action(%Run{} = run, "start"), do: act(run, "/run")
+  # Under a run paused at its credit limit (`Factory.Engine.credit_limit/0`).
+  def action(%Run{} = run, "continue"), do: act(run, "/resume")
+
+  defp act(run, text) do
     case Runs.get_run(run.id) do
       nil ->
         {:error, :gone}
 
       run ->
-        command(run, "/run")
+        command(run, text)
         :ok
     end
+  end
+
+  @doc """
+  Fix it, under a finished troubleshooting run: a new chat on the Fix a bug workflow,
+  in the same repository, asked to fix what the report found. With a repository its
+  planner starts on it; without one, the chat says to choose the project folder first.
+  Returns `{:ok, run}` with the new chat's run.
+  """
+  def fix_it(%Run{} = run) do
+    run = Runs.get_run(run.id)
+    report = report(run)
+    dir = String.trim(run.settings["project_dir"] || "")
+    bug = Workflows.standard("bug")
+
+    {:ok, fix} = Runs.create_run("Fix: " <> run.title)
+
+    {:ok, fix} =
+      Runs.update_run(fix, %{
+        settings: %{
+          "workflow_id" => bug.id,
+          "base_spec_ids" => bug.base_spec_ids,
+          "project_dir" => if(dir == "", do: nil, else: dir)
+        }
+      })
+
+    request = "Fix this, following the troubleshooting report below.\n\n" <> report
+
+    if dir == "" do
+      Runs.post(fix, "user", request)
+
+      say(
+        fix,
+        "Choose the project folder above, where the code to fix is, then send a message " <>
+          "(\"plan it\") and the planner plans the fix from the report."
+      )
+    else
+      handle(fix, request)
+    end
+
+    {:ok, Runs.get_run(fix.id)}
+  end
+
+  # The troubleshooting report: what the workflow's last step handed over, or, when the
+  # workflow's agents were made again since the run, what the agent of that name wrote
+  # last in it.
+  defp report(run) do
+    last = run |> Engine.steps() |> Enum.reject(&(&1.kind == "action")) |> List.last()
+
+    (last && (run.progress["outputs"][last.id] || last_reply(run, last.name))) ||
+      run.description || run.title
+  end
+
+  defp last_reply(run, author) do
+    run.id
+    |> Runs.list_messages()
+    |> Enum.reverse()
+    |> Enum.find_value(fn m ->
+      m.author == author and not Map.has_key?(m.meta || %{}, "elicitation") and m.body
+    end)
   end
 
   @doc """
@@ -136,6 +199,38 @@ defmodule Factory.Chat do
   end
 
   # Files dropped into the chat go into the run's spec, which the run then follows.
+  # Files dropped into a troubleshooting chat are evidence (logs, exports), kept whole
+  # for the agents to search (`Factory.Evidence`); elsewhere they go into the spec.
+  defp keep(run, [], _into_spec), do: run
+
+  defp keep(run, files, into_spec) do
+    workflow = Workflows.for_run(run)
+
+    if workflow && Workflows.kind(workflow) == "incident" do
+      names = Factory.Evidence.save(run, files)
+
+      # The user names they show, learned once for what the agents that search the web
+      # are given (`Factory.Engine`), rather than from the files for each prompt.
+      users = Factory.Redact.users_in(Enum.map(files, &elem(&1, 1)))
+      run = Runs.get_run(run.id)
+
+      {:ok, run} =
+        Runs.update_run(run, %{
+          settings:
+            Map.update(run.settings || %{}, "evidence_users", users, &Enum.uniq(&1 ++ users))
+        })
+
+      say(
+        run,
+        "Kept #{Enum.join(names, ", ")} for the agents to search, whole, however big."
+      )
+
+      run
+    else
+      into_spec.(run, files)
+    end
+  end
+
   defp attach(run, files) do
     with {:ok, spec} <- Specs.ensure_for_run(run),
          {:ok, _spec} <- Specs.add_files(spec, files) do
@@ -423,6 +518,10 @@ defmodule Factory.Chat do
           question
       end
 
+    prompt_agent(run, agent, text)
+  end
+
+  defp prompt_agent(run, agent, text) do
     tagged(agent, fn ->
       case Kiro.prompt(agent, run.id, text) do
         {:ok, _ref} ->
@@ -431,14 +530,52 @@ defmodule Factory.Chat do
         {:error, :busy} ->
           say(run, "#{agent.name} is still answering. Try again when it's idle.")
 
-        {:error, reason} when is_binary(reason) ->
-          say(run, "Couldn't start Kiro for #{agent.name}: #{reason}")
-
         {:error, reason} ->
-          say(run, "Couldn't start Kiro for #{agent.name}: #{inspect(reason)}")
+          say(run, "Couldn't start Kiro for #{agent.name}: #{reason_text(reason)}")
       end
     end)
   end
+
+  @doc """
+  The Try again under a failure (`Factory.ChatPlanner`, `Factory.Kiro.Session`): what
+  Kiro couldn't take goes again, once whatever stopped it is fixed (signed out, say).
+  The plan is planned again the same way; a message goes to its agent again. Once per
+  failure: the button goes when it's used.
+  """
+  def retry(%Run{} = run, %{meta: %{"retry" => %{} = retry}} = message) do
+    if message.run_id == run.id and "retry" in message.actions and !message.meta["retried"] do
+      Runs.update_message_meta(message.id, &Map.put(&1, "retried", true))
+
+      case retry do
+        %{"kind" => "plan"} ->
+          case planner_for(run) do
+            nil -> say(run, "This chat has no planner to plan it.")
+            planner -> Factory.ChatPlanner.start(run, planner, plan_again(retry["action"]))
+          end
+
+        %{"kind" => "ask", "agent_id" => id, "text" => text} when is_binary(text) ->
+          case Agents.get_agent(id) do
+            nil -> say(run, "That agent is gone, so there's nobody to send it to.")
+            agent -> prompt_agent(run, agent, text)
+          end
+
+        _ ->
+          :ok
+      end
+    end
+
+    :ok
+  end
+
+  def retry(_run, _message), do: :ok
+
+  defp plan_again("scope"), do: [action: :scope]
+  defp plan_again("refine"), do: [action: :refine]
+  defp plan_again(_), do: []
+
+  # Reasons come as sentences; anything else as Elixir writes it.
+  defp reason_text(reason) when is_binary(reason), do: reason
+  defp reason_text(reason), do: inspect(reason)
 
   defp agent_line(a), do: "• #{a.name}: #{a.model}, #{a.kiro_mode} mode"
 
@@ -515,13 +652,22 @@ defmodule Factory.Chat do
 
     [
       done != [] && " Done: #{Enum.join(done, ", ")}.",
-      now && if(p["error"], do: " Stopped at #{now}: #{p["error"]}", else: " Now: #{now}.")
+      stopped(now, p["error"])
     ]
     |> Enum.filter(& &1)
     |> Enum.join()
   end
 
+  # A run paused before it started (Factory restarted while it was queued).
+  defp progress(%Run{progress: %{"error" => error}}) when is_binary(error),
+    do: stopped(nil, error)
+
   defp progress(_run), do: ""
+
+  defp stopped(nil, nil), do: nil
+  defp stopped(nil, error), do: " Stopped: #{error}"
+  defp stopped(now, nil), do: " Now: #{now}."
+  defp stopped(now, error), do: " Stopped at #{now}: #{error}"
 
   defp names(files), do: files |> Enum.map(&elem(&1, 0)) |> Enum.join(", ")
   defp plural([_], word), do: word

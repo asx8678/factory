@@ -16,9 +16,11 @@ defmodule Factory.ChatPlanner do
   (`{:agent_stream, …}` on `"run:ID"`). If Kiro can't reach the tools, the planner
   replies with the whole plan as JSON, which replaces the tasks as before.
   """
+  import Ecto.Query, only: [from: 2]
   alias Factory.{Agents, Kiro, PlanTools, Repo, Runs, Specs, Text}
   alias Factory.Runs.Run
   alias Factory.Specs.{Planner, TaskCheck}
+  alias Factory.Specs.Spec, as: SpecDoc
 
   @doc """
   Whether a chat message is a plan review asked with the Review plan button, which
@@ -93,7 +95,35 @@ defmodule Factory.ChatPlanner do
         job = workflow && Factory.Workflows.kind(workflow)
         # Who can build: each task is given to one of them, with its model.
         agents = Factory.Workflows.builders(workflow)
-        prompt_args = [planner.name, requests, base ++ files, current, action, job, agents]
+        # Troubleshooting says which mode it's in: a repository, or none.
+        mode_line =
+          job == "incident" &&
+            Enum.join(
+              Enum.reject(
+                [
+                  Factory.Runs.Troubleshooting.mode_line(
+                    case String.trim(run.settings["project_dir"] || "") do
+                      "" -> nil
+                      dir -> dir
+                    end
+                  ),
+                  Factory.Evidence.describe(run)
+                ],
+                &is_nil/1
+              ),
+              "\n"
+            )
+
+        prompt_args = [
+          planner.name,
+          requests,
+          base ++ files,
+          current,
+          action,
+          job,
+          agents,
+          mode_line || nil
+        ]
 
         prompt = %{
           full: apply(Planner, :chat_prompt, prompt_args),
@@ -117,11 +147,16 @@ defmodule Factory.ChatPlanner do
   # a review, what it's reviewing (the pull request, the branch…), never "planning".
   defp doing(:scope, _job, _requests, title), do: "Checking the scope of “#{title}”"
   defp doing(:refine, "review", _requests, title), do: "Reworking the review of “#{title}”"
+
+  defp doing(:refine, "incident", _requests, title),
+    do: "Reworking the investigation of “#{title}”"
+
   defp doing(:refine, _job, _requests, title), do: "Refining “#{title}”"
 
   defp doing(_mode, "review", requests, title),
     do: Enum.find_value(Enum.reverse(requests), &review_target/1) || "Reviewing “#{title}”"
 
+  defp doing(_mode, "incident", _requests, title), do: "Triaging “#{title}”"
   defp doing(_mode, _job, _requests, title), do: "Planning “#{title}”"
 
   # What a review request names, as the chat's buttons write it or as typed.
@@ -161,15 +196,20 @@ defmodule Factory.ChatPlanner do
   end
 
   defp start_request(run, planner, files, prompt, mode) do
-    dir = run.settings["project_dir"] || Kiro.config(:workspace)
+    dir = Kiro.workdir(run)
     generation = run.planner_generation
-    prompt = Map.put(prompt, :model, planning_model(planner))
+    # What the live bubble needs that holds for the whole pass, read once.
+    progress = progress(run)
+    show = &show_progress(run.id, planner, &1, progress)
+
+    prompt =
+      prompt
+      |> Map.put(:model, planning_model(planner))
+      |> Map.put(:on_tool, &show.(Planner.describe_tool(&1, dir)))
 
     Agents.set_activity(planner.id, "running", prompt.doing)
 
-    show_progress(
-      run.id,
-      planner,
+    show.(
       if(String.starts_with?(prompt.doing, "Planning"),
         do: "Reading the project…",
         else: prompt.doing <> "…"
@@ -180,19 +220,25 @@ defmodule Factory.ChatPlanner do
       # On the planner's own Kiro session, which keeps the conversation between
       # messages; a one-off session when that one is busy in another folder.
       result =
-        case plan_in_session(run, planner, prompt, generation, dir, mode) do
+        case plan_in_session(run, planner, prompt, generation, mode) do
           {:error, :busy} -> plan_once(run, planner, prompt, generation, dir, mode)
           result -> result
         end
 
-      result = with {:ok, r} <- result, do: {:ok, Map.put(r, :check, mode == :scope)}
+      result =
+        case result do
+          {:ok, r} -> {:ok, Map.put(r, :check, mode == :scope)}
+          # A failure remembers what was asked, for its Try again.
+          {:error, reason} -> {:error, reason, mode}
+        end
+
       finish(run.id, generation, planner, files, result)
     end)
 
     :ok
   end
 
-  defp plan_in_session(run, planner, prompt, generation, dir, mode) do
+  defp plan_in_session(run, planner, prompt, generation, mode) do
     {brief, ask} = prompt.parts
 
     brief =
@@ -210,7 +256,7 @@ defmodule Factory.ChatPlanner do
         stream: false,
         activity: prompt.doing,
         model: prompt.model,
-        on_tool: &show_progress(run.id, planner, Planner.describe_tool(&1, dir)),
+        on_tool: prompt.on_tool,
         planning: %{
           generation: generation,
           notify: self(),
@@ -235,9 +281,11 @@ defmodule Factory.ChatPlanner do
              workdir: dir,
              model: prompt.model,
              allow: ["read", "search", "look"],
+             # A troubleshooting run's attached files are there to read.
+             roots: [Factory.Evidence.dir(run)],
              mcp_servers: [PlanTools.mcp_server(token)],
              reply: :last,
-             on_tool: &show_progress(run.id, planner, Planner.describe_tool(&1, dir)),
+             on_tool: prompt.on_tool,
              usage: %{source: "plan_chat", run_id: run.id, agent_id: planner.id}
            ) do
       read_result(reply, generation, mode == :scope)
@@ -340,10 +388,53 @@ defmodule Factory.ChatPlanner do
   end
 
   # The plan replaces the spec's tasks: the planner rethinks it from everything asked.
+  # Tasks approved on the Spec page stay as they are, as with the plan tools.
   defp finish(run, planner, files, {:ok, %{reply: reply, tasks: tasks}}) do
+    case Specs.ensure_for_run(run) do
+      {:ok, spec} ->
+        if SpecDoc.approved?(spec, "tasks") do
+          Agents.set_activity(planner.id, "idle", nil)
+
+          post(
+            run,
+            planner,
+            Text.or_default(reply, "Here's how I'd do it.") <>
+              "\n\nThe tasks are approved on the Spec page, so I left them as they are. " <>
+              "Reopen them there to change them.",
+            %{}
+          )
+        else
+          save_plan(run, planner, files, spec, reply, tasks)
+        end
+
+      {:error, _} ->
+        finish(run, planner, files, {:error, "the plan couldn't be saved."})
+    end
+  end
+
+  defp finish(run, planner, files, {:error, reason}),
+    do: finish(run, planner, files, {:error, reason, nil})
+
+  # The chat's Try again (`Factory.Chat.retry/2`) plans again the same way (a scope
+  # check, a refine, or the plan), once whatever stopped it is fixed.
+  defp finish(run, planner, _files, {:error, reason, mode}) do
+    Agents.set_activity(planner.id, "error", reason)
+    hint = if reason =~ ~r/try again/i, do: "", else: " Try again, or say it differently."
+
+    post(
+      run,
+      planner,
+      "I couldn't plan it: #{reason}#{hint}",
+      %{"retry" => %{"kind" => "plan", "action" => mode && to_string(mode)}},
+      ["retry"]
+    )
+  end
+
+  defp save_plan(run, planner, files, spec, reply, tasks) do
     saved =
-      with {:ok, spec} <- Specs.ensure_for_run(run),
-           do: Specs.update_spec(spec, %{tasks: Planner.to_markdown(tasks, 1) <> "\n"})
+      with {:ok, spec} <-
+             Specs.update_spec(spec, %{tasks: Planner.to_markdown(tasks, 1) <> "\n"}),
+           do: Specs.follow_tasks(spec)
 
     case saved do
       {:ok, spec} ->
@@ -365,11 +456,6 @@ defmodule Factory.ChatPlanner do
       {:error, _} ->
         finish(run, planner, files, {:error, "the plan couldn't be saved."})
     end
-  end
-
-  defp finish(run, planner, _files, {:error, reason}) do
-    Agents.set_activity(planner.id, "error", reason)
-    post(run, planner, "I couldn't plan it: #{reason} Try again, or say it differently.", %{})
   end
 
   defp ask(run, planner, reply, questions) do
@@ -408,10 +494,15 @@ defmodule Factory.ChatPlanner do
   Shows in the planner's live bubble what it's doing (`activity`) and the tasks so far,
   read from the run's spec. `planner` needs its `id` and `name`.
   """
-  def show_progress(run_id, planner, activity) do
-    run = Runs.get_run(run_id)
-    review? = match?(%{}, run) and review?(run)
+  def show_progress(run_id, planner, activity),
+    do: show_progress(run_id, planner, activity, progress(Repo.get(Run, run_id)))
 
+  # What the bubble needs that holds while the planner works: whether the run is a
+  # review, and the spec its tasks are in. A pass reads it once, not on every tool call.
+  defp progress(%Run{} = run), do: %{review?: review?(run), spec_id: run.spec_id}
+  defp progress(nil), do: %{review?: false, spec_id: nil}
+
+  defp show_progress(run_id, planner, activity, %{review?: review?, spec_id: spec_id}) do
     # The plan tools report `:writing` as the planner writes the plan.
     activity =
       case activity do
@@ -419,10 +510,12 @@ defmodule Factory.ChatPlanner do
         text -> text
       end
 
+    # Only the tasks' text: they change as the planner writes them.
     tasks =
-      with %{spec_id: id} when is_integer(id) <- run,
-           %{} = spec <- Specs.get_spec(id),
-           [_ | _] = tasks <- Specs.tasks(spec) do
+      with id when is_integer(id) <- spec_id,
+           text when is_binary(text) <-
+             Repo.one(from s in SpecDoc, where: s.id == ^id, select: s.tasks),
+           [_ | _] = tasks <- Factory.Spec.parse_tasks(text) do
         "\n\n**#{if review?, do: "Checks so far", else: "Tasks so far"}**\n\n" <>
           (tasks
            |> Enum.with_index(1)
@@ -436,7 +529,8 @@ defmodule Factory.ChatPlanner do
     Phoenix.PubSub.broadcast(
       Factory.PubSub,
       "run:#{run_id}",
-      {:agent_stream, %{agent_id: planner.id, name: planner.name, text: text, activity: activity}}
+      {:agent_stream,
+       %{run_id: run_id, agent_id: planner.id, name: planner.name, text: text, activity: activity}}
     )
   end
 
@@ -446,5 +540,4 @@ defmodule Factory.ChatPlanner do
       workflow -> Factory.Workflows.kind(workflow) == "review"
     end
   end
-
 end

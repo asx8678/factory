@@ -63,15 +63,15 @@ defmodule Factory.Runs.Messages do
   question's key: its JSON schema's `properties`, or an empty map when it isn't there.
   """
   def elicitation_schema(run_id, key) do
-    message =
-      Repo.one(
-        from m in Message,
-          where:
-            m.run_id == ^run_id and fragment("?->'elicitation'->>'key'", m.meta) == ^key,
-          limit: 1
-      )
-
-    (message && get_in(message.meta, ["elicitation", "schema", "properties"])) || %{}
+    # The schema comes from another MCP server as it wrote it, so anything odd is none.
+    case Repo.one(
+           from m in Message,
+             where: m.run_id == ^run_id and fragment("?->'elicitation'->>'key'", m.meta) == ^key,
+             limit: 1
+         ) do
+      %Message{meta: %{"elicitation" => %{"schema" => %{"properties" => %{} = props}}}} -> props
+      _ -> %{}
+    end
   end
 
   @doc "The latest message an agent wrote in a run (the planner's, for its scope check), or nil."

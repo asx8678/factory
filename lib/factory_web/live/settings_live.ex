@@ -7,12 +7,17 @@ defmodule FactoryWeb.SettingsLive do
   """
   use FactoryWeb, :live_view
 
-  @tabs [{"general", "General"}, {"models", "Models"}]
+  @tabs [
+    {"general", "General"},
+    {"models", "Models"},
+    {"runs", "Runs"},
+    {"web", "Web searches"}
+  ]
 
   alias Factory.Kiro.Catalog
 
+  # The check's result arrives through FactoryWeb.KiroStatus, as `kiro_checked/2`.
   def mount(_params, _session, socket) do
-    if connected?(socket), do: Catalog.subscribe()
     {:ok, socket |> assign(page_title: "Settings", tabs: @tabs, checking: false) |> catalog()}
   end
 
@@ -21,6 +26,9 @@ defmodule FactoryWeb.SettingsLive do
     verifying = Factory.Prefs.get("verify_model")
 
     assign(socket,
+      names_form:
+        to_form(%{"names" => Enum.join(Factory.Redact.saved_names(), "\n")}, as: :redact),
+      limit_form: limit_form(Factory.Engine.credit_limit()),
       models: Catalog.models() || [],
       modes: Catalog.modes() || [],
       checked_at: Catalog.checked_at(),
@@ -44,14 +52,58 @@ defmodule FactoryWeb.SettingsLive do
     {:noreply, catalog(socket)}
   end
 
+  # The names the agents that search the web never see (Factory.Redact).
+  def handle_event("redact_names", %{"redact" => %{"names" => text}}, socket) do
+    names =
+      text
+      |> String.split(~r/\R/)
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.uniq()
+
+    Factory.Prefs.put("redact_names", names)
+
+    {:noreply,
+     socket
+     |> assign(names_form: to_form(%{"names" => Enum.join(names, "\n")}, as: :redact))
+     |> put_flash(
+       :info,
+       "Saved #{length(names)} #{if length(names) == 1, do: "name", else: "names"}."
+     )}
+  end
+
+  # How many credits a run may use before it pauses to ask (Factory.Engine); 0 is none.
+  def handle_event("credit_limit", %{"limit" => %{"credits" => text}}, socket) do
+    case Float.parse(String.trim(text)) do
+      {n, ""} when n >= 0 ->
+        Factory.Prefs.put("run_credit_limit", n)
+
+        {:noreply,
+         socket
+         |> assign(limit_form: limit_form(n))
+         |> put_flash(
+           :info,
+           if(n == 0,
+             do: "Runs now go on however many credits they use.",
+             else: "Runs now pause at #{FactoryWeb.Usage.credits(n)} credits to ask."
+           )
+         )}
+
+      _ ->
+        {:noreply, put_flash(socket, :error, "The limit is a number of credits, 0 or more.")}
+    end
+  end
+
   # Asks Kiro which models it has; the answer comes back as {:kiro_catalog, _}.
   def handle_event("check_models", _, socket) do
     Catalog.check_later()
     {:noreply, assign(socket, checking: true)}
   end
 
-  def handle_info({:kiro_catalog, _}, socket),
-    do: {:noreply, socket |> assign(checking: false) |> catalog()}
+  def kiro_checked(_catalog, socket), do: socket |> assign(checking: false) |> catalog()
+
+  defp limit_form(n),
+    do: to_form(%{"credits" => FactoryWeb.Usage.credits(n)}, as: :limit)
 
   def handle_params(params, _uri, socket) do
     tab = if params["tab"] in Enum.map(@tabs, &elem(&1, 0)), do: params["tab"], else: "general"
@@ -83,7 +135,13 @@ defmodule FactoryWeb.SettingsLive do
 
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} usage={@usage_meter} active_runs={@active_runs} active={:settings}>
+    <Layouts.app
+      flash={@flash}
+      usage={@usage_meter}
+      active_runs={@active_runs}
+      kiro={@kiro}
+      active={:settings}
+    >
       <Layouts.page_title title="Settings" />
 
       <div class="grid gap-10 md:grid-cols-[12rem_minmax(0,1fr)]">
@@ -244,6 +302,45 @@ defmodule FactoryWeb.SettingsLive do
                     </li>
                   </ul>
                 </details>
+              </section>
+            <% "runs" -> %>
+              <section id="credit-limit">
+                <h2 class="font-medium">Credits a run may use</h2>
+                <p class="mt-0.5 text-sm text-base-content/55">
+                  A run that has used this many credits pauses before its next step and asks
+                  whether to go on; Continue lets it use as many again. It's checked between
+                  steps, so a step that's already working finishes first. 0 means no limit.
+                </p>
+                <.form
+                  for={@limit_form}
+                  id="credit-limit-form"
+                  phx-submit="credit_limit"
+                  class="mt-3 flex items-start gap-2"
+                >
+                  <div class="w-32">
+                    <.input field={@limit_form[:credits]} type="number" min="0" step="0.5" />
+                  </div>
+                  <button id="credit-limit-save" class="btn btn-sm mt-1">Save</button>
+                </.form>
+              </section>
+            <% "web" -> %>
+              <section id="redact-names">
+                <h2 class="font-medium">Names to keep out of web searches</h2>
+                <p class="mt-0.5 text-sm text-base-content/55">
+                  The agents that search the web (the Error Researcher and the Fact Checker) are
+                  never shown these, nor hostnames, IDs or secrets. One per line: your company,
+                  its products, its customers. Each is matched as a whole word, in any case, so
+                  a name that's also a common word is taken out everywhere.
+                </p>
+                <.form for={@names_form} id="redact-names-form" phx-submit="redact_names" class="mt-3">
+                  <.input
+                    field={@names_form[:names]}
+                    type="textarea"
+                    rows="4"
+                    placeholder="Acme Corp\nAcme Orders\nContoso"
+                  />
+                  <button id="redact-names-save" class="btn btn-sm mt-2">Save</button>
+                </.form>
               </section>
             <% _ -> %>
               <dl id="settings-facts" class="divide-y divide-base-300/70">

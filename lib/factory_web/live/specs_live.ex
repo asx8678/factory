@@ -12,12 +12,16 @@ defmodule FactoryWeb.SpecsLive do
 
   def mount(_params, _session, socket) do
     if connected?(socket), do: Specs.subscribe()
-    specs = Specs.list_specs()
+
+    socket =
+      socket
+      |> assign(page_title: "Specs", base: nil, base_form: nil, specs_reload: nil)
+      |> stream_configure(:specs, dom_id: &"spec-#{&1.id}")
+      |> load()
 
     {:ok,
      socket
-     |> assign(page_title: "Specs", specs: specs, adding: specs == [])
-     |> assign(base_specs: Specs.list_base_specs(), base: nil, base_form: nil, used_in: used_in())
+     |> assign(adding: socket.assigns.specs_empty?)
      |> allow_upload(:base_file,
        accept: ~w(.md .markdown .txt),
        max_entries: 1,
@@ -33,14 +37,27 @@ defmodule FactoryWeb.SpecsLive do
      )}
   end
 
-  def handle_info({:specs_changed}, socket),
-    do:
-      {:noreply,
-       assign(socket,
-         specs: Specs.list_specs(),
-         base_specs: Specs.list_base_specs(),
-         used_in: used_in()
-       )}
+  # Every save of any spec says the list changed (each pause in typing in its editor,
+  # too): reload once per short while rather than once per save.
+  def handle_info({:specs_changed}, socket) do
+    if socket.assigns.specs_reload do
+      {:noreply, socket}
+    else
+      {:noreply, assign(socket, specs_reload: Process.send_after(self(), :reload_specs, 250))}
+    end
+  end
+
+  def handle_info(:reload_specs, socket),
+    do: {:noreply, socket |> assign(specs_reload: nil) |> load()}
+
+  defp load(socket) do
+    specs = Specs.list_specs()
+
+    socket
+    |> assign(specs_empty?: specs == [])
+    |> assign(base_specs: Specs.list_base_specs(), used_in: used_in())
+    |> stream(:specs, specs, reset: true)
+  end
 
   # Base specs: written or uploaded in a window, then kept.
 
@@ -115,7 +132,7 @@ defmodule FactoryWeb.SpecsLive do
         &cancel_upload(&2, :files, &1.ref)
       )
 
-    {:noreply, assign(socket, adding: socket.assigns.specs == [])}
+    {:noreply, assign(socket, adding: socket.assigns.specs_empty?)}
   end
 
   # The review box only appears once a file is added, so until it's unticked it's on.
@@ -131,9 +148,12 @@ defmodule FactoryWeb.SpecsLive do
       nil ->
         {:noreply, socket}
 
+      # Gone from the list now; the rest follows with the next reload.
       spec ->
         {:ok, _} = Specs.delete_spec(spec)
-        {:noreply, put_flash(socket, :info, "Deleted #{spec.name}.")}
+
+        {:noreply,
+         socket |> stream_delete(:specs, spec) |> put_flash(:info, "Deleted #{spec.name}.")}
     end
   end
 
@@ -185,7 +205,13 @@ defmodule FactoryWeb.SpecsLive do
 
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} usage={@usage_meter} active_runs={@active_runs} active={:specs}>
+    <Layouts.app
+      flash={@flash}
+      usage={@usage_meter}
+      active_runs={@active_runs}
+      kiro={@kiro}
+      active={:specs}
+    >
       <Layouts.page_title
         title="Specs"
         subtitle="Base specs are the rules every run can follow. Run specs are one run's own requirements, design and tasks."
@@ -194,7 +220,8 @@ defmodule FactoryWeb.SpecsLive do
       <div class="mb-4 flex flex-wrap items-end justify-between gap-3">
         <div>
           <h2 class="flex items-center gap-2 text-lg font-medium">
-            <.icon name="hero-clipboard-document-list" class="size-5 text-primary" /> Run specs
+            <.icon name="hero-clipboard-document-list" class="size-5 text-base-content/50" />
+            Run specs
           </h2>
           <p class="mt-0.5 text-sm text-base-content/60">
             One run each: from its main spec to requirements, design and tasks.
@@ -316,19 +343,19 @@ defmodule FactoryWeb.SpecsLive do
 
         <div class="flex gap-2">
           <button id="create-spec-submit" class="btn btn-primary btn-sm">Create spec</button>
-          <button :if={@specs != []} type="button" phx-click="cancel" class="btn btn-ghost btn-sm">
+          <button :if={!@specs_empty?} type="button" phx-click="cancel" class="btn btn-ghost btn-sm">
             Cancel
           </button>
         </div>
       </.form>
 
-      <p :if={@specs == []} class="max-w-xl text-sm text-base-content/55">
+      <p :if={@specs_empty?} class="max-w-xl text-sm text-base-content/55">
         Each spec has four steps, written in order: the overview (the main spec),
         requirements (what it must do), design (how it's built) and tasks (the
         checklist agents work through).
       </p>
 
-      <div :if={@specs != []} class="overflow-x-auto">
+      <div :if={!@specs_empty?} class="overflow-x-auto">
         <table class="w-full text-sm">
           <thead class="text-left text-[13px] text-base-content/55">
             <tr class="border-b border-base-300">
@@ -341,11 +368,11 @@ defmodule FactoryWeb.SpecsLive do
               <th class="w-10 py-2"><span class="sr-only">Actions</span></th>
             </tr>
           </thead>
-          <tbody>
+          <tbody id="specs" phx-update="stream">
             <tr
-              :for={s <- @specs}
+              :for={{id, s} <- @streams.specs}
               phx-click={JS.navigate(~p"/specs/#{s.id}")}
-              id={"spec-#{s.id}"}
+              id={id}
               class="group cursor-pointer border-b border-base-300 hover:bg-base-200"
             >
               <td class="py-2 pr-4">
@@ -391,7 +418,7 @@ defmodule FactoryWeb.SpecsLive do
         <div class="mb-4 flex flex-wrap items-end justify-between gap-3">
           <div>
             <h2 class="flex items-center gap-2 text-lg font-medium">
-              <.icon name="hero-building-library" class="size-5 text-primary" /> Base specs
+              <.icon name="hero-building-library" class="size-5 text-base-content/50" /> Base specs
             </h2>
             <p class="mt-0.5 text-sm text-base-content/60">
               Kept for good: company rules, conventions, standards. Include them in a workflow,
@@ -556,11 +583,7 @@ defmodule FactoryWeb.SpecsLive do
   defp review_cell(assigns), do: ~H[<span class="text-base-content/40">–</span>]
 
   # The workflows each base spec is in: `%{spec id => [workflow name]}`.
-  defp used_in do
-    for w <- Factory.Workflows.list(), id <- w.base_spec_ids, reduce: %{} do
-      acc -> Map.update(acc, id, [w.name], &(&1 ++ [w.name]))
-    end
-  end
+  defp used_in, do: Factory.Workflows.base_spec_use()
 
   # A file dropped in the base spec window becomes its text, and names it if unnamed.
   defp base_file(:base_file, entry, socket) do

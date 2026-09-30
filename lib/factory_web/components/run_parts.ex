@@ -2,13 +2,14 @@ defmodule FactoryWeb.RunParts do
   @moduledoc "Pieces shared by the pages about runs: icons, the run type badge, usage and state."
   use FactoryWeb, :html
   alias Factory.Runs.Types
-  alias FactoryWeb.UsageMeter, as: Fmt
+  alias FactoryWeb.Usage, as: Fmt
 
   # Icon class names are written out in full so Tailwind's heroicons plugin sees them.
   @type_icons %{
     "feature" => {"hero-sparkles", "hero-sparkles-micro"},
     "bug" => {"hero-bug-ant", "hero-bug-ant-micro"},
     "review" => {"hero-magnifying-glass", "hero-magnifying-glass-micro"},
+    "incident" => {"hero-lifebuoy", "hero-lifebuoy-micro"},
     "other" => {"hero-chat-bubble-left-ellipsis", "hero-chat-bubble-left-ellipsis-micro"}
   }
 
@@ -43,7 +44,10 @@ defmodule FactoryWeb.RunParts do
     ~H"""
     <span class={[
       "inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium",
-      if(@kind, do: "bg-primary/15 text-primary", else: "bg-base-content/10 text-base-content/60"),
+      if(@kind,
+        do: "bg-base-content/[0.07] text-base-content/75",
+        else: "bg-base-content/[0.05] text-base-content/55"
+      ),
       @class
     ]}>
       <.icon :if={@kind} name={type_icon(@kind, :micro)} class="size-3" />
@@ -60,7 +64,9 @@ defmodule FactoryWeb.RunParts do
     ~H"""
     <span class={["inline-flex items-center gap-2 text-xs tabular-nums", @class]}>
       <span class="inline-flex items-center gap-0.5 font-medium">
-        <.icon name="hero-bolt-micro" class="size-3.5 text-warning/80" />{Fmt.credits(@totals.credits)}
+        <.icon name="hero-bolt-micro" class="size-3.5 text-base-content/40" />{Fmt.credits(
+          @totals.credits
+        )}
       </span>
       <span class="text-base-content/50">≈{Fmt.tokens(@totals.tokens)}</span>
     </span>

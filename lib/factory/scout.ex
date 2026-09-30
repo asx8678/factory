@@ -11,6 +11,8 @@ defmodule Factory.Scout do
 
   @branches 10
   @gh_timeout 6_000
+  # git only reads here, so it's quick; one that hangs (a lock, a huge repository) is stopped.
+  @git_timeout 20_000
 
   @doc """
   The folder's review candidates:
@@ -40,8 +42,9 @@ defmodule Factory.Scout do
           Map.merge(b, %{current: b.name == current, ahead: ahead, behind: behind, base: against})
         end
 
+      # gh itself is stopped at its deadline (`prs/1`); this only waits a little longer.
       {prs, note} =
-        case Task.yield(prs, @gh_timeout) || Task.shutdown(prs) do
+        case Task.yield(prs, @gh_timeout + 1_000) || Task.shutdown(prs) do
           {:ok, result} -> result
           nil -> {nil, "GitHub didn't answer in time."}
         end
@@ -61,10 +64,25 @@ defmodule Factory.Scout do
     end
   end
 
+  @doc """
+  The git repository `dir` is in, for a review of a folder on this computer:
+  `{:ok, top}`, its top folder (a folder picked inside a repository reviews all of
+  it), or `{:error, reason}` when there's none.
+  """
+  def repository(dir) do
+    dir = Path.expand(dir || "")
+
+    with true <- File.dir?(dir) || {:error, "That folder doesn't exist."},
+         {:ok, _} <- repo(dir),
+         {:ok, top} <- git(dir, ~w(rev-parse --show-toplevel)) do
+      {:ok, top}
+    end
+  end
+
   defp repo(dir) do
     case git(dir, ~w(rev-parse --is-inside-work-tree)) do
       {:ok, _} = ok -> ok
-      {:error, "git isn't installed."} = error -> error
+      {:error, why} = error when why in ["git isn't installed.", "git took too long."] -> error
       {:error, _} -> {:error, "This folder isn't a git repository."}
     end
   end
@@ -96,8 +114,9 @@ defmodule Factory.Scout do
   fetched as `pr-12` before it), then the uncommitted changes, the open pull requests,
   the other branches with work beyond the base, and, on the base itself, its latest
   commits. Each is `%{kind:, value:, label:, detail:, at:}` with `kind` one of
-  `:branch` (also `current:`, `ahead:`, `latest:`, the branch with the newest commit),
-  `:pr`, `:changes` or `:recent`. Empty unless the scout answered `{:ok, _}`.
+  `:branch` (also `pr:`, a pull request fetched as a branch, `current:`, `ahead:` and
+  `latest:`, the branch with the newest commit), `:pr`, `:changes` or `:recent`. Empty
+  unless the scout answered `{:ok, _}`.
   """
   def review_picks({:ok, scout}) do
     worth = Enum.filter(scout.branches, &(&1.label != scout.base and (&1.ahead || 1) > 0))
@@ -113,6 +132,7 @@ defmodule Factory.Scout do
         kind: :branch,
         value: b.name,
         label: if(is_binary(pr), do: "Pull request ##{pr}", else: b.label),
+        pr: is_binary(pr),
         current: b.current,
         ahead: b.ahead,
         latest: latest != nil and b.name == latest.name,
@@ -386,8 +406,8 @@ defmodule Factory.Scout do
       gh ->
         args = ~w(pr list --state open --limit 8 --json number,title,headRefName,url,updatedAt)
 
-        case System.cmd(gh, args, cd: dir, stderr_to_stdout: true) do
-          {out, 0} ->
+        case Factory.OsProcess.run(gh, args, cd: dir, timeout: @gh_timeout) do
+          {:ok, out, 0} ->
             case JSON.decode(out) do
               {:ok, list} when is_list(list) ->
                 {for p <- list do
@@ -404,7 +424,13 @@ defmodule Factory.Scout do
                 {nil, "gh's answer wasn't readable."}
             end
 
-          {out, _} ->
+          {:error, :timeout} ->
+            {nil, "GitHub didn't answer in time."}
+
+          {:error, _} ->
+            {nil, "gh couldn't list pull requests."}
+
+          {:ok, out, _} ->
             cond do
               out =~ ~r/auth login|not logged/i ->
                 {nil, "Sign gh in (gh auth login) to list pull requests here."}
@@ -421,9 +447,11 @@ defmodule Factory.Scout do
 
   # git's answer as it is: `repo/1` puts its errors in words.
   defp git(dir, args) do
-    case Factory.GitCmd.run(dir, args) do
-      {:error, :not_installed} -> {:error, "git isn't installed."}
-      other -> other
+    case Factory.OsProcess.run("git", ["-C", dir | args], timeout: @git_timeout) do
+      {:ok, out, 0} -> {:ok, String.trim(out)}
+      {:ok, out, _} -> {:error, String.trim(out)}
+      {:error, :timeout} -> {:error, "git took too long."}
+      {:error, _} -> {:error, "git isn't installed."}
     end
   end
 

@@ -37,7 +37,7 @@ defmodule Factory.Runs.Titles do
          about when about != "" <- about(run),
          {:ok, reply} <-
            Kiro.ask(prompt(about),
-             model: "claude-haiku-4.5",
+             model: Kiro.quick(),
              # A title is what it wrote before any tool call it tried, not its narration.
              reply: :first,
              usage: %{source: "title", run_id: run.id}

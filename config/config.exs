@@ -42,7 +42,9 @@ config :factory, :kiro,
   cli: System.find_executable("kiro-cli") || Path.expand("~/.local/bin/kiro-cli"),
   workspace: Path.expand("../tmp/workspace", __DIR__),
   log_dir: Path.expand("../tmp/kiro-logs", __DIR__),
-  prompt_timeout: :timer.minutes(10)
+  prompt_timeout: :timer.minutes(10),
+  # How long a new session waits for Factory's tools to load before its first message.
+  mcp_ready_timeout: :timer.seconds(10)
 
 # Deterministic context management (Factory.Context). A Kiro session compacts before its
 # next message once its context is this full (Kiro's own summarizer starts at 80%); the
@@ -72,6 +74,9 @@ config :logger, :default_formatter,
 
 # Phoenix encodes and decodes JSON with Elixir's own JSON module (Elixir 1.18+)
 config :phoenix, :json_library, JSON
+
+# Log files can be attached in the chat (troubleshooting keeps them as evidence).
+config :mime, :types, %{"text/x-log" => ["log"]}
 
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.

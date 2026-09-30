@@ -238,7 +238,10 @@ defmodule Factory.Engine do
       Runs.with_locked_run(run_id, fn run ->
         if run.status in ["queued", "running"] do
           with {:ok, steps} <- executable_steps(run) do
-            progress = Map.merge(%{"done" => [], "outputs" => %{}}, run.progress || %{})
+            progress =
+              %{"done" => [], "outputs" => %{}}
+              |> Map.merge(run.progress || %{})
+              |> allow_more_credits(run)
 
             {:ok, run} =
               Runs.update_run(run, %{status: "running", progress: Map.delete(progress, "error")})
@@ -262,7 +265,7 @@ defmodule Factory.Engine do
 
     case result do
       {:ok, {%Run{} = run, steps}} ->
-        walk(run, steps, Enum.reject(steps, &(&1.id in run.progress["done"])))
+        resume(run, steps, Enum.reject(steps, &(&1.id in run.progress["done"])))
 
       {:ok, {:invalid_workflow, reason}} ->
         {:error, reason}
@@ -272,12 +275,159 @@ defmodule Factory.Engine do
     end
   end
 
+  # A run paused while it checked a step's tasks finishes those checks first, even when
+  # that step was the last to build: the tasks it hadn't checked don't stay unchecked.
+  defp resume(run, steps, rest) do
+    case run.progress["verifying"] && Enum.find(steps, &(&1.id == run.progress["verifying"])) do
+      nil ->
+        walk(run, steps, rest)
+
+      step ->
+        case verify_tasks(run, step, run.progress["outputs"][step.id] || "") do
+          {:again, run} -> walk(run, steps, [step | rest])
+          {:ok, run} -> walk(run, steps, rest)
+          :stopped -> nil
+        end
+    end
+  end
+
   defp walk(run, steps, []), do: finish(run, steps)
 
   defp walk(run, steps, [step | rest]) do
     # Pausing or cancelling takes effect between steps.
     run = Runs.get_run(run.id)
 
+    cond do
+      run.status != "running" ->
+        nil
+
+      why = skip_reason(run, step) ->
+        skip(run, steps, step, rest, why)
+
+      spent = step.kind != "action" && over_credits(run) ->
+        pause_for_credits(run, step, spent)
+
+      true ->
+        run_step(run, steps, step, rest)
+    end
+  end
+
+  @doc """
+  How many credits a run may use before it pauses to ask whether to go on: the limit in
+  Settings (`"run_credit_limit"` in `Factory.Prefs`), else `config :factory,
+  :run_credit_limit` (10). 0 means no limit.
+  """
+  def credit_limit do
+    case Factory.Prefs.get("run_credit_limit") do
+      n when is_number(n) and n >= 0 -> n
+      _ -> Application.get_env(:factory, :run_credit_limit, 10)
+    end
+  end
+
+  @doc "How many credits the run may use before it pauses next, or nil with no limit."
+  def credit_allowance(%Run{} = run) do
+    case credit_limit() do
+      limit when limit > 0 -> (run.progress || %{})["credits_allowed"] || limit
+      _ -> nil
+    end
+  end
+
+  # What the run has used and may use, once it has used that much.
+  defp over_credits(run) do
+    with allowed when allowed != nil <- credit_allowance(run),
+         %{credits: used} when used >= allowed <- Factory.Usage.totals({:run, run.id}),
+         do: {used, allowed},
+         else: (_ -> nil)
+  end
+
+  # Paused between steps, like a person's pause: what it has done stays.
+  defp pause_for_credits(run, step, {used, allowed}) do
+    Runs.with_locked_run(run.id, fn run ->
+      if run.status == "running" do
+        progress = Map.put(run.progress, "credit_pause", true)
+        {:ok, run} = Runs.update_run(run, %{status: "paused", progress: progress})
+
+        Runs.post(
+          run,
+          "factory",
+          "This run has used #{credits(used)} credits, past its limit of #{credits(allowed)}, " <>
+            "so it's paused before #{step.name}. Continue lets it use " <>
+            "#{credits(credit_limit())} more; the limit is in Settings → Runs.",
+          actions: ["continue"]
+        )
+      end
+
+      {:ok, run}
+    end)
+
+    nil
+  end
+
+  # A run that paused at its credit limit may use as much again when it goes on, however
+  # it was resumed.
+  defp allow_more_credits(%{"credit_pause" => true} = progress, run) do
+    used = Factory.Usage.totals({:run, run.id}).credits
+
+    progress
+    |> Map.delete("credit_pause")
+    |> Map.put("credits_allowed", used + credit_limit())
+  end
+
+  defp allow_more_credits(progress, _run), do: progress
+
+  defp credits(n), do: :erlang.float_to_binary(n / 1, decimals: 1)
+
+  # In troubleshooting, a step with nothing to do is skipped rather than run only to say
+  # so: the Code Investigator with no repository, and the Evidence Analyst in a quick
+  # check of an error with nothing attached. They're found by name, as the workflow
+  # comes (`Factory.Runs.Types`).
+  defp skip_reason(run, %{agent: %{}} = step) do
+    if incident?(run) do
+      cond do
+        step.name == "Code Investigator" and project_dir(run) == nil ->
+          "there's no repository to search"
+
+        step.name == "Evidence Analyst" and quick_check?(run) and Factory.Evidence.list(run) == [] ->
+          "a quick check of one error, with nothing attached to read"
+
+        true ->
+          nil
+      end
+    end
+  end
+
+  defp skip_reason(_run, _step), do: nil
+
+  defp incident?(run) do
+    case Workflows.for_run(run) do
+      nil -> false
+      workflow -> Workflows.kind(workflow) == "incident"
+    end
+  end
+
+  # The Triage Lead's plan says the track: "**Track:** Quick check …".
+  defp quick_check?(run), do: (run.spec || "") =~ ~r/track:\**\s*quick check/i
+
+  # A skipped step hands on what was handed to it.
+  defp skip(run, steps, step, rest, why) do
+    passed =
+      step.after
+      |> Enum.map(&run.progress["outputs"][&1])
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join("\n\n")
+
+    progress =
+      run.progress
+      |> Map.update!("done", &(&1 ++ [step.id]))
+      |> Map.update!("outputs", &Map.put(&1, step.id, passed))
+      |> Map.update("skipped", [step.id], &Enum.uniq(&1 ++ [step.id]))
+
+    {:ok, run} = Runs.update_run(run, %{progress: progress})
+    Runs.post(run, "factory", "#{step.name} skipped: #{why}.", meta: meta(step))
+    walk(run, steps, rest)
+  end
+
+  defp run_step(run, steps, step, rest) do
     if run.status == "running" do
       # A verdict from an earlier pass of this step mustn't decide this one.
       progress =
@@ -318,8 +468,12 @@ defmodule Factory.Engine do
                   {:again, run, again} -> walk(run, steps, again)
                   nil -> walk(run, steps, rest)
                 end
+              else
+                {:ok, run}
               end
 
+            # Paused or cancelled while its tasks were verified: what was checked is
+            # kept, and nothing is opened again.
             :stopped ->
               nil
           end
@@ -417,12 +571,27 @@ defmodule Factory.Engine do
            ),
          else: []
 
-    if todo == [], do: {:ok, run}, else: verify_each(run, step, output, todo)
+    if todo == [] do
+      {:ok, run}
+    else
+      # Marked while it checks, so a run paused meanwhile finishes the checks on resume.
+      {:ok, run} = Runs.update_run(run, %{progress: Map.put(run.progress, "verifying", step.id)})
+
+      case verify_each(run, step, output, todo) do
+        :stopped ->
+          :stopped
+
+        {outcome, run} ->
+          run = Runs.get_run(run.id)
+          {:ok, run} = Runs.update_run(run, %{progress: Map.delete(run.progress, "verifying")})
+          {outcome, run}
+      end
+    end
   end
 
   defp verify_each(run, step, output, todo) do
     model = Kiro.verify_model()
-    dir = run.settings["project_dir"] || Kiro.config(:workspace)
+    dir = Kiro.workdir(run)
     name = Kiro.model_name(model)
     count = if length(todo) == 1, do: "the task", else: "#{length(todo)} tasks"
 
@@ -432,12 +601,11 @@ defmodule Factory.Engine do
       meta: meta(step)
     )
 
+    # Pausing or cancelling takes effect between tasks, as it does while building.
     checked =
-      Enum.reduce_while(todo, [], fn task, checked ->
-        # Pausing or cancelling takes effect between tasks.
-        if Runs.get_run(run.id).status != "running" do
-          {:halt, :stopped}
-        else
+      todo
+      |> Enum.reduce_while([], fn task, checked ->
+        if Runs.get_run(run.id).status == "running" do
           block = Factory.Verifier.spec_task(run, task)
 
           result =
@@ -451,33 +619,36 @@ defmodule Factory.Engine do
             )
 
           {:cont, [{task, result} | checked]}
+        else
+          {:halt, checked}
         end
       end)
+      |> Enum.reverse()
+
+    record =
+      Map.new(checked, fn {task, result} -> {"#{task.id}", verification(result, model)} end)
 
     run = Runs.get_run(run.id)
+    progress = Map.update(run.progress, "verification", record, &Map.merge(&1, record))
+    {:ok, run} = Runs.update_run(run, %{progress: progress})
+
+    for {task, result} <- checked, do: say_verified(run, step, task, result, name)
+
+    failed = for {task, {:ok, %{passed: false} = r}} <- checked, do: {task, r}
 
     cond do
-      checked == :stopped or run.status != "running" ->
-        # The tasks stay done; they're checked again when the run resumes.
+      # Stopped while the last one was checked, or before one: nothing goes back.
+      run.status != "running" ->
         set_activity(step.agent, "idle", nil)
         :stopped
 
-      true ->
-        checked = Enum.reverse(checked)
+      failed == [] ->
         set_activity(step.agent, "done", nil)
+        {:ok, run}
 
-        record =
-          Map.new(checked, fn {task, result} -> {"#{task.id}", verification(result, model)} end)
-
-        progress = Map.update(run.progress, "verification", record, &Map.merge(&1, record))
-        {:ok, run} = Runs.update_run(run, %{progress: progress})
-
-        for {task, result} <- checked, do: say_verified(run, step, task, result, name)
-
-        case for({task, {:ok, %{passed: false} = r}} <- checked, do: {task, r}) do
-          [] -> {:ok, run}
-          failed -> verify_failed(run, step, failed)
-        end
+      true ->
+        set_activity(step.agent, "done", nil)
+        verify_failed(run, step, failed)
     end
   end
 
@@ -803,13 +974,24 @@ defmodule Factory.Engine do
   # (job, spec, hand-offs, sources) can be shortened; Factory's own lines can't.
   defp fit_prompt(run, steps, step, focus \\ nil) do
     notes = Map.get(step, :notes, %{})
+    kind = (workflow = Workflows.for_run(run)) && Workflows.kind(workflow)
+
+    # An agent that searches the web gets everything with what identifies anyone taken
+    # out (`Factory.Redact`), whatever the agents before it wrote.
+    clean =
+      if step.agent && Agent.web?(step.agent) do
+        redact = redaction(run)
+        &Factory.Redact.text(&1, redact)
+      else
+        & &1
+      end
 
     # Each arrow in: what the agent before handed over, then what the arrow says.
     handoffs =
       Enum.flat_map(step.after, fn id ->
         from = Enum.find(steps, &(&1.id == id))
-        text = run.progress["outputs"][id]
-        note = notes[id]
+        text = clean.(run.progress["outputs"][id])
+        note = clean.(notes[id])
 
         [
           text && tag(~s(<handoff from="#{from.name}">), text, "</handoff>", 64 * 1024),
@@ -834,10 +1016,16 @@ defmodule Factory.Engine do
       [
         "You are #{step.name}, one agent in a team that works through a job step by step. " <>
           "Your part: #{blank(step.does, "do what the job needs")}.",
-        tag("<job>", run.description || run.title, "</job>", 16 * 1024),
-        base_specs(run),
-        run.spec && tag("<spec>", run.spec, "</spec>", 96 * 1024),
-        sources(step),
+        job(run, step, kind),
+        kind == "incident" && clean.(Factory.Runs.Troubleshooting.mode_line(project_dir(run))),
+        # Where the attached files are, for the agents that may read them.
+        kind == "incident" && !Agent.web?(step.agent || %{}) && Factory.Evidence.describe(run),
+        # The commands an agent that only reads may run, so it doesn't spend turns on
+        # ones that are refused.
+        Agent.read_only?(step) && Factory.Specs.Planner.looking_rule(),
+        run |> base_specs() |> List.wrap() |> Enum.map(&clean_part(&1, clean)),
+        run.spec && tag("<spec>", clean.(run.spec), "</spec>", 96 * 1024),
+        clean_part(sources(step), clean),
         own != "" && %{head: "Your instructions:\n", body: own, tail: "", max: 16 * 1024}
       ]
       |> List.flatten()
@@ -846,14 +1034,14 @@ defmodule Factory.Engine do
     # What this pass is: what's done, what was handed over, feedback, and how to finish.
     ask =
       [
-        task_status(run),
+        clean_part(task_status(run), clean),
         handoffs != [] && ["What the agents before you handed over:" | handoffs],
         feedback &&
           [
             "This is another pass: #{feedback["from"]} sent the work back. Fix what they say.",
             tag(
               ~s(<feedback from="#{feedback["from"]}">),
-              feedback["text"],
+              clean.(feedback["text"]),
               "</feedback>",
               16 * 1024
             )
@@ -877,6 +1065,51 @@ defmodule Factory.Engine do
       brief: Enum.join(brief_parts, "\n\n"),
       ask: Enum.join(ask_parts, "\n\n")
     })
+  end
+
+  # The job as the person wrote it. A troubleshooting run's is mostly the errors and
+  # logs they pasted, so it gets as much room as a spec. An agent that searches the web
+  # isn't shown it (`Agent.web?/1`): what it looks up comes from the hand-overs, where
+  # the signatures have nothing that identifies anyone, so it can't send the person's
+  # material anywhere, whatever that material says.
+  defp job(run, step, kind) do
+    if step.agent && Agent.web?(step.agent),
+      do:
+        "<job>Not shown to agents that search the web. Work from the hand-over and the " <>
+          "case file: what to look up is there.</job>",
+      else: tag("<job>", run.description || run.title, "</job>", job_room(kind))
+  end
+
+  defp clean_part(%{body: body} = part, clean), do: %{part | body: clean.(body)}
+  defp clean_part(text, clean) when is_binary(text), do: clean.(text)
+  defp clean_part(nil, _clean), do: nil
+
+  # What an agent that searches the web never sees, besides what `Factory.Redact` finds
+  # itself: the names listed in Settings, the user names anything in the run shows (the
+  # attached files too, learned as they came: `Factory.Chat`), and the run's folders.
+  defp redaction(run) do
+    texts = [run.description, run.spec] ++ Map.values(run.progress["outputs"] || %{})
+
+    # A run whose files came before Factory learned from them as they came.
+    attached =
+      (run.settings || %{})["evidence_users"] ||
+        Factory.Redact.users_in(Factory.Evidence.heads(run))
+
+    [
+      names: Factory.Redact.saved_names(),
+      users: Enum.uniq(Factory.Redact.users_in(texts) ++ attached),
+      paths: [project_dir(run), Factory.Evidence.root(), Factory.Kiro.config(:workspace)]
+    ]
+  end
+
+  defp job_room("incident"), do: 96 * 1024
+  defp job_room(_kind), do: 16 * 1024
+
+  defp project_dir(run) do
+    case String.trim(run.settings["project_dir"] || "") do
+      "" -> nil
+      dir -> dir
+    end
   end
 
   # One task to build this turn, as the spec writes it.
@@ -1012,8 +1245,10 @@ defmodule Factory.Engine do
         Runs.post(
           run,
           "factory",
-          "Done: all #{length(steps)} #{if length(steps) == 1, do: "step", else: "steps"} of the workflow ran." <>
-            tasks_note(run.tasks) <> verified_note(run)
+          ran_note(steps, run.progress["skipped"] || []) <>
+            tasks_note(run.tasks, steps) <> verified_note(run),
+          # Troubleshooting ends with a report; Fix it starts a Fix a bug run on it.
+          actions: if(incident?(run), do: ["fix_it"], else: [])
         )
 
         {:ok, run}
@@ -1038,8 +1273,23 @@ defmodule Factory.Engine do
     {:error, reason}
   end
 
+  defp ran_note(steps, []),
+    do:
+      "Done: all #{length(steps)} #{if length(steps) == 1, do: "step", else: "steps"} of the workflow ran."
+
+  defp ran_note(steps, skipped),
+    do:
+      "Done: #{length(steps) - length(skipped)} of the workflow's #{length(steps)} steps ran; " <>
+        "#{length(skipped)} had nothing to do."
+
   # Tasks are done when an agent marked them (`Factory.RunTools`), not because the run ended.
-  defp tasks_note([]), do: ""
+  # In a workflow whose agents only read (a review, troubleshooting) they're checks to
+  # work through, and nobody marks them.
+  defp tasks_note([], _steps), do: ""
+
+  defp tasks_note(tasks, steps) do
+    if Enum.any?(steps, &marks_tasks?(%{tasks: tasks}, &1)), do: tasks_note(tasks), else: ""
+  end
 
   defp tasks_note(tasks) do
     case {Enum.count(tasks, &(&1.status == "done")), length(tasks)} do
@@ -1084,10 +1334,15 @@ defmodule Factory.Engine do
 
     {:ok, run} = Runs.update_run(run, %{status: "paused", progress: progress})
 
+    next =
+      if Factory.Kiro.usage_limited?(reason),
+        do: "Kiro answers nothing until its usage limit resets: /resume then.",
+        else: "Fix the cause, then /resume to try it again."
+
     Runs.post(
       run,
       "factory",
-      "#{step.name} failed: #{reason}\nThe run is paused at this step. Fix the cause, then /resume to try it again.",
+      "#{step.name} failed: #{reason}\nThe run is paused at this step. #{next}",
       meta: meta(step)
     )
   end

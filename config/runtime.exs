@@ -38,8 +38,9 @@ end
 # this machine or a private network (an API on the office LAN), set it to true:
 #
 #     FACTORY_ALLOW_PRIVATE_ACTION_URLS=true
-config :factory, :allow_private_action_urls,
-  System.get_env("FACTORY_ALLOW_PRIVATE_ACTION_URLS") in ~w(true 1)
+config :factory,
+       :allow_private_action_urls,
+       System.get_env("FACTORY_ALLOW_PRIVATE_ACTION_URLS") in ~w(true 1)
 
 if config_env() == :dev do
   # Reload browser tabs when matching files change.

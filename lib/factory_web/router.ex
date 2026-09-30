@@ -8,7 +8,12 @@ defmodule FactoryWeb.Router do
     plug :fetch_live_flash
     plug :put_root_layout, html: {FactoryWeb.Layouts, :root}
     plug :protect_from_forgery
-    plug :put_secure_browser_headers
+    # Agents' replies are markdown, and an image in one would load from wherever it
+    # points, carrying what's in its address: images come only from Factory itself.
+    plug :put_secure_browser_headers, %{
+      "content-security-policy" =>
+        "img-src 'self' data: blob:; object-src 'none'; base-uri 'self'"
+    }
   end
 
   pipeline :api do

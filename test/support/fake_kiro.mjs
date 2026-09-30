@@ -39,6 +39,11 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   if (m.method === "session/new") mcp[`sess_${process.pid}_${sessions + 1}`] = m.params.mcpServers || []
   if (m.method === "session/new")
     out({ id: m.id, result: { sessionId: `sess_${process.pid}_${++sessions}`, configOptions: [{ id: "model", currentValue: "auto" }, { id: "mode", currentValue: "vibe" }] } })
+  // Like Kiro 2.26, it says when the MCP servers it was given are loaded.
+  if (m.method === "session/new" && (m.params.mcpServers || []).length > 0) {
+    const servers = m.params.mcpServers.map((server) => ({ name: server.name, status: "connected", tools: [] }))
+    out({ method: "_kiro/mcp/status", params: { sessionId: `sess_${process.pid}_${sessions}`, servers } })
+  }
   if (m.method === "_kiro/session/compact") out({ id: m.id, result: { success: true } })
   if (m.method === "session/set_config_option") {
     const { configId, value } = m.params

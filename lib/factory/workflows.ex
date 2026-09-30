@@ -3,7 +3,7 @@ defmodule Factory.Workflows do
   Named workflows: each a set of agents and the hand-offs between them.
 
   The standard workflows match the jobs on the start screen (build a feature, fix a
-  bug, review a pull request). One that's no longer standard (resolve an issue, update
+  bug, review a pull request, troubleshoot an issue). One that's no longer standard (resolve an issue, update
   dependencies) can be deleted like a custom one, and isn't made again. They're created from
   `Factory.Runs.Types` when first needed, can be changed like any other, and can be
   restored to their default. Custom workflows are made new or cloned.
@@ -16,10 +16,7 @@ defmodule Factory.Workflows do
   alias Factory.Agents.{Agent, Link, Workflow}
   alias Factory.Runs.{Run, Types}
 
-  @standard ~w(feature bug review)
-
-  @doc "The run types that have a standard workflow."
-  def standard_keys, do: @standard
+  @standard ~w(feature bug review incident)
 
   @doc "Every workflow: the standard ones in start-screen order, then custom ones by name."
   def list do
@@ -35,6 +32,22 @@ defmodule Factory.Workflows do
   end
 
   def get(id), do: Repo.get(Workflow, id)
+
+  @doc """
+  Which workflows start their runs with each base spec, `%{spec_id => [workflow name]}`:
+  the names and spec ids only, for the Specs page.
+  """
+  def base_spec_use do
+    Repo.all(
+      from w in Workflow,
+        where: fragment("cardinality(?) > 0", w.base_spec_ids),
+        order_by: w.name,
+        select: {w.name, w.base_spec_ids}
+    )
+    |> Enum.reduce(%{}, fn {name, ids}, acc ->
+      Enum.reduce(ids, acc, fn id, acc -> Map.update(acc, id, [name], &(&1 ++ [name])) end)
+    end)
+  end
 
   @doc "The kind of job a run on this workflow is (see `Factory.Runs.Types`): its key, or \"other\"."
   def kind(%Workflow{key: key}) when key in @standard, do: key
@@ -124,9 +137,13 @@ defmodule Factory.Workflows do
   def rename(%Workflow{} = w, name),
     do: w |> Workflow.changeset(%{name: name}) |> Repo.update() |> changed()
 
-  @doc "Deletes a custom workflow and its agents. Standard ones can only be restored."
+  @doc """
+  Deletes a custom workflow and its agents. Standard ones can only be restored. What
+  Factory made for its sources (clones, section files) goes once the deletion commits.
+  """
   def delete(%Workflow{key: key} = w) when key not in @standard do
     agents = Agents.list_agents(w.id)
+    sources = Sources.list(w.id)
 
     result =
       Repo.transact(fn ->
@@ -146,6 +163,7 @@ defmodule Factory.Workflows do
     case result do
       {:ok, _} ->
         for agent <- agents, do: Kiro.stop(agent.id)
+        for source <- sources, do: Sources.remove_files(source)
         changed(result)
 
       error ->
@@ -234,33 +252,38 @@ defmodule Factory.Workflows do
     end
   end
 
+  # "Name (copy)", then "Name (copy) 2"…, the name cut so each fits a workflow's 60
+  # characters with its suffix.
   defp copy_name(name) do
-    base = "#{String.slice(name, 0, 53)} (copy)"
     taken = Repo.all(from w in Workflow, select: w.name)
 
     Stream.iterate(1, &(&1 + 1))
-    |> Enum.find_value(fn
-      1 -> if base not in taken, do: base
-      n -> if "#{base} #{n}" not in taken, do: "#{base} #{n}"
+    |> Enum.find_value(fn n ->
+      suffix = if n == 1, do: " (copy)", else: " (copy) #{n}"
+
+      candidate =
+        String.trim_trailing(String.slice(name, 0, 60 - String.length(suffix))) <> suffix
+
+      if candidate not in taken, do: candidate
     end)
   end
 
   @doc """
   Puts a standard workflow back as it came: its name, agents, prompts and hand-offs,
-  and the arrow from its reviewer back to the agent that builds.
+  and the arrow from its reviewer back to the agent that builds. The agents it still
+  has are put back rather than made again, so runs that used them still find what they
+  handed over.
   """
   def restore(%Workflow{key: key} = w) when key in @standard do
     stop_sessions(w)
     type = Types.get(key)
 
     Repo.transact(fn ->
-      Repo.delete_all(from a in Agent, where: a.workflow_id == ^w.id)
-
       with {:ok, w} <-
              w
              |> Workflow.changeset(%{name: type.label, description: type.blurb})
              |> Repo.update() do
-        build(w, Types.workflow(key))
+        build(w, key)
         {:ok, w}
       end
     end)
@@ -274,28 +297,39 @@ defmodule Factory.Workflows do
 
   def modified?(%Workflow{key: key} = w) do
     type = Types.get(key)
-    default = Enum.map(Types.workflow(key), &{&1["name"], &1["kind"], prompt(&1)})
-    agents = ordered_agents(w.id)
-    now = Enum.map(agents, &{&1.name, &1.kind, &1.prompt})
 
-    w.name != type.label or now != default or not chain?(w.id, agents)
+    default =
+      Enum.map(Types.workflow(key), &{&1["name"], &1["kind"], prompt(&1), &1["web"] == true})
+
+    agents = ordered_agents(w.id)
+    now = Enum.map(agents, &{&1.name, &1.kind, &1.prompt, &1.web})
+
+    w.name != type.label or now != default or not chain?(w.id, key, agents)
   end
 
-  # The hand-offs are exactly one chain through the agents in order.
-  # The hand-offs are one chain through the agents in order, plus the review loop.
-  defp chain?(workflow_id, agents) do
+  # The hand-offs are one chain through the agents in order, plus the arrow back.
+  defp chain?(workflow_id, key, agents) do
     pairs = agents |> Enum.map(& &1.id) |> Enum.chunk_every(2, 1, :discard)
-    pairs = if loop = review_loop(agents), do: pairs ++ [loop], else: pairs
+    pairs = if loop = loop(key, agents), do: pairs ++ [loop], else: pairs
     Enum.sort(Enum.map(links(workflow_id), &[&1.source_id, &1.target_id])) == Enum.sort(pairs)
   end
 
-  # A standard workflow's arrow back: from its reviewer to the agent that builds, so the
-  # reviewer can send work back (`Factory.Engine`). Only with one of each.
-  defp review_loop(agents) do
-    case {Enum.filter(agents, &(&1.kind == "reviewer")),
-          Enum.filter(agents, &(&1.kind == "coder"))} do
-      {[reviewer], [coder]} -> [reviewer.id, coder.id]
-      _ -> nil
+  # A standard workflow's arrow back, so an agent can send the work back
+  # (`Factory.Engine`): the one its type names (`Factory.Runs.Types.loop/1`), else from
+  # its reviewer to the agent that builds, when it has one of each.
+  defp loop(key, agents) do
+    case Types.loop(key) do
+      {from, to} ->
+        with %{id: a} <- Enum.find(agents, &(&1.name == from)),
+             %{id: b} <- Enum.find(agents, &(&1.name == to)),
+             do: [a, b]
+
+      nil ->
+        case {Enum.filter(agents, &(&1.kind == "reviewer")),
+              Enum.filter(agents, &(&1.kind == "coder"))} do
+          {[reviewer], [coder]} -> [reviewer.id, coder.id]
+          _ -> nil
+        end
     end
   end
 
@@ -380,7 +414,7 @@ defmodule Factory.Workflows do
           |> Repo.insert(on_conflict: :nothing, conflict_target: :key)
 
         # Another process may have made it first.
-        if w.id, do: build(w, Types.workflow(key))
+        if w.id, do: build(w, key)
         {:ok, w}
       end)
     end
@@ -388,33 +422,93 @@ defmodule Factory.Workflows do
     :ok
   end
 
-  # Agents on Kiro, one under the other, each handing off to the next.
-  defp build(workflow, steps) do
-    agents =
-      for {step, i} <- Enum.with_index(steps) do
-        {:ok, a} =
-          Agents.create_agent(%{
-            workflow_id: workflow.id,
-            name: step["name"],
-            kind: step["kind"],
-            role: step["does"],
-            prompt: prompt(step),
-            model: "auto",
-            x: 0.0,
-            y: i * 190.0
-          })
+  # Agents on Kiro, one under the other, each handing off to the next. The workflow's
+  # own agents are kept for them (a run keys what each handed over by its id): the one
+  # of the same name, else one of the same kind, in order. The rest go.
+  defp build(workflow, key) do
+    steps = Enum.with_index(Types.workflow(key))
+    have = ordered_agents(workflow.id)
+    cards = Enum.reject(have, &(&1.kind == "action"))
 
-        a
-      end
+    {named, left} =
+      Enum.map_reduce(steps, cards, fn {step, _}, left ->
+        take(left, &(&1.name == step["name"]))
+      end)
+
+    {kept, _left} =
+      steps
+      |> Enum.zip(named)
+      |> Enum.map_reduce(left, fn
+        {{step, _}, nil}, left -> take(left, &(&1.kind == step["kind"]))
+        {_, same}, left -> {same, left}
+      end)
+
+    agents =
+      for {{step, i}, same} <- Enum.zip(steps, kept), do: put_agent(same, workflow, step, i)
+
+    ids = Enum.map(agents, & &1.id)
+    Agents.delete_agents(for a <- have, a.id not in ids, do: a.id)
+    Repo.delete_all(from l in Link, where: l.source_id in ^ids or l.target_id in ^ids)
 
     for [a, b] <- Enum.chunk_every(agents, 2, 1, :discard),
         do: Agents.link(a.id, b.id, %{source: "bottom", target: "top"})
 
     # Drawn down the right-hand side, so it doesn't cross the hand-offs.
-    with [reviewer, coder] <- review_loop(agents),
-         do: Agents.link(reviewer, coder, %{source: "right", target: "right"})
+    with [from, to] <- loop(key, agents),
+         do: Agents.link(from, to, %{source: "right", target: "right"})
 
     :ok
+  end
+
+  # The first agent `fun` picks, and the others.
+  defp take(agents, fun) do
+    case Enum.find(agents, fun) do
+      nil -> {nil, agents}
+      agent -> {agent, List.delete(agents, agent)}
+    end
+  end
+
+  defp put_agent(agent, workflow, step, i) do
+    prompt = prompt(step)
+
+    # The workflow is set on the struct: `Agent.changeset/2` doesn't cast it.
+    (agent || %Agent{workflow_id: workflow.id})
+    |> Agent.changeset(%{
+      name: step["name"],
+      kind: step["kind"],
+      role: step["does"],
+      prompt: prompt,
+      web: step["web"] == true,
+      model: "auto",
+      session: "own",
+      kiro_mode: "vibe",
+      action: %{},
+      x: 0.0,
+      y: i * 190.0
+    })
+    |> Ecto.Changeset.put_change(:default_prompt, prompt)
+    |> Repo.insert_or_update!()
+  end
+
+  @doc """
+  Gives the standard workflows' agents the prompts Factory has now, where an agent's
+  prompt is still the one Factory gave it: one someone changed keeps theirs (Restore
+  puts the default back). An agent from before Factory kept track takes its prompt as
+  Factory's when it's the current one. Called at startup. Returns how many changed.
+  """
+  def update_prompts do
+    updates =
+      for w <- Repo.all(from w in Workflow, where: w.key in ^@standard),
+          latest = Map.new(Types.workflow(w.key), &{&1["name"], prompt(&1)}),
+          a <- Agents.list_agents(w.id),
+          prompt = latest[a.name],
+          prompt != nil and a.prompt != nil,
+          a.default_prompt != prompt,
+          a.prompt == prompt or a.prompt == a.default_prompt,
+          do: a |> Ecto.Changeset.change(prompt: prompt, default_prompt: prompt) |> Repo.update!()
+
+    if updates != [], do: Agents.notify_changed()
+    length(updates)
   end
 
   defp prompt(step),

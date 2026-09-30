@@ -13,7 +13,29 @@ defmodule FactoryWeb.ChatHeader do
   attr :warn, :boolean, required: true
   attr :locked, :boolean, required: true
 
+  attr :pending, :string,
+    default: nil,
+    doc:
+      "what shows while no repository is chosen, when the folder remembered isn't it: " <>
+        "a review's first step, or troubleshooting from what's pasted only"
+
   # Where the agents work: red until a folder is chosen, green once it is.
+  def folder_button(%{pending: pending} = assigns) when is_binary(pending) do
+    ~H"""
+    <button
+      id="folder-button"
+      type="button"
+      phx-click={!@locked && "browse"}
+      disabled={@locked}
+      title="Choose a repository"
+      class="flex max-w-64 items-center gap-1.5 rounded-full border border-dashed border-base-300 px-2.5 py-0.5 text-[13px] text-base-content/60 transition-colors hover:border-base-content/30 hover:text-base-content disabled:cursor-default"
+    >
+      <.icon name="hero-folder-mini" class="size-4 shrink-0 opacity-70" />
+      <span class="truncate">{@pending}</span>
+    </button>
+    """
+  end
+
   def folder_button(assigns) do
     ~H"""
     <button
@@ -51,7 +73,10 @@ defmodule FactoryWeb.ChatHeader do
       aria-disabled="true"
       class="flex items-center gap-1.5 rounded-full border border-base-300 px-2.5 py-0.5 text-[13px]"
     >
-      <.icon name={FactoryWeb.RunParts.workflow_icon(@workflow, :micro)} class="size-4 text-primary" />
+      <.icon
+        name={FactoryWeb.RunParts.workflow_icon(@workflow, :micro)}
+        class="size-4 text-base-content/60"
+      />
       <span class="max-w-48 truncate">{@workflow.name}</span>
     </div>
     <details
@@ -63,7 +88,7 @@ defmodule FactoryWeb.ChatHeader do
       <summary class="flex cursor-pointer list-none items-center gap-1.5 rounded-full border border-base-300 px-2.5 py-0.5 text-[13px] hover:bg-base-content/[0.06]">
         <.icon
           name={FactoryWeb.RunParts.workflow_icon(@workflow, :micro)}
-          class="size-4 text-primary"
+          class="size-4 text-base-content/60"
         />
         <span class="max-w-48 truncate">{@workflow.name}</span>
         <.icon name="hero-chevron-down-mini" class="size-4 opacity-50" />
@@ -82,7 +107,10 @@ defmodule FactoryWeb.ChatHeader do
             w.id == @workflow.id && "bg-base-200"
           ]}
         >
-          <.icon name={FactoryWeb.RunParts.workflow_icon(w, :micro)} class="size-4 text-primary" />
+          <.icon
+            name={FactoryWeb.RunParts.workflow_icon(w, :micro)}
+            class="size-4 text-base-content/60"
+          />
           <span class="flex-1 truncate">{w.name}</span>
           <.icon :if={w.id == @workflow.id} name="hero-check-mini" class="size-4" />
         </button>
@@ -244,7 +272,7 @@ defmodule FactoryWeb.ChatHeader do
       phx-click="control"
       phx-value-command="/resume"
       title="Go on from the step it stopped at"
-      class="flex h-6 shrink-0 items-center gap-1 rounded-md bg-primary/12 px-1.5 text-xs font-medium text-primary hover:bg-primary/20"
+      class="flex h-6 shrink-0 items-center gap-1 rounded-md bg-base-content/[0.06] px-1.5 text-xs font-medium text-base-content/80 transition-colors hover:bg-base-content/10 hover:text-base-content"
     >
       <.icon name="hero-play-micro" class="size-3.5" /> Resume
     </button>

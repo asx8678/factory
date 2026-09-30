@@ -38,6 +38,11 @@ defmodule FactoryWeb.Layouts do
     default: 0,
     doc: "queued and running runs for the header, from FactoryWeb.ActiveRuns"
 
+  attr :kiro, :map,
+    default: nil,
+    doc:
+      "whether Kiro is signed in and under its usage limit (`signed_out`, `limited`, `checking`), from FactoryWeb.KiroStatus"
+
   slot :inner_block, required: true
 
   @menu [
@@ -68,13 +73,13 @@ defmodule FactoryWeb.Layouts do
           <svg viewBox="0 0 20 20" class="size-5" aria-hidden="true">
             <path
               d="M10 4 L4 15 M10 4 L16 15 M4 15 L16 15"
-              class="stroke-primary"
+              class="stroke-base-content"
               stroke-width="1.5"
               fill="none"
             />
-            <circle cx="10" cy="4" r="2.6" class="fill-primary" />
-            <circle cx="4" cy="15" r="2.6" class="fill-primary" />
-            <circle cx="16" cy="15" r="2.6" class="fill-primary" />
+            <circle cx="10" cy="4" r="2.6" class="fill-base-content" />
+            <circle cx="4" cy="15" r="2.6" class="fill-base-content" />
+            <circle cx="16" cy="15" r="2.6" class="fill-base-content" />
           </svg>
           Factory
         </.link>
@@ -87,7 +92,7 @@ defmodule FactoryWeb.Layouts do
             class={[
               "flex items-center whitespace-nowrap border-b-2 px-2.5 text-[13px] transition-colors",
               if(@active == key,
-                do: "border-primary text-base-content font-medium",
+                do: "border-base-content text-base-content font-medium",
                 else: "border-transparent text-base-content/55 hover:text-base-content"
               )
             ]}
@@ -97,6 +102,11 @@ defmodule FactoryWeb.Layouts do
         </nav>
 
         <div class="flex items-center gap-4 text-sm">
+          <.kiro_signed_out :if={@kiro && @kiro.signed_out} checking={@kiro.checking} />
+          <.kiro_limited
+            :if={@kiro && @kiro[:limited] && !@kiro.signed_out}
+            checking={@kiro.checking}
+          />
           <.link
             :if={@active_runs > 0}
             id="active-runs"
@@ -123,6 +133,65 @@ defmodule FactoryWeb.Layouts do
     """
   end
 
+  attr :checking, :boolean, default: false
+
+  # Agents can't run while Kiro is signed out: said before anything is sent, with how
+  # to fix it and a way to check again (FactoryWeb.KiroStatus handles "kiro_check").
+  defp kiro_signed_out(assigns) do
+    ~H"""
+    <div
+      id="kiro-signed-out"
+      role="status"
+      class="flex items-center gap-2 rounded-full border border-base-300 bg-base-200/70 py-0.5 pr-1 pl-2.5 text-xs text-base-content/80"
+    >
+      <.icon name="hero-exclamation-triangle-mini" class="size-4 shrink-0 text-warning" />
+      <span class="whitespace-nowrap">
+        Kiro isn't signed in<span class="hidden lg:inline">: run
+        <code class="font-mono">kiro-cli login</code>
+        in a terminal</span>
+      </span>
+      <button
+        id="kiro-check"
+        type="button"
+        phx-click="kiro_check"
+        disabled={@checking}
+        class="rounded-full border border-base-300 bg-base-100 px-2 py-0.5 font-medium text-base-content/80 transition-colors hover:border-base-content/25 hover:text-base-content disabled:opacity-60"
+      >
+        {if @checking, do: "Checking…", else: "Check again"}
+      </button>
+    </div>
+    """
+  end
+
+  attr :checking, :boolean, default: false
+
+  # Kiro refused a prompt for its usage limit: nothing gets an answer until it resets.
+  # Check again asks Kiro one word (FactoryWeb.KiroStatus handles "kiro_limit_check").
+  defp kiro_limited(assigns) do
+    ~H"""
+    <div
+      id="kiro-limited"
+      role="status"
+      class="flex items-center gap-2 rounded-full border border-base-300 bg-base-200/70 py-0.5 pr-1 pl-2.5 text-xs text-base-content/80"
+    >
+      <.icon name="hero-exclamation-triangle-mini" class="size-4 shrink-0 text-warning" />
+      <span class="whitespace-nowrap">
+        Kiro's usage limit is reached<span class="hidden lg:inline">: agents can't answer until it resets</span>
+      </span>
+      <button
+        id="kiro-limit-check"
+        type="button"
+        phx-click="kiro_limit_check"
+        disabled={@checking}
+        title="Asks Kiro for one word: free if it's still refused, a fraction of a credit if not"
+        class="rounded-full border border-base-300 bg-base-100 px-2 py-0.5 font-medium text-base-content/80 transition-colors hover:border-base-content/25 hover:text-base-content disabled:opacity-60"
+      >
+        {if @checking, do: "Checking…", else: "Check again"}
+      </button>
+    </div>
+    """
+  end
+
   attr :usage, :map, required: true
 
   # Credits (exact, from Kiro) and tokens (estimated) for today or the page's run/spec.
@@ -131,13 +200,16 @@ defmodule FactoryWeb.Layouts do
     <.link
       id="usage-meter"
       navigate={~p"/usage"}
-      title={"#{FactoryWeb.UsageMeter.label(@usage.scope)}: #{@usage.calls} #{if @usage.calls == 1, do: "call", else: "calls"} to Kiro, #{FactoryWeb.UsageMeter.credits(@usage.credits)} credits, about #{FactoryWeb.UsageMeter.tokens(@usage.tokens)} tokens (estimated)"}
+      title={"#{FactoryWeb.UsageMeter.label(@usage.scope)}: #{@usage.calls} #{if @usage.calls == 1, do: "call", else: "calls"} to Kiro, #{FactoryWeb.UsageMeter.credits(@usage.credits)} credits, about #{FactoryWeb.UsageMeter.tokens(@usage.tokens)} tokens (estimated)#{if @usage[:limit], do: ". It pauses at #{FactoryWeb.UsageMeter.credits(@usage.limit)} credits to ask whether to go on."}"}
       class="hidden items-center gap-2 rounded-full border border-base-content/10 px-3 py-1 text-xs tabular-nums text-base-content/70 transition-colors hover:border-base-content/25 hover:text-base-content sm:flex"
     >
       <span class="text-base-content/45">{FactoryWeb.UsageMeter.label(@usage.scope)}</span>
       <span class="flex items-center gap-1">
-        <.icon name="hero-bolt-micro" class="size-3.5 text-warning/80" />
+        <.icon name="hero-bolt-micro" class="size-3.5 text-base-content/40" />
         {FactoryWeb.UsageMeter.credits(@usage.credits)}
+        <span :if={@usage[:limit]} id="usage-limit" class="text-base-content/40">
+          / {FactoryWeb.UsageMeter.credits(@usage.limit)}
+        </span>
       </span>
       <span class="text-base-content/50">≈{FactoryWeb.UsageMeter.tokens(@usage.tokens)} tok</span>
     </.link>

@@ -44,8 +44,10 @@ chat bubble.
   which tool set `tools/list` gives (`FactoryWeb.MCP`).
 - Run steps run on each agent's own `Factory.Kiro.Session` (`Factory.Kiro.run_step/4`),
   not a throwaway `Kiro.ask`. Every session gets Factory's MCP server with a session
-  token (it doesn't expire; the session existing is the gate); a tool call resolves to
-  the step the session is answering and is refused outside one.
+  token tied to the kiro-cli process it was given to (a nonce made at each start): a
+  call from a process that has since restarted is refused, so it can't act on the next
+  turn. A tool call resolves to the step the session is answering and is refused
+  outside one.
 - Standard workflows have an arrow from the Reviewer back to the builder, so `verdict`
   can send work back (up to `config :factory, :max_loop_rounds`, default 2).
 - A planner step whose run already has its tasks hands them on without a second
@@ -102,9 +104,87 @@ Verified on Kiro 2.26 (30 Sep 2026): after a run finished, the planner added a t
 - Two intermittent test failures fixed: tests clearing the `:context` settings, and the
   unboxed spec concurrency test running beside async tests.
 
+## What agents may do without asking
+
+- `Factory.Kiro.Permission` answers Kiro's permission requests. Agents that build get
+  every tool. Agents that only read (planner, researcher, reviewer) get reading and
+  searching, and commands that only look (`looking?/1`: no `&`, no `VAR=` prefix, no
+  option that writes a file or runs a program).
+- Some of what a reading agent may do goes to the person first, as a Yes or No card in
+  the chat (`Kiro.Permission.ask_first/5`, `Kiro.Session.ask_permission/4`): fetching a
+  web page, running the project's own code (tests, a build) in a pull request cloned for
+  review, and reading outside the project folder. A card nobody answers within half the
+  turn's time is a No. One-off sessions (`Kiro.Ask`) have nobody to ask and refuse.
+- An agent set to search the web (`web` on its card, like the troubleshooting
+  workflow's Error Researcher and Fact Checker) fetches without asking. It isn't shown
+  the person's own material (the job), and what it's handed is filtered first
+  (`Factory.Redact`: internal hosts, IPs, emails, paths in a home folder, IDs, keys and
+  tokens come out, and the names listed under Settings → Web searches, as whole words).
+  User names are taken out where they show as one (`user=…`, `for user "…"`, `role "…"`,
+  `psql -U …`, `curl -u …:…`), and the ones that look like an account's (`orders_svc`,
+  not a plain word like `grafana`) are learned from the whole run, attached files
+  included, and taken out wherever else they appear. So are the run's folders (the
+  project, the attached files, Kiro's workspace), wherever they are. The task list, base
+  specs and the repository line are filtered too.
+- Comments in a command (`# why`) don't count when deciding whether it only looks, as
+  the shell ignores them; nor does a `sed 's/…/…/'` that only changes what it prints.
+- Factory waits for Kiro to say its tools are loaded (`_kiro/mcp/status`, at most
+  `:mcp_ready_timeout`) before an agent's first message, and when kiro-cli stops, ends
+  what it started (`OsProcess.kill_known/1`), such as MCP servers.
+- A tool may ask the person to open a web page (URL-mode elicitation): the card shows the
+  link, for http and https only, and says when it's done or declined.
+- Kiro's own working files (`~/.kiro/sessions/…`, where it keeps big tool results to read
+  back) and a troubleshooting run's attached files (`Factory.Evidence`, not for the web
+  agents) count as inside the project.
+- Kiro 2.26 names its tools on the request (`_meta.kiro.toolId`) and often sends no kind:
+  `read_file`, `run_command`, `web_fetch`, `remote_web_search` (its search runs on a
+  server of its own, "remote"). `Permission.kind/2` maps them.
+
+## Kiro signed out
+
+When kiro-cli stops, the reason comes from what it wrote to its log since it started
+(`Kiro.stop_reason/3`): "Kiro isn't signed in…" rather than an exit code. Every page's
+header then warns until a check or a session works again (`FactoryWeb.KiroStatus`), and
+the failure in the chat has a Try again button (`Chat.retry/2`).
+
+## Standard workflows' prompts
+
+A standard workflow's agents get their prompts from `Factory.Runs.Types` when it's made,
+and remember it (`default_prompt`). At startup, `Workflows.update_prompts/0` gives the
+ones whose prompt is still that the prompt Factory has now; an agent someone changed
+keeps theirs. Restore (`Workflows.restore/1`) puts the agents back in place, matched by
+name, else by kind: their ids stay, and a run keys what each step handed over by id.
+
+## Credits
+
+A run pauses before its next step once it has used its limit (`Engine.credit_limit/0`:
+Settings → Runs, else `config :factory, :run_credit_limit`, 10; 0 for none), with a
+Continue button; resumed however, it may use as much again (`credits_allowed` in its
+progress). The header's usage meter shows the run's credits against it. Kiro's own
+usage limit ("You've reached your monthly usage limit") is noted from any refused prompt
+(`Catalog.note_limit/1`, kept apart from the models check, which sends no prompt) and
+warned about on every page until a prompt is answered; its Check again asks Kiro one word.
+
+## Verified on real Kiro 2.26 (30 Sep 2026)
+
+A troubleshooting run of a pasted Node.js `EADDRINUSE` error, with no repository: the
+Triage Lead planned three checks with the plan tools, and all nine steps ran to a report
+(9.9 credits). It showed that Kiro asks before reading files (`read_file`), that
+`web_fetch` works for a web agent, and that `remote_web_search` wasn't recognised then
+(since mapped). The Yes or No card worked with a reading agent fetching a page.
+
+A second run (run 56), a pasted error with an attached log and a company name listed:
+the Triage Lead chose a full investigation, the Evidence Analyst searched the log with
+grep and sed, and the Code Investigator was skipped. The Fact Checker made 5 searches and
+5 fetches (about 45 fetches before); no search or URL had the company, host or database
+user in it. 33 of the 88 commands the reading agents ran were refused, mostly for a
+leading `# comment` (since allowed). It used 15.7 credits and stopped at the Devil's
+Advocate on Kiro's monthly usage limit. A session opened without a prompt showed Kiro
+telling MCP servers it takes form and URL elicitation, and that its tools load about
+100 ms after `session/new` answers (Factory waits for them now).
+
 ## Open
 
-- A Kiro session's MCP tools load after `session/new` answers; a message sent at once
-  may reach the model before they're listed. Factory's first messages have worked in
-  practice (the agent reads files first), but nothing waits for the tools.
-- URL-mode elicitation (open a link, then carry on) isn't handled.
+- Not yet seen on real Kiro: a URL elicitation arriving during a tool call, the Triage
+  Lead choosing a quick check (the track line's format is confirmed), and the planner's
+  first turn after Fix it with a folder. Checked against the fake kiro-cli only.

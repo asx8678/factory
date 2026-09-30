@@ -41,8 +41,23 @@ defmodule FactoryWeb.UsageMeter do
 
   defp refresh(socket) do
     scope = socket.assigns[:usage_scope] || :today
-    assign(socket, :usage_meter, Map.put(Usage.totals(scope), :scope, scope))
+
+    assign(
+      socket,
+      :usage_meter,
+      Usage.totals(scope) |> Map.put(:scope, scope) |> Map.put(:limit, limit(scope))
+    )
   end
+
+  # A run's credit limit, where it pauses next (`Factory.Engine.credit_allowance/1`).
+  defp limit({:run, id}) do
+    case Factory.Runs.get_run(id) do
+      nil -> nil
+      run -> Factory.Engine.credit_allowance(run)
+    end
+  end
+
+  defp limit(_scope), do: nil
 
   @doc "Credits for people: 0.08, 1.24, 12.4; nil is 0."
   def credits(nil), do: "0"

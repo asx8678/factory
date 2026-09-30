@@ -18,6 +18,8 @@ defmodule Factory.Kiro.Ask do
     * `:workdir` - the folder Kiro works in, default the Kiro workspace
     * `:allow` - tool kinds Kiro may use when it asks (ACP kinds: read, search, edit, execute, …),
       and "look" for commands that only look (`Factory.Kiro.Permission.looking?/2`)
+    * `:roots` - folders besides `:workdir` it may read without being refused, such as a
+      troubleshooting run's attached files (`Factory.Evidence`)
     * `:on_tool` - called with each ACP `tool_call` update as Kiro starts using a tool
     * `:mcp_servers` - MCP servers the session gets, as ACP `session/new` takes them; Kiro
       may call the tools of these without asking (its MCP permission requests carry no kind)
@@ -45,12 +47,14 @@ defmodule Factory.Kiro.Ask do
   end
 
   defp converse(text, workdir, opts) do
-    port = Kiro.open_port(workdir, "ask.log")
+    {port, log} = Kiro.open_port(workdir, "ask.log")
     deadline = System.monotonic_time(:millisecond) + Kiro.config(:prompt_timeout)
 
     conn = %{
       port: port,
+      log: log,
       workdir: workdir,
+      roots: opts[:roots] || [],
       deadline: deadline,
       allow: opts[:allow] || [],
       mcp: Enum.map(opts[:mcp_servers] || [], & &1.name),
@@ -64,13 +68,15 @@ defmodule Factory.Kiro.Ask do
       try do
         with {:ok, _, _} <-
                call(conn, 1, "initialize", %{protocolVersion: 1, clientCapabilities: %{}}),
-             {:ok, session, _} <-
+             {:ok, session, created} <-
                call(conn, 2, "session/new", %{cwd: workdir, mcpServers: opts[:mcp_servers] || []}),
+             :ok <- tools_loaded(conn, created),
              sid = session["sessionId"],
              :ok <- set_model(conn, sid, session, model) do
           call(conn, 4, "session/prompt", %{sessionId: sid, prompt: [%{type: "text", text: text}]})
         end
       after
+        # kiro-cli and everything it started, so nothing it ran outlives the question.
         RPC.close_port(port)
       end
 
@@ -88,6 +94,12 @@ defmodule Factory.Kiro.Ask do
         {:error, reason, acc} ->
           {{:error, reason}, acc}
       end
+
+    # A usage limit says so on every page until a prompt is answered again.
+    case reply do
+      {:error, reason} -> if Kiro.usage_limited?(reason), do: Kiro.Catalog.note_limit(reason)
+      {:ok, _} -> if acc.prompted, do: Kiro.Catalog.clear_limit()
+    end
 
     # Only a call that got as far as the prompt costs anything.
     if acc.prompted do
@@ -145,29 +157,63 @@ defmodule Factory.Kiro.Ask do
     await(conn, id, "", acc)
   end
 
+  # Kiro loads the MCP servers it's given after session/new answers, and says when
+  # (`_kiro/mcp/status`, perhaps already while it answered): the question waits for
+  # them, a little while at most, so it doesn't reach the model before its tools.
+  defp tools_loaded(%{mcp: []}, _acc), do: :ok
+  defp tools_loaded(_conn, %{mcp_ready: true}), do: :ok
+
+  defp tools_loaded(conn, _acc),
+    do:
+      wait_tools(conn, "", System.monotonic_time(:millisecond) + Kiro.config(:mcp_ready_timeout))
+
+  defp wait_tools(%{port: port} = conn, buffer, deadline) do
+    receive do
+      {^port, {:data, data}} ->
+        case RPC.read(buffer, data) do
+          {:partial, buffer} ->
+            wait_tools(conn, buffer, deadline)
+
+          {:message, %{"method" => "_kiro/mcp/status", "params" => params}} ->
+            if RPC.mcp_settled?(params, conn.mcp), do: :ok, else: wait_tools(conn, "", deadline)
+
+          _ ->
+            wait_tools(conn, "", deadline)
+        end
+
+      # It stopped: the next call says why.
+      {^port, {:exit_status, _}} = stopped ->
+        send(self(), stopped)
+        :ok
+    after
+      max(deadline - System.monotonic_time(:millisecond), 0) -> :ok
+    end
+  end
+
   defp await(%{port: port} = conn, id, buffer, acc) do
     timeout = max(conn.deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
-      {^port, {:data, {:noeol, part}}} ->
-        await(conn, id, buffer <> part, acc)
+      {^port, {:data, data}} ->
+        case RPC.read(buffer, data) do
+          {:partial, buffer} ->
+            await(conn, id, buffer, acc)
 
-      {^port, {:data, {:eol, part}}} ->
-        case RPC.decode(buffer <> part) do
-          {:ok, msg} ->
+          {:message, msg} ->
             case handle(conn, msg, id, acc) do
               {:cont, acc} -> await(conn, id, "", acc)
               done -> done
             end
 
-          :skip ->
+          :invalid ->
             await(conn, id, "", acc)
         end
 
       {^port, {:exit_status, code}} ->
-        {:error,
-         "Kiro stopped unexpectedly (exit code #{code}). Details are in tmp/kiro-logs/ask.log.",
-         acc}
+        reason = Kiro.stop_reason(conn.log, code)
+        # Signed out: every page says so until Kiro works again.
+        if Kiro.signed_out?(reason), do: Kiro.Catalog.note_failure(reason)
+        {:error, reason, acc}
     after
       timeout ->
         {:error,
@@ -190,16 +236,26 @@ defmodule Factory.Kiro.Ask do
     # Kiro names the MCP server a tool comes from; its request has no kind then.
     server = get_in(p, ["_meta", "kiro", "mcpTool", "identity", "serverName"])
 
-    kind = Kiro.Permission.kind(p, acc.kinds)
+    # What a chat would ask the person about first (`Kiro.Permission.decide/4`) is a no
+    # here, with nobody to ask: a web page, a pull request's own code, a file outside the
+    # folder.
+    decision =
+      Kiro.Permission.decide(
+        Kiro.Permission.kind(p, acc.kinds),
+        Kiro.Permission.command(p, acc.commands),
+        Kiro.Permission.paths_of(p["toolCall"]),
+        %{
+          allowed: conn.allow,
+          looks: "look" in conn.allow,
+          reads_only: "execute" not in conn.allow,
+          web: false,
+          mcp: server != nil and server in conn.mcp,
+          folder: conn.workdir,
+          roots: conn.roots
+        }
+      )
 
-    looking? =
-      kind == "execute" and "look" in conn.allow and
-        Kiro.Permission.looking?(Kiro.Permission.command(p, acc.commands), conn.workdir)
-
-    wanted =
-      if kind in conn.allow or looking? or (server && server in conn.mcp),
-        do: "allow",
-        else: "reject"
+    wanted = if decision == :allow, do: "allow", else: "reject"
 
     RPC.reply(conn.port, rid, %{outcome: Kiro.Permission.outcome(options, wanted)})
     {:cont, acc}
@@ -284,6 +340,11 @@ defmodule Factory.Kiro.Ask do
 
     {:cont, %{acc | last: "", tooled: true, kinds: kinds, commands: commands}}
   end
+
+  defp handle(conn, %{"method" => "_kiro/mcp/status", "params" => params}, _id, acc),
+    do:
+      {:cont,
+       if(RPC.mcp_settled?(params, conn.mcp), do: Map.put(acc, :mcp_ready, true), else: acc)}
 
   defp handle(_conn, _msg, _id, acc), do: {:cont, acc}
 end
