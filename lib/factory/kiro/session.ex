@@ -58,6 +58,9 @@ defmodule Factory.Kiro.Session do
     * `:context` - false when the text already carries the agent's sources and prompt
     * `:activity` - what the agent's card says while it works
     * `:step` - `%{id:, tasks:, verdict:}`, the run step Factory's run tools act on
+    * `:brief` - `{text, key}`: context that goes in front of the text only when this
+      agent hasn't had it (same key) in this session; after a compaction or a restart
+      it goes again
   """
   def prompt(pid, agent, run_id, text, opts \\ []),
     do: GenServer.call(pid, {:prompt, agent, run_id, text, opts})
@@ -100,6 +103,8 @@ defmodule Factory.Kiro.Session do
     config: %{},
     # agents whose prompt (context) has been sent in this session
     primed: MapSet.new(),
+    # {agent id, brief key} of run-step briefs sent in this session
+    briefed: MapSet.new(),
     # agents that have used this session
     members: MapSet.new(),
     # latest context use in this session: %{pct:, window:}
@@ -126,6 +131,7 @@ defmodule Factory.Kiro.Session do
       :model,
       :activity,
       :step,
+      :brief,
       source: "agent_turn",
       context: true
     ]
@@ -203,6 +209,7 @@ defmodule Factory.Kiro.Session do
         model: opts[:model],
         activity: opts[:activity],
         step: opts[:step],
+        brief: opts[:brief],
         source: opts[:source] || "agent_turn",
         context: Keyword.get(opts, :context, true)
       }
@@ -243,8 +250,10 @@ defmodule Factory.Kiro.Session do
   end
 
   @impl true
-  def handle_cast({:forget, agent_id}, state),
-    do: {:noreply, %{state | primed: MapSet.delete(state.primed, agent_id)}}
+  def handle_cast({:forget, agent_id}, state) do
+    briefed = MapSet.reject(state.briefed, &match?({^agent_id, _}, &1))
+    {:noreply, %{state | primed: MapSet.delete(state.primed, agent_id), briefed: briefed}}
+  end
 
   @impl true
   def handle_info({port, {:data, {:noeol, part}}}, %{port: port} = state) do
@@ -598,7 +607,8 @@ defmodule Factory.Kiro.Session do
         buffer: "",
         pending: %{},
         config: %{},
-        primed: MapSet.new()
+        primed: MapSet.new(),
+        briefed: MapSet.new()
     })
   end
 
@@ -742,7 +752,8 @@ defmodule Factory.Kiro.Session do
   defp reject_switch(state, _reason), do: state
 
   defp send_prompt(state, %Job{agent: agent} = job) do
-    {text, state} = with_context(state, agent, job.text, job.context)
+    {text, state} = with_brief(state, agent, job.text, job.brief)
+    {text, state} = with_context(state, agent, text, job.context)
 
     # After a compaction the conversation so far goes first.
     {text, state} =
@@ -777,6 +788,19 @@ defmodule Factory.Kiro.Session do
 
     params = %{sessionId: state.session_id, prompt: [%{type: "text", text: text}]}
     request(state, "session/prompt", params, {:prompt, turn.request_id})
+  end
+
+  # A run step's brief (job, spec, instructions) goes first unless this agent has had it
+  # in this session; then the step says so instead of repeating it.
+  defp with_brief(state, _agent, text, nil), do: {text, state}
+
+  defp with_brief(state, agent, text, {brief, key}) do
+    if MapSet.member?(state.briefed, {agent.id, key}) do
+      {"(The job, spec and your instructions are as in your earlier message for this run.)\n\n" <>
+         text, state}
+    else
+      {brief <> "\n\n" <> text, %{state | briefed: MapSet.put(state.briefed, {agent.id, key})}}
+    end
   end
 
   # An agent's usage starts from its saved totals, without context from an earlier session.

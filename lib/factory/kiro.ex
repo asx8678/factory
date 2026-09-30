@@ -43,7 +43,8 @@ defmodule Factory.Kiro do
   for the reply: `{:ok, reply}` or `{:error, reason}`. The session posts the reply to
   the run's chat as it does for any message, and keeps the conversation, so a step
   sent back to this agent carries on where it left off. `opts` are
-  `Factory.Kiro.Session.prompt/5`'s, without `:reply_to`.
+  `Factory.Kiro.Session.prompt/5`'s, without `:reply_to`; `:brief` goes in front of
+  `text` only when the session hasn't had it.
 
   The wait ends when the session answers, when it stops, or after the prompt timeout
   twice over plus a minute (it may first finish another message).

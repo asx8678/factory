@@ -156,7 +156,8 @@ defmodule Factory.Context do
   long, the room left is shared fairly: smallest bodies first, each taking at most an
   equal share of what remains, so short parts stay whole and only the big ones are
   shortened. Returns
-  `%{text:, bytes:, tokens:, sha256:, omitted_bytes:}`.
+  `%{text:, parts:, bytes:, tokens:, sha256:, omitted_bytes:}`, where `parts` are the
+  fitted parts in order (`text` is them joined).
   """
   def fit(parts, max_bytes \\ nil) do
     max_bytes = max_bytes || config(:run_prompt_bytes)
@@ -186,6 +187,7 @@ defmodule Factory.Context do
 
     %{
       text: text,
+      parts: texts,
       bytes: byte_size(text),
       tokens: tokens(text),
       sha256: sha256(text),

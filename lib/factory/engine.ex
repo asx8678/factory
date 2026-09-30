@@ -438,7 +438,8 @@ defmodule Factory.Engine do
     # On the agent's own Kiro session, which posts the reply to the chat and keeps the
     # conversation for a later pass. The prompt carries its sources and instructions.
     result =
-      Kiro.run_step(step.agent, run.id, prompt.text,
+      Kiro.run_step(step.agent, run.id, prompt.ask,
+        brief: {prompt.brief, "#{run.id}:" <> Factory.Context.sha256(prompt.brief)},
         source: "run_step",
         model: model(run, step),
         context: false,
@@ -504,39 +505,57 @@ defmodule Factory.Engine do
     own = String.trim((step.agent && step.agent.prompt) || "")
     feedback = get_in(run.progress, ["feedback", step.id])
 
-    [
-      "You are #{step.name}, one agent in a team that works through a job step by step. " <>
-        "Your part: #{blank(step.does, "do what the job needs")}.",
-      tag("<job>", run.description || run.title, "</job>", 16 * 1024),
-      base_specs(run),
-      run.spec && tag("<spec>", run.spec, "</spec>", 96 * 1024),
-      task_status(run),
-      handoffs != [] && ["What the agents before you handed over:" | handoffs],
-      feedback &&
-        [
-          "This is another pass: #{feedback["from"]} sent the work back. Fix what they say.",
-          tag(
-            ~s(<feedback from="#{feedback["from"]}">),
-            feedback["text"],
-            "</feedback>",
-            16 * 1024
-          )
-        ],
-      sources(step),
-      own != "" && %{head: "Your instructions:\n", body: own, tail: "", max: 16 * 1024},
-      if(Agent.read_only?(step),
-        do: "Don't change any files: read, check and report.",
-        else: "Make the changes in the project folder."
-      ) <>
-        " When you're done, reply with a short summary of what you did and what the next agent needs to know.",
-      marks_tasks?(run, step) &&
-        "As you finish each task in the spec, built and checked, mark it done with the " <>
-          "factory tool complete_tasks, giving its number. get_tasks shows which are done.",
-      send_back_rule(steps, step)
-    ]
-    |> List.flatten()
-    |> Enum.reject(&(&1 in [nil, false, ""]))
-    |> Factory.Context.fit()
+    # The brief: who the agent is, the job, the rules, the spec, its sources and
+    # instructions. The same for every pass of this step, so a session that has it
+    # already isn't sent it again (`Factory.Kiro.Session`).
+    brief =
+      [
+        "You are #{step.name}, one agent in a team that works through a job step by step. " <>
+          "Your part: #{blank(step.does, "do what the job needs")}.",
+        tag("<job>", run.description || run.title, "</job>", 16 * 1024),
+        base_specs(run),
+        run.spec && tag("<spec>", run.spec, "</spec>", 96 * 1024),
+        sources(step),
+        own != "" && %{head: "Your instructions:\n", body: own, tail: "", max: 16 * 1024}
+      ]
+      |> List.flatten()
+      |> Enum.reject(&(&1 in [nil, false, ""]))
+
+    # What this pass is: what's done, what was handed over, feedback, and how to finish.
+    ask =
+      [
+        task_status(run),
+        handoffs != [] && ["What the agents before you handed over:" | handoffs],
+        feedback &&
+          [
+            "This is another pass: #{feedback["from"]} sent the work back. Fix what they say.",
+            tag(
+              ~s(<feedback from="#{feedback["from"]}">),
+              feedback["text"],
+              "</feedback>",
+              16 * 1024
+            )
+          ],
+        if(Agent.read_only?(step),
+          do: "Don't change any files: read, check and report.",
+          else: "Make the changes in the project folder."
+        ) <>
+          " When you're done, reply with a short summary of what you did and what the next agent needs to know.",
+        marks_tasks?(run, step) &&
+          "As you finish each task in the spec, built and checked, mark it done with the " <>
+            "factory tool complete_tasks, giving its number. get_tasks shows which are done.",
+        send_back_rule(steps, step)
+      ]
+      |> List.flatten()
+      |> Enum.reject(&(&1 in [nil, false, ""]))
+
+    fitted = Factory.Context.fit(brief ++ ask)
+    {brief_parts, ask_parts} = Enum.split(fitted.parts, length(brief))
+
+    Map.merge(fitted, %{
+      brief: Enum.join(brief_parts, "\n\n"),
+      ask: Enum.join(ask_parts, "\n\n")
+    })
   end
 
   # When some tasks are done already (a run run again for tasks added later), which

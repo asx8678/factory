@@ -9,6 +9,7 @@ const update = (sessionId, update) => out({ method: "session/update", params: { 
 const cost = (sessionId, usage) => update(sessionId, { sessionUpdate: "session_info_update", _meta: { kiro: { promptTurnSummaries: [{ usage }] } } })
 let waiting = null
 let sessions = 0
+const history = {}
 // The MCP servers each session was given (Factory's plan tools), by session id.
 const mcp = {}
 // Calls a Factory tool like Kiro does: announce it, ask permission (MCP requests carry the
@@ -49,6 +50,9 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   if (m.method === "session/prompt") {
     const { sessionId, prompt } = m.params
     const text = prompt[0].text
+    // What this session has been told so far: an agent's instructions came with an
+    // earlier message when Factory doesn't send them again (a run step's brief).
+    const seen = (history[sessionId] = (history[sessionId] || "") + "\n" + text)
     // Hold a turn open while tests deliver timeout and late-response messages.
     if (text.endsWith("[test:wait]") || text.includes("[test:hold]"))
       return update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "waiting" } })
@@ -154,9 +158,9 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     }
     // A run step with Factory's run tools marks task 1 done ("[test:complete]"), or a task
     // that doesn't exist too ("[test:complete-missing]"), then echoes what the tools said.
-    if (text.includes("[test:complete") && (mcp[sessionId] || []).length > 0) {
+    if (seen.includes("[test:complete") && (mcp[sessionId] || []).length > 0) {
       ;(async () => {
-        const numbers = text.includes("[test:complete-missing]") ? [1, 9] : [1]
+        const numbers = seen.includes("[test:complete-missing]") ? [1, 9] : [1]
         const result = await callTool(sessionId, "complete_tasks", { numbers })
         const said = result.denied ? "denied" : result.content[0].text
         update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `Built task 1. [tools: ${said}]` } })
@@ -165,7 +169,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       return
     }
     // "[test:verdict]": the same with the verdict tool, and a reply that says neither.
-    if (text.includes("[test:verdict]") && (mcp[sessionId] || []).length > 0) {
+    if (seen.includes("[test:verdict]") && (mcp[sessionId] || []).length > 0) {
       ;(async () => {
         const again = text.includes("This is another pass")
         const args = again ? { decision: "approved" } : { decision: "send_back", fix: "cover the empty state" }
@@ -177,7 +181,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       return
     }
     // A step told to send the work back does, until it's another pass.
-    if (text.includes("[test:send-back]") && text.includes("Send back: <what to fix>")) {
+    if (seen.includes("[test:send-back]") && text.includes("Send back: <what to fix>")) {
       const again = text.includes("This is another pass")
       update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: again ? "Checked.\nApproved" : "Checked.\nSend back: add the missing test" } })
       return out({ id: m.id, result: { stopReason: "end_turn" } })
