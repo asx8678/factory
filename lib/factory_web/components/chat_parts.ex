@@ -760,7 +760,7 @@ defmodule FactoryWeb.ChatParts do
       <%= case @e["status"] do %>
         <% "answered" -> %>
           <.icon name="hero-check-mini" class="size-4 text-success" />
-          You answered: {answer_text(@e["answer"])}
+          You answered: {answer_text(@e["answer"], @e["schema"])}
         <% "declined" -> %>
           You declined to answer.
         <% _ -> %>
@@ -770,10 +770,16 @@ defmodule FactoryWeb.ChatParts do
     """
   end
 
-  defp answer_text(answer) when is_map(answer),
-    do: Enum.map_join(answer, ", ", fn {k, v} -> "#{humanize(k)}: #{v}" end)
+  # Each answer under its question's title, or its field name when it has none.
+  defp answer_text(answer, schema) when is_map(answer) do
+    props = (schema || %{})["properties"] || %{}
 
-  defp answer_text(_), do: ""
+    Enum.map_join(answer, "; ", fn {k, v} ->
+      "#{get_in(props, [k, "title"]) || humanize(k)} #{v}"
+    end)
+  end
+
+  defp answer_text(_answer, _schema), do: ""
 
   defp humanize(name), do: name |> to_string() |> String.replace("_", " ") |> String.capitalize()
 
