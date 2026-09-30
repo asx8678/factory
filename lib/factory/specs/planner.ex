@@ -101,8 +101,11 @@ defmodule Factory.Specs.Planner do
     traces back to the requirements it covers. Include tasks for tests. Don't repeat tasks \
     the spec's tasks file already has.
 
-    Reply with only this JSON object and nothing else, each task as shown plus its size \
-    ("S", "M" or "L"):
+    Add them with the factory tool suggest_tasks, 3 to 6 at a time, in build order, then \
+    end your turn with one short sentence. The person picks which to keep.
+
+    Only if the factory tools aren't available, reply instead with only this JSON object, \
+    each task as shown plus its size ("S", "M" or "L"):
     {"tasks": [#{String.trim_trailing(@task_json, "}")}, "size": "S"}]}
     </task-planning>
 

@@ -60,7 +60,7 @@ defmodule FactoryWeb.MCP do
     token = token(conn)
 
     tools =
-      if RunTools.token?(token), do: RunTools.tools(token), else: PlanTools.tools()
+      if RunTools.token?(token), do: RunTools.tools(token), else: PlanTools.tools(token)
 
     {:ok, %{tools: tools}}
   end

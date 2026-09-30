@@ -435,23 +435,77 @@ defmodule Factory.Specs do
     end
   end
 
-  @doc "Step 2: with the answers (`[%{\"question\", \"answer\"}]`), Kiro suggests tasks."
+  @doc """
+  Step 2: with the answers (`[%{\"question\", \"answer\"}]`), Kiro suggests tasks. It adds
+  them with Factory's `suggest_tasks` tool (`Factory.PlanTools`), so they show as they
+  come (`plan["tasks"]` while `"writing"`); without the tool, its JSON reply is read.
+  """
   def plan_tasks(%SpecDoc{} = spec, answers) do
     if planning?(spec) do
       {:error, :running}
     else
-      plan = Map.merge(spec.plan, %{"status" => "writing", "answers" => answers})
+      ref = Ecto.UUID.generate()
+
+      plan =
+        Map.merge(spec.plan, %{
+          "status" => "writing",
+          "answers" => answers,
+          "tasks" => [],
+          "ref" => ref
+        })
+
       {:ok, spec} = set_plan(spec, plan)
       prompt = Planner.tasks_prompt(kiro_files(spec), plan["project"] || "", answers)
+      failed = plan |> Map.put("failed", "writing") |> Map.delete("tasks")
+      token = Factory.PlanTools.grant_suggest(spec.id, ref)
 
-      failed = Map.put(plan, "failed", "writing")
+      # What the tool added, else the reply's JSON.
+      parse = fn reply ->
+        case get_spec(spec.id) do
+          %{plan: %{"ref" => ^ref, "tasks" => [_ | _] = tasks}} -> {:ok, tasks}
+          _ -> Planner.parse_tasks(reply)
+        end
+      end
 
-      run_plan(spec, "plan_tasks", prompt, &Planner.parse_tasks/1, failed, fn tasks ->
-        Map.merge(plan, %{"status" => "tasks", "tasks" => tasks})
-      end)
+      run_plan(
+        spec,
+        "plan_tasks",
+        prompt,
+        parse,
+        failed,
+        fn tasks -> Map.merge(plan, %{"status" => "tasks", "tasks" => tasks}) end,
+        mcp_servers: [Factory.PlanTools.mcp_server(token)]
+      )
 
       {:ok, spec}
     end
+  end
+
+  @doc """
+  Adds suggested tasks (in `Factory.Specs.Planner.task/1`'s shape, with a size) to the
+  spec's suggestions while round `ref` is being written: `{:ok, how many now}`, or
+  `{:error, :full}` at 30, or `{:error, :stale}` when that round is over or replaced.
+  """
+  def add_suggestions(spec_id, ref, tasks) do
+    result =
+      Repo.transact(fn ->
+        spec = Repo.one(from s in SpecDoc, where: s.id == ^spec_id, lock: "FOR UPDATE")
+        have = (spec && spec.plan["tasks"]) || []
+
+        cond do
+          spec == nil or spec.plan["status"] != "writing" or spec.plan["ref"] != ref ->
+            {:error, :stale}
+
+          length(have) >= 30 ->
+            {:error, :full}
+
+          true ->
+            all = have ++ Enum.take(tasks, 30 - length(have))
+            spec |> Ecto.Changeset.change(plan: Map.put(spec.plan, "tasks", all)) |> Repo.update()
+        end
+      end)
+
+    with {:ok, spec} <- preloaded(result), do: {:ok, length(spec.plan["tasks"])}
   end
 
   @doc "Forgets the suggestions, to start over."
@@ -480,7 +534,7 @@ defmodule Factory.Specs do
 
   # Runs one turn in the background. On failure the plan keeps what it had (so the
   # answers survive) and "failed" says which step to try again.
-  defp run_plan(spec, source, prompt, parse, base, done) do
+  defp run_plan(spec, source, prompt, parse, base, done, opts \\ []) do
     dir = spec.project_dir
     topic = "spec:#{spec.id}"
 
@@ -491,11 +545,14 @@ defmodule Factory.Specs do
     Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
       plan =
         with {:ok, reply} <-
-               Factory.Kiro.ask(prompt,
-                 workdir: dir,
-                 allow: ["read", "search"],
-                 on_tool: on_tool,
-                 usage: %{source: source, spec_id: spec.id}
+               Factory.Kiro.ask(
+                 prompt,
+                 [
+                   workdir: dir,
+                   allow: ["read", "search"],
+                   on_tool: on_tool,
+                   usage: %{source: source, spec_id: spec.id}
+                 ] ++ opts
                ),
              {:ok, result} <- parse.(reply) do
           done.(result)

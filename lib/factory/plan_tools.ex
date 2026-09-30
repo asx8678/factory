@@ -138,8 +138,53 @@ defmodule Factory.PlanTools do
     }
   ]
 
+  # Suggesting tasks on the Spec page: Kiro adds them to a list to pick from
+  # (`spec.plan["tasks"]`), not to the spec.
+  @suggest_tool %{
+    name: "suggest_tasks",
+    description:
+      "Adds suggested tasks to the list the person picks from, in build order, 3 to 6 at " <>
+        "a time. Each task is one small change that can be built and tested on its own, " <>
+        "names the files it touches and has a size: S, M or L.",
+    inputSchema: %{
+      type: "object",
+      properties: %{
+        tasks: %{
+          type: "array",
+          minItems: 1,
+          items: %{
+            type: "object",
+            properties: %{
+              title: %{type: "string", description: "Imperative, under 80 characters."},
+              details: %{type: "array", items: %{type: "string"}},
+              requirements: %{type: "array", items: %{type: "string"}},
+              size: %{type: "string", enum: ["S", "M", "L"]}
+            },
+            required: ["title"]
+          }
+        }
+      },
+      required: ["tasks"]
+    }
+  }
+
   @doc "The tools, as MCP `tools/list` gives them."
   def tools, do: @tools
+
+  @doc "The tools `token` has: the suggestion tool for a suggestion token, else the plan tools."
+  def tools(token) do
+    case verify(token) do
+      {:ok, %{suggest: _}} -> [@suggest_tool]
+      _ -> @tools
+    end
+  end
+
+  @doc """
+  A token for one round of suggestions on the Spec page: calls add to spec `spec_id`'s
+  suggestions while its plan is being written under `ref` (`Factory.Specs.plan_tasks/2`).
+  """
+  def grant_suggest(spec_id, ref),
+    do: Phoenix.Token.sign(FactoryWeb.Endpoint, @salt, %{suggest: spec_id, ref: ref})
 
   @doc "The name Kiro knows the tools' MCP server by."
   def server_name, do: @server
@@ -182,6 +227,31 @@ defmodule Factory.PlanTools do
   `{:ok, text}` for Kiro, or `{:error, text}` saying what to do instead.
   """
   def call(token, name, args) when is_map(args) do
+    case verify(token) do
+      {:ok, %{suggest: spec_id, ref: ref}} -> suggest(spec_id, ref, name, args)
+      _ -> call_plan(token, name, args)
+    end
+  end
+
+  def call(_token, _name, _args), do: {:error, "The arguments must be an object."}
+
+  defp suggest(spec_id, ref, "suggest_tasks", args) do
+    tasks =
+      for raw <- List.wrap(args["tasks"]), t = Planner.task(raw), t != nil do
+        Map.put(t, "size", if(is_map(raw) and raw["size"] in ~w(S M L), do: raw["size"]))
+      end
+
+    case tasks != [] && Specs.add_suggestions(spec_id, ref, tasks) do
+      false -> {:error, "Give each task a title."}
+      {:ok, count} -> {:ok, "Added. #{count} suggested so far. Add more, or end your turn."}
+      {:error, :full} -> {:error, "That's 30 suggestions, the most there can be. End your turn."}
+      {:error, _} -> {:error, "These suggestions were replaced or stopped. End your turn."}
+    end
+  end
+
+  defp suggest(_spec_id, _ref, name, _args), do: {:error, "There's no tool #{name}."}
+
+  defp call_plan(token, name, args) do
     with {:ok, grant} <- verify(token),
          true <- Enum.any?(@tools, &(&1.name == name)) || {:error, "There's no tool #{name}."} do
       result =
@@ -211,8 +281,6 @@ defmodule Factory.PlanTools do
       end
     end
   end
-
-  def call(_token, _name, _args), do: {:error, "The arguments must be an object."}
 
   @doc """
   Runs tool `name` for a planner talking in its own Kiro session: a message in the chat,

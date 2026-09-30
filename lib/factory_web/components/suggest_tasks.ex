@@ -93,7 +93,12 @@ defmodule FactoryWeb.SuggestTasks do
           This usually takes a minute or two.
         </.working>
         <.questions :if={@status == "questions"} {assigns} />
-        <.working :if={@status == "writing"} activity={@activity} title="Kiro is writing tasks">
+        <.working
+          :if={@status == "writing"}
+          activity={@activity}
+          tasks={@plan["tasks"] || []}
+          title="Kiro is writing tasks"
+        >
           From the spec, the project and your answers. This usually takes a minute or two.
         </.working>
         <.failed_writing :if={@status == "error" and @plan["failed"] == "writing"} plan={@plan} />
@@ -156,8 +161,10 @@ defmodule FactoryWeb.SuggestTasks do
 
   attr :activity, :list, required: true
   attr :title, :string, required: true
+  attr :tasks, :list, default: []
   slot :inner_block, required: true
 
+  # Waiting for Kiro: what it's reading, and the tasks it has suggested so far.
   defp working(assigns) do
     ~H"""
     <div class="flex flex-1 flex-col items-center justify-center gap-2 px-6 py-16 text-center">
@@ -175,6 +182,17 @@ defmodule FactoryWeb.SuggestTasks do
           {line}
         </li>
       </ul>
+      <div :if={@tasks != []} id="suggested-so-far" class="mt-5 w-full max-w-md text-left">
+        <p class="mb-1.5 text-xs font-medium text-base-content/60">
+          Suggested so far ({length(@tasks)})
+        </p>
+        <ol class="space-y-1 text-sm">
+          <li :for={{t, i} <- Enum.with_index(@tasks, 1)} class="flex gap-2">
+            <span class="w-5 shrink-0 text-right tabular-nums text-base-content/45">{i}.</span>
+            <span class="min-w-0 truncate">{t["title"]}</span>
+          </li>
+        </ol>
+      </div>
       <p class="mt-4 text-xs text-base-content/60">You can close this window; Kiro keeps working.</p>
     </div>
     """
