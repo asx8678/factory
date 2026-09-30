@@ -64,7 +64,7 @@ defmodule FactoryWeb.PlanPanel do
           {@run.title}
         </h2>
         <span class="shrink-0 text-xs tabular-nums text-base-content/50">
-          {length(@tasks)} {if length(@tasks) == 1, do: "task", else: "tasks"}
+          {length(@tasks)} {count_word(@job, length(@tasks))}
         </span>
         <span
           :if={@thin != []}
@@ -112,7 +112,11 @@ defmodule FactoryWeb.PlanPanel do
       >
         <span class="loading loading-spinner loading-xs text-primary"></span>
         <span class="shrink-0 font-medium text-base-content/80">
-          {if @checking, do: "Checking the scope", else: "Reworking the plan"}
+          {cond do
+            @checking -> "Checking the scope"
+            @job == "review" -> "Reviewing"
+            true -> "Reworking the plan"
+          end}
         </span>
         <span class="min-w-0 truncate">{@working}</span>
       </p>
@@ -677,6 +681,12 @@ defmodule FactoryWeb.PlanPanel do
     </div>
     """
   end
+
+  # What the plan's items are called: a review's are checks.
+  defp count_word("review", 1), do: "check"
+  defp count_word("review", _n), do: "checks"
+  defp count_word(_job, 1), do: "task"
+  defp count_word(_job, _n), do: "tasks"
 
   # Gold, for what the planner changed since the plan was last read.
   defp gold(true), do: "text-amber-600 dark:text-amber-300"

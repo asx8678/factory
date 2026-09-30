@@ -850,7 +850,11 @@ defmodule FactoryWeb.ChatLive do
   defp planner_activity(assigns) do
     with %{id: id} <- assigns.planner,
          %{} = chunk <- assigns.streaming[id] do
-      chunk[:activity] || "Working on the plan…"
+      chunk[:activity] ||
+        if(Workflows.kind(assigns.workflow) == "review",
+          do: "Reviewing…",
+          else: "Working on the plan…"
+        )
     else
       _ -> nil
     end

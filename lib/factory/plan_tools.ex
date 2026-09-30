@@ -317,7 +317,7 @@ defmodule Factory.PlanTools do
           send(grant.pid, {:plan_tools, grant.generation, event})
 
           if event == :changed,
-            do: Factory.ChatPlanner.show_progress(grant.run_id, grant.planner, "Planning…")
+            do: Factory.ChatPlanner.show_progress(grant.run_id, grant.planner, :writing)
 
           {:ok, text}
 
@@ -427,7 +427,7 @@ defmodule Factory.PlanTools do
             send(planning.notify, {:plan_tools, planning.generation, event})
 
             if event == :changed,
-              do: Factory.ChatPlanner.show_progress(run_id, agent, "Planning…")
+              do: Factory.ChatPlanner.show_progress(run_id, agent, :writing)
           end
 
           {:ok, text}
