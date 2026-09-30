@@ -550,12 +550,16 @@ defmodule Factory.Kiro.Session do
         # Text after a tool call starts a new paragraph, or sentences run together.
         state =
           update_turn(state, fn turn ->
-            text =
-              if turn.last == "" and turn.text != "" and not String.ends_with?(turn.text, "\n"),
-                do: "\n\n" <> text,
-                else: text
+            # Only the first chunk after a tool call gets the break; `last` keeps the
+            # chunks as they came, spaces and all.
+            break? =
+              turn.last == "" and turn.text != "" and not String.ends_with?(turn.text, "\n")
 
-            %{turn | text: turn.text <> text, last: turn.last <> String.trim_leading(text)}
+            %{
+              turn
+              | text: turn.text <> if(break?, do: "\n\n" <> text, else: text),
+                last: turn.last <> text
+            }
           end)
 
         if state.turn && state.turn.stream, do: stream(state)
