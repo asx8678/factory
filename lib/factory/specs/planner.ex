@@ -18,14 +18,21 @@ defmodule Factory.Specs.Planner do
   @task_json ~s|{"title": "<imperative, under 80 characters>", "objective": "<one or two sentences: what is true when it's done>", "details": ["<a step of the approach, in order, naming the files and functions it changes; 1 to 8 items; code and paths in backticks>"], "verify": ["<a check that proves it's done: a command and what it must show, a test that must pass, or what to look at; 1 to 4 items>"], "agent": "<who builds it, from the list>", "model": "<the model to build it with, from the list>", "requirements": ["<requirement number, e.g. 1.2>"]}|
 
   @doc """
-  What Kiro may do in the project while it plans: read anything, and run commands that
-  only look (`Factory.Kiro.Permission.looking?/1`), never change anything.
+  What Kiro may do in the project while it plans, and an agent that only reads in a run
+  (`Factory.Engine`): read anything, and run commands that only look, as
+  `Factory.Kiro.Permission.looking?/1` decides; never change anything. Named exactly,
+  so an agent doesn't spend its turns on commands that are refused.
   """
   def looking_rule do
-    "Don't change any files. You may run commands that only look: `git status` and " <>
-      "`git log`, listing and searching files, a tool's version, or the project's tests " <>
-      "when they run quickly. Factory refuses anything that installs, writes, moves, " <>
-      "deletes or commits."
+    "Don't change any files. You may run commands that only look: ls, cat, head, tail, " <>
+      "wc, grep, rg, find, sort, uniq, cut and diff; `sed -n '5,9p'` or one " <>
+      "`sed 's/a/b/g'`; git log, diff, show, status, blame and grep; `gh pr view` and " <>
+      "the like; a tool's version; and the project's tests when they run quickly (in a " <>
+      "pull request cloned for review, the person is asked first). Join them with pipes, " <>
+      "`&&` or `;`, with `#` comments as you like. Factory refuses anything else: awk, " <>
+      "xargs, shell loops, `python -c` and the like, writing into a file (`> out`), " <>
+      "`$(…)` and backticks, a setting before the command (`VAR=x cmd`), and anything " <>
+      "that installs, writes, moves, deletes or commits."
   end
 
   @doc "The task shape Kiro is asked for, as JSON with placeholders."

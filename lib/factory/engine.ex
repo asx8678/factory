@@ -998,6 +998,9 @@ defmodule Factory.Engine do
         kind == "incident" && clean.(Factory.Runs.Troubleshooting.mode_line(project_dir(run))),
         # Where the attached files are, for the agents that may read them.
         kind == "incident" && !Agent.web?(step.agent || %{}) && Factory.Evidence.describe(run),
+        # The commands an agent that only reads may run, so it doesn't spend turns on
+        # ones that are refused.
+        Agent.read_only?(step) && Factory.Specs.Planner.looking_rule(),
         run |> base_specs() |> List.wrap() |> Enum.map(&clean_part(&1, clean)),
         run.spec && tag("<spec>", clean.(run.spec), "</spec>", 96 * 1024),
         clean_part(sources(step), clean),
