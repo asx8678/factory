@@ -172,7 +172,7 @@ defmodule Factory.ChatPlanner do
            Kiro.ask(prompt.full,
              workdir: dir,
              model: prompt.model,
-             allow: ["read", "search"],
+             allow: ["read", "search", "look"],
              mcp_servers: [PlanTools.mcp_server(token)],
              reply: :last,
              on_tool: &show_progress(run.id, planner, Planner.describe_tool(&1, dir)),

@@ -15,7 +15,8 @@ defmodule Factory.Kiro.Ask do
 
     * `:model` - default "auto"
     * `:workdir` - the folder Kiro works in, default the Kiro workspace
-    * `:allow` - tool kinds Kiro may use when it asks (ACP kinds: read, search, edit, execute, …)
+    * `:allow` - tool kinds Kiro may use when it asks (ACP kinds: read, search, edit, execute, …),
+      and "look" for commands that only look (`Factory.Kiro.Permission.looking?/1`)
     * `:on_tool` - called with each ACP `tool_call` update as Kiro starts using a tool
     * `:mcp_servers` - MCP servers the session gets, as ACP `session/new` takes them; Kiro
       may call the tools of these without asking (its MCP permission requests carry no kind)
@@ -135,7 +136,8 @@ defmodule Factory.Kiro.Ask do
       tooled: false,
       credits: 0.0,
       prompted: method == "session/prompt",
-      kinds: %{}
+      kinds: %{},
+      commands: %{}
     }
 
     await(conn, id, "", acc)
@@ -186,8 +188,14 @@ defmodule Factory.Kiro.Ask do
     # Kiro names the MCP server a tool comes from; its request has no kind then.
     server = get_in(p, ["_meta", "kiro", "mcpTool", "identity", "serverName"])
 
+    kind = Kiro.Permission.kind(p, acc.kinds)
+
+    looking? =
+      kind == "execute" and "look" in conn.allow and
+        Kiro.Permission.looking?(Kiro.Permission.command(p, acc.commands))
+
     wanted =
-      if Kiro.Permission.kind(p, acc.kinds) in conn.allow or (server && server in conn.mcp),
+      if kind in conn.allow or looking? or (server && server in conn.mcp),
         do: "allow",
         else: "reject"
 
@@ -272,7 +280,17 @@ defmodule Factory.Kiro.Ask do
         do: Map.put(acc.kinds, update["toolCallId"], update["kind"]),
         else: acc.kinds
 
-    {:cont, %{acc | last: "", tooled: true, kinds: kinds}}
+    # And the command, for a request to run one.
+    commands =
+      case {update["toolCallId"], Kiro.Permission.command_of(update)} do
+        {id, command} when is_binary(id) and is_binary(command) ->
+          Map.put(acc.commands, id, command)
+
+        _ ->
+          acc.commands
+      end
+
+    {:cont, %{acc | last: "", tooled: true, kinds: kinds, commands: commands}}
   end
 
   defp handle(_conn, _msg, _id, acc), do: {:cont, acc}

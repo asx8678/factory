@@ -313,7 +313,7 @@ defmodule Factory.Specs do
                      Factory.Kiro.ask(prompt,
                        workdir: dir,
                        model: model,
-                       allow: ["read", "search"],
+                       allow: ["read", "search", "look"],
                        on_tool:
                          &broadcast(
                            "spec:#{spec.id}",
@@ -556,7 +556,7 @@ defmodule Factory.Specs do
                  [
                    workdir: dir,
                    model: model,
-                   allow: ["read", "search"],
+                   allow: ["read", "search", "look"],
                    on_tool: on_tool,
                    usage: %{source: source, spec_id: spec.id}
                  ] ++ opts
@@ -776,7 +776,7 @@ defmodule Factory.Specs do
                    Factory.Kiro.ask(prompt,
                      workdir: dir,
                      model: model,
-                     allow: ["read", "search"],
+                     allow: ["read", "search", "look"],
                      on_tool: on_tool,
                      usage: %{source: "improve_task", spec_id: spec.id}
                    ) do
@@ -814,7 +814,7 @@ defmodule Factory.Specs do
                Factory.Kiro.ask(prompt,
                  workdir: dir,
                  model: model,
-                 allow: ["read", "search"],
+                 allow: ["read", "search", "look"],
                  on_tool: on_tool,
                  usage: %{source: "draft_task", spec_id: spec.id}
                ) do
