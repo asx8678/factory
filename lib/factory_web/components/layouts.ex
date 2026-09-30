@@ -58,7 +58,7 @@ defmodule FactoryWeb.Layouts do
 
     ~H"""
     <header class="sticky top-0 z-30 border-b border-base-300 bg-base-100/85 backdrop-blur">
-      <div class="mx-auto flex h-12 max-w-7xl items-stretch gap-3 px-4 sm:gap-5 sm:px-6">
+      <div class="mx-auto flex h-11 max-w-7xl items-stretch gap-3 px-4 sm:gap-5 sm:px-6">
         <.link
           navigate={~p"/"}
           class="flex items-center gap-2 text-[14px] font-semibold tracking-tight"
@@ -110,10 +110,10 @@ defmodule FactoryWeb.Layouts do
       </div>
     </header>
 
-    <main :if={@full} class="h-[calc(100dvh-3rem)] overflow-hidden">
+    <main :if={@full} class="h-[calc(100dvh-2.75rem)] overflow-hidden">
       {render_slot(@inner_block)}
     </main>
-    <main :if={!@full} class="mx-auto max-w-7xl px-4 py-8 sm:px-6 sm:py-10">
+    <main :if={!@full} class="mx-auto max-w-7xl px-4 py-6 sm:px-6">
       {render_slot(@inner_block)}
     </main>
 
@@ -198,14 +198,12 @@ defmodule FactoryWeb.Layouts do
 
   def page_title(assigns) do
     ~H"""
-    <div class="mb-8 flex flex-wrap items-end justify-between gap-4">
+    <div class="mb-5 flex flex-wrap items-end justify-between gap-3">
       <div>
-        <h1 class="text-3xl font-semibold tracking-tight font-stretch-semi-condensed sm:text-4xl">
-          {@title}
-        </h1>
-        <p :if={@subtitle} class="mt-1.5 text-[15px] text-base-content/60">{@subtitle}</p>
+        <h1 class="text-xl font-semibold tracking-tight">{@title}</h1>
+        <p :if={@subtitle} class="mt-0.5 text-[13px] text-base-content/60">{@subtitle}</p>
       </div>
-      <div :if={@actions != []} class="flex items-center gap-3">{render_slot(@actions)}</div>
+      <div :if={@actions != []} class="flex items-center gap-2">{render_slot(@actions)}</div>
     </div>
     """
   end
@@ -217,7 +215,7 @@ defmodule FactoryWeb.Layouts do
     ~H"""
     <.link
       navigate={@to}
-      class="mb-3 inline-flex items-center gap-1 text-sm text-base-content/55 hover:text-base-content"
+      class="mb-2 inline-flex items-center gap-1 text-[13px] text-base-content/55 hover:text-base-content"
     >
       <.icon name="hero-chevron-left-mini" class="size-4" /> {render_slot(@inner_block)}
     </.link>
@@ -281,7 +279,7 @@ defmodule FactoryWeb.Layouts do
   def theme_toggle(assigns) do
     ~H"""
     <button
-      class="hidden size-8 place-items-center rounded-md text-base-content/60 hover:bg-base-300/60 hover:text-base-content dark:grid"
+      class="hidden size-7 place-items-center rounded-md text-base-content/60 hover:bg-base-300/60 hover:text-base-content dark:grid"
       phx-click={JS.dispatch("phx:set-theme")}
       data-phx-theme="light"
       aria-label="Switch to light theme"
@@ -289,7 +287,7 @@ defmodule FactoryWeb.Layouts do
       <.icon name="hero-sun-micro" class="size-4" />
     </button>
     <button
-      class="grid size-8 place-items-center rounded-md text-base-content/60 hover:bg-base-300/60 hover:text-base-content dark:hidden"
+      class="grid size-7 place-items-center rounded-md text-base-content/60 hover:bg-base-300/60 hover:text-base-content dark:hidden"
       phx-click={JS.dispatch("phx:set-theme")}
       data-phx-theme="dark"
       aria-label="Switch to dark theme"

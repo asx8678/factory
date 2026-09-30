@@ -165,7 +165,7 @@ defmodule FactoryWeb.TaskList do
               class="block w-full text-left"
             >
               <span class={[
-                "block text-[15px] font-medium leading-6 text-pretty",
+                "block text-[14px] font-medium leading-6 text-pretty",
                 task.done && "text-base-content/50 line-through"
               ]}>
                 <.inline text={task.title} />
@@ -611,7 +611,7 @@ defmodule FactoryWeb.TaskList do
           autocomplete="off"
           placeholder="What should be done? e.g. Export invoices as CSV"
           phx-mounted={JS.focus()}
-          class="h-9 w-full rounded-md border border-base-300 bg-base-100 outline-none placeholder:text-base-content/40 focus:border-base-content/30 px-3 text-[15px] font-medium"
+          class="h-8 w-full rounded-md border border-base-300 bg-base-100 outline-none placeholder:text-base-content/40 focus:border-base-content/30 px-3 text-[14px] font-medium"
         />
         <textarea
           name="notes"
@@ -681,7 +681,7 @@ defmodule FactoryWeb.TaskList do
           value={@draft.suggestion.title}
           required
           autocomplete="off"
-          class="h-9 w-full rounded-md border border-base-300 bg-base-100 outline-none placeholder:text-base-content/40 focus:border-base-content/30 px-3 text-[15px] font-medium"
+          class="h-8 w-full rounded-md border border-base-300 bg-base-100 outline-none placeholder:text-base-content/40 focus:border-base-content/30 px-3 text-[14px] font-medium"
         />
         <textarea
           name="details"
@@ -716,7 +716,7 @@ defmodule FactoryWeb.TaskList do
       <p class="flex items-center gap-1.5 text-xs font-medium text-info">
         <.icon name="hero-sparkles-micro" class="size-3.5" /> {@label}
       </p>
-      <p class="text-[15px] font-medium leading-6"><.inline text={@suggestion.title} /></p>
+      <p class="text-[14px] font-medium leading-6"><.inline text={@suggestion.title} /></p>
       <ul
         :if={@suggestion.details != []}
         class="max-w-[72ch] space-y-1.5 text-[13px] leading-[1.6] text-base-content/80"

@@ -35,7 +35,7 @@ defmodule FactoryWeb.SpecParts do
             disabled={@locked}
             aria-pressed={to_string(s.id in @selected)}
             class={[
-              "flex w-full items-center gap-3 px-3.5 py-2 text-left text-sm transition-colors disabled:cursor-default",
+              "flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-sm transition-colors disabled:cursor-default",
               if(s.id in @selected, do: "bg-primary/[0.07]", else: "hover:bg-base-200/60")
             ]}
           >
@@ -49,7 +49,7 @@ defmodule FactoryWeb.SpecParts do
               <.icon :if={s.id in @selected} name="hero-check-micro" class="size-3" />
             </span>
             <.category_icon spec={s} />
-            <span class="w-44 shrink-0 truncate font-medium">{s.name}</span>
+            <span class="w-40 shrink-0 truncate font-medium">{s.name}</span>
             <span class="min-w-0 flex-1 truncate text-base-content/55">{preview(s.overview)}</span>
           </button>
         </li>
@@ -112,10 +112,10 @@ defmodule FactoryWeb.SpecParts do
 
     ~H"""
     <span
-      class={["grid size-7 shrink-0 place-items-center rounded-lg", elem(@category, 2)]}
+      class={["grid size-6 shrink-0 place-items-center rounded-md", elem(@category, 2)]}
       title={elem(@category, 0)}
     >
-      <.icon name={elem(@category, 1)} class="size-4" />
+      <.icon name={elem(@category, 1)} class="size-3.5" />
     </span>
     """
   end

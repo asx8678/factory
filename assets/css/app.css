@@ -54,8 +54,8 @@
   --radius-selector: 0.25rem;
   --radius-field: 0.25rem;
   --radius-box: 0.5rem;
-  --size-selector: 0.21875rem;
-  --size-field: 0.21875rem;
+  --size-selector: 0.1875rem;
+  --size-field: 0.1875rem;
   --border: 1.5px;
   --depth: 0;
   --noise: 0;
@@ -89,8 +89,8 @@
   --radius-selector: 0.25rem;
   --radius-field: 0.25rem;
   --radius-box: 0.5rem;
-  --size-selector: 0.21875rem;
-  --size-field: 0.21875rem;
+  --size-selector: 0.1875rem;
+  --size-field: 0.1875rem;
   --border: 1.5px;
   --depth: 1;
   --noise: 0;
@@ -107,6 +107,26 @@
 @theme {
   --font-sans: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "Martian Mono", ui-monospace, "SF Mono", monospace;
+
+  /* A compact scale for a tool used all day: 13px controls, 14px reading text, and a
+     slightly tighter spacing unit, so padding, gaps, icons and heights shrink together. */
+  --spacing: 0.225rem;
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1.35;
+  --text-sm: 0.8125rem;
+  --text-sm--line-height: 1.45;
+  --text-base: 0.875rem;
+  --text-base--line-height: 1.55;
+  --text-lg: 1rem;
+  --text-lg--line-height: 1.45;
+  --text-xl: 1.125rem;
+  --text-xl--line-height: 1.35;
+  --text-2xl: 1.375rem;
+  --text-2xl--line-height: 1.25;
+  --text-3xl: 1.625rem;
+  --text-3xl--line-height: 1.2;
+  --text-4xl: 1.875rem;
+  --text-4xl--line-height: 1.15;
 }
 
 /* Add variants based on LiveView classes */
@@ -123,10 +143,16 @@
 /* This file is for your main application CSS */
 
 body {
+  font-size: 0.875rem;
+  line-height: 1.5;
   font-feature-settings: "tnum" 0;
   background-color: var(--color-base-100);
   -webkit-font-smoothing: antialiased;
 }
+
+/* Martian Mono is wide next to Instrument Sans: paths, ids and values set in it are
+   narrowed, as inline code already is. */
+.font-mono { font-stretch: 85%; }
 
 /* In the base layer so utilities like focus-visible:outline-none can override it. */
 @layer base {
@@ -262,8 +288,8 @@ body {
 }
 
 /* Rendered Markdown in chat replies */
-.md { font-size: 15px; line-height: 1.75; overflow-wrap: anywhere; }
-.md > * + * { margin-top: 0.85em; }
+.md { font-size: 14px; line-height: 1.65; overflow-wrap: anywhere; }
+.md > * + * { margin-top: 0.75em; }
 .md h1, .md h2, .md h3, .md h4 { font-weight: 600; line-height: 1.3; letter-spacing: -0.01em; }
 .md h1 { font-size: 1.35em; margin-top: 1.4em; }
 .md h2 { font-size: 1.2em; margin-top: 1.3em; }

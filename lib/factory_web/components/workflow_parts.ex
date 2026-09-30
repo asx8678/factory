@@ -45,7 +45,7 @@ defmodule FactoryWeb.WorkflowParts do
         phx-change="context_change"
         phx-submit="save_context"
         phx-click-away={!@dirty && @close}
-        class="flex h-full max-h-[760px] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-base-content/10 bg-surface shadow-2xl"
+        class="flex h-full max-h-[760px] w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-base-content/10 bg-surface shadow-2xl"
       >
         <header class="flex h-14 shrink-0 items-center gap-2 border-b border-base-content/10 pl-4 pr-3">
           <.icon name={FactoryWeb.AgentKinds.icon(@agent.kind)} class="size-4 shrink-0 opacity-60" />
@@ -247,24 +247,24 @@ defmodule FactoryWeb.WorkflowParts do
     ~H"""
     <div
       id="workflow-bar"
-      class="flex min-h-13 flex-wrap items-center gap-x-3 gap-y-2 border-b border-base-300 bg-base-100 px-4 py-2 sm:px-6"
+      class="flex min-h-11 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-base-300 bg-base-100 px-4 py-1.5 sm:px-6"
     >
       <details
         id="workflow-picker"
         class="relative"
         phx-click-away={JS.remove_attribute("open", to: "#workflow-picker")}
       >
-        <summary class="flex cursor-pointer list-none items-center gap-2 rounded-lg border border-base-300 px-3 py-1.5 text-sm hover:border-base-content/25 [&::-webkit-details-marker]:hidden">
+        <summary class="flex h-7 cursor-pointer list-none items-center gap-1.5 rounded-md border border-base-300 px-2 text-sm hover:border-base-content/25 [&::-webkit-details-marker]:hidden">
           <.icon name="hero-squares-2x2-mini" class="size-4 text-base-content/50" />
           <span class="text-base-content/55">Select workflow</span>
           <.icon name="hero-chevron-down-mini" class="size-4 text-base-content/40" />
         </summary>
         <div class="absolute left-0 z-40 mt-1.5 w-80 rounded-xl border border-base-content/10 bg-surface p-1.5 shadow-xl">
-          <p class="px-2.5 pb-1 pt-1.5 text-[11px] font-medium uppercase tracking-wide text-base-content/45">
+          <p class="px-2.5 pb-1 pt-1.5 text-[11px] font-medium text-base-content/45">
             Standard
           </p>
           <.workflow_item :for={w <- @standard} w={w} open={w.id == @workflow.id} />
-          <p class="px-2.5 pb-1 pt-3 text-[11px] font-medium uppercase tracking-wide text-base-content/45">
+          <p class="px-2.5 pb-1 pt-3 text-[11px] font-medium text-base-content/45">
             Custom
           </p>
           <p :if={@custom == []} class="px-2.5 pb-2 text-xs text-base-content/50">
@@ -280,24 +280,24 @@ defmodule FactoryWeb.WorkflowParts do
           name={type_icon(@workflow.key, :micro)}
           class="size-4 shrink-0 text-primary"
         />
-        <h1 id="workflow-name" class="truncate text-[15px] font-semibold">{@workflow.name}</h1>
+        <h1 id="workflow-name" class="truncate text-[14px] font-semibold">{@workflow.name}</h1>
         <span
           :if={@workflow.key}
-          class="rounded bg-base-content/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-base-content/60"
+          class="rounded bg-base-content/10 px-1.5 py-0.5 text-[11px] font-medium text-base-content/60"
         >
           Standard
         </span>
         <span
           :if={@modified}
           id="workflow-modified"
-          class="rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-warning"
+          class="rounded bg-warning/15 px-1.5 py-0.5 text-[11px] font-medium text-warning"
         >
           Modified
         </span>
         <span
           :if={@workflow.current}
           title="Plain chats talk to this workflow's agents"
-          class="rounded bg-success/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-success"
+          class="rounded bg-success/15 px-1.5 py-0.5 text-[11px] font-medium text-success"
         >
           Used in chat
         </span>
@@ -318,7 +318,7 @@ defmodule FactoryWeb.WorkflowParts do
           placeholder="Workflow name"
           maxlength="60"
           phx-mounted={JS.focus()}
-          class="h-8 w-60 rounded-md border border-base-300 bg-base-100 px-2.5 text-sm outline-none focus:border-base-content/30"
+          class="h-7 w-60 rounded-md border border-base-300 bg-base-100 px-2.5 text-sm outline-none focus:border-base-content/30"
         />
         <button class="btn btn-primary btn-xs">
           {if @naming == "new", do: "Create", else: "Rename"}
@@ -423,11 +423,11 @@ defmodule FactoryWeb.WorkflowParts do
       data-confirm={@confirm}
       disabled={@disabled}
       class={[
-        "inline-flex h-8 items-center gap-1.5 rounded-md px-2.5 text-sm text-base-content/70 transition-colors hover:bg-base-content/[0.06] hover:text-base-content disabled:pointer-events-none disabled:opacity-40",
+        "inline-flex h-7 items-center gap-1 rounded-md px-2 text-sm text-base-content/70 transition-colors hover:bg-base-content/[0.06] hover:text-base-content disabled:pointer-events-none disabled:opacity-40",
         @danger && "hover:bg-error/10 hover:text-error"
       ]}
     >
-      <.icon name={@icon} class="size-4" />
+      <.icon name={@icon} class="size-3.5" />
       {render_slot(@inner_block)}
     </button>
     """
@@ -466,7 +466,7 @@ defmodule FactoryWeb.WorkflowParts do
         id="link-prompt-form"
         phx-submit="link_prompt_save"
         phx-click-away="link_prompt_close"
-        class="drawer-in w-full max-w-xl overflow-hidden rounded-2xl border border-base-content/10 bg-surface shadow-2xl"
+        class="drawer-in w-full max-w-xl overflow-hidden rounded-xl border border-base-content/10 bg-surface shadow-2xl"
         role="dialog"
         aria-modal="true"
         aria-labelledby="link-prompt-title"
@@ -534,7 +534,7 @@ defmodule FactoryWeb.WorkflowParts do
     ~H"""
     <aside
       id={"panel-#{@selected.id}"}
-      class="drawer-in absolute inset-x-3 bottom-3 flex max-h-[70%] flex-col overflow-hidden rounded-2xl border border-base-content/10 bg-surface shadow-xl sm:inset-x-auto sm:right-3 sm:top-3 sm:max-h-none sm:w-[340px]"
+      class="drawer-in absolute inset-x-3 bottom-3 flex max-h-[70%] flex-col overflow-hidden rounded-xl border border-base-content/10 bg-surface shadow-xl sm:inset-x-auto sm:right-3 sm:top-3 sm:max-h-none sm:w-[340px]"
     >
       <.form
         for={@form}

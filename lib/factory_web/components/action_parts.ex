@@ -31,14 +31,14 @@ defmodule FactoryWeb.ActionParts do
     ~H"""
     <aside
       id={"action-panel-#{@action.id}"}
-      class="drawer-in absolute inset-x-3 bottom-3 flex max-h-[70%] flex-col overflow-hidden rounded-2xl border border-warning/30 bg-surface shadow-xl sm:inset-x-auto sm:right-3 sm:top-3 sm:max-h-none sm:w-[340px]"
+      class="drawer-in absolute inset-x-3 bottom-3 flex max-h-[70%] flex-col overflow-hidden rounded-xl border border-warning/30 bg-surface shadow-xl sm:inset-x-auto sm:right-3 sm:top-3 sm:max-h-none sm:w-[340px]"
     >
       <div class="flex items-center gap-2 border-b border-base-content/10 px-4 py-3">
         <span class="grid size-8 shrink-0 place-items-center rounded-lg bg-warning/15 text-warning">
           <.icon name="hero-bolt-mini" class="size-4" />
         </span>
         <div class="min-w-0 flex-1">
-          <p class="text-[11px] uppercase tracking-wide text-warning">Action</p>
+          <p class="text-[11px] text-warning">Action</p>
           <p class="truncate text-sm text-base-content/60">{@type && @type.label}</p>
         </div>
         <button

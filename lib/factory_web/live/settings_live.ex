@@ -132,7 +132,7 @@ defmodule FactoryWeb.SettingsLive do
                   class="mt-3 divide-y divide-base-300/70 rounded-xl border border-base-300/70"
                 >
                   <li :for={m <- @models} class="flex items-baseline gap-3 px-3.5 py-2 text-sm">
-                    <span class="w-40 shrink-0 truncate font-mono text-[12.5px]">{m["value"]}</span>
+                    <span class="w-40 shrink-0 truncate font-mono text-xs font-light">{m["value"]}</span>
                     <span class="min-w-0 flex-1 truncate text-base-content/55">
                       {if m["description"] != "", do: m["description"], else: m["name"]}
                     </span>
@@ -145,7 +145,7 @@ defmodule FactoryWeb.SettingsLive do
                   </summary>
                   <ul class="mt-2 space-y-1 pl-4">
                     <li :for={m <- @modes}>
-                      <span class="font-mono text-[12.5px]">{m["value"]}</span>
+                      <span class="font-mono text-xs font-light">{m["value"]}</span>
                       <span class="text-base-content/55"> · {m["description"]}</span>
                     </li>
                   </ul>
@@ -155,7 +155,15 @@ defmodule FactoryWeb.SettingsLive do
               <dl id="settings-facts" class="divide-y divide-base-300/70">
                 <div :for={{label, value, hint} <- facts()} class="py-3">
                   <dt class="text-sm font-medium">{label}</dt>
-                  <dd class="mt-0.5 break-all font-mono text-[12.5px]">{value}</dd>
+                  <dd class={[
+                    "mt-0.5 break-all",
+                    if(String.starts_with?(value, "/"),
+                      do: "font-mono text-xs font-light",
+                      else: "text-sm"
+                    )
+                  ]}>
+                    {value}
+                  </dd>
                   <dd class="mt-1 text-[13px] text-base-content/55">{hint}</dd>
                 </div>
               </dl>

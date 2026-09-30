@@ -772,7 +772,7 @@ defmodule FactoryWeb.SpecLive do
             maxlength="80"
             phx-debounce="500"
             aria-label="Spec name"
-            class="-mx-1 w-full rounded-md bg-transparent px-1 text-3xl font-semibold tracking-tight font-stretch-semi-condensed outline-none hover:bg-base-200 focus:bg-base-200 sm:text-4xl"
+            class="-mx-1 w-full rounded-md bg-transparent px-1 text-xl font-semibold tracking-tight outline-none hover:bg-base-200 focus:bg-base-200"
           />
         </form>
         <div class="flex items-center gap-2 pt-1">
@@ -902,7 +902,7 @@ defmodule FactoryWeb.SpecLive do
         phx-key="Escape"
       >
         <div class="absolute inset-0" phx-click="cancel_delete" aria-hidden="true"></div>
-        <div class="relative w-full max-w-md rounded-2xl border border-base-300 bg-base-100 p-6 shadow-2xl">
+        <div class="relative w-full max-w-md rounded-xl border border-base-300 bg-base-100 p-6 shadow-2xl">
           <div class="flex items-start gap-3">
             <span class="grid size-9 shrink-0 place-items-center rounded-full bg-error/15 text-error">
               <.icon name="hero-trash" class="size-5" />

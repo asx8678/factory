@@ -43,7 +43,7 @@ defmodule FactoryWeb.RunParts do
   def type_badge(assigns) do
     ~H"""
     <span class={[
-      "inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide",
+      "inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium",
       if(@kind, do: "bg-primary/15 text-primary", else: "bg-base-content/10 text-base-content/60"),
       @class
     ]}>

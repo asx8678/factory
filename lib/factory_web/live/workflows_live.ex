@@ -1023,7 +1023,7 @@ defmodule FactoryWeb.WorkflowsLive do
           phx-key="Escape"
         >
           <div class="absolute inset-0" phx-click="wf_base_close" aria-hidden="true"></div>
-          <div class="relative flex max-h-full w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-base-300 bg-base-100 shadow-2xl">
+          <div class="relative flex max-h-full w-full max-w-lg flex-col overflow-hidden rounded-xl border border-base-300 bg-base-100 shadow-2xl">
             <header class="border-b border-base-300 px-5 py-4">
               <h2 class="font-semibold">Base specs for {@workflow.name}</h2>
               <p class="text-sm text-base-content/55">

@@ -334,18 +334,18 @@ defmodule FactoryWeb.SpecsLive do
               id={"spec-#{s.id}"}
               class="group cursor-pointer border-b border-base-300 hover:bg-base-200"
             >
-              <td class="py-3 pr-4">
+              <td class="py-2 pr-4">
                 <.link navigate={~p"/specs/#{s.id}"} class="font-medium">{s.name}</.link>
               </td>
-              <td class="py-3 pr-4"><.progress spec={s} /></td>
-              <td class="py-3 pr-4"><.review_cell review={s.review} /></td>
-              <td class="py-3 pr-4 tabular-nums text-base-content/75">
+              <td class="py-2 pr-4"><.progress spec={s} /></td>
+              <td class="py-2 pr-4"><.review_cell review={s.review} /></td>
+              <td class="py-2 pr-4 tabular-nums text-base-content/75">
                 {case length(Specs.tasks(s)) do
                   0 -> "–"
                   n -> n
                 end}
               </td>
-              <td class="py-3 pr-4">
+              <td class="py-2 pr-4">
                 <span :if={s.runs == []} class="text-base-content/40">–</span>
                 <span :if={run = List.first(s.runs)} class="flex items-center gap-2">
                   <Layouts.status_badge status={run.status} />
@@ -357,7 +357,7 @@ defmodule FactoryWeb.SpecsLive do
               <td class="whitespace-nowrap py-3 text-right text-base-content/55">
                 {Layouts.ago(s.updated_at)}
               </td>
-              <td class="py-3 pl-2 text-right">
+              <td class="py-2 pl-2 text-right">
                 <button
                   phx-click="delete"
                   phx-value-id={s.id}
@@ -459,7 +459,7 @@ defmodule FactoryWeb.SpecsLive do
           id="base-spec-form"
           phx-change="base_change"
           phx-submit="base_save"
-          class="relative flex max-h-full w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-base-300 bg-base-100 shadow-2xl"
+          class="relative flex max-h-full w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-base-300 bg-base-100 shadow-2xl"
         >
           <header class="border-b border-base-300 px-5 py-4">
             <h2 class="font-semibold">{if @base.id, do: "Base spec", else: "New base spec"}</h2>

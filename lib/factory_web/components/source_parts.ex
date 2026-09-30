@@ -46,7 +46,7 @@ defmodule FactoryWeb.SourceParts do
     >
       <.focus_wrap
         id="sources-dialog"
-        class="hidden drawer-in w-full max-w-2xl overflow-hidden rounded-2xl border border-base-content/10 bg-surface shadow-2xl"
+        class="hidden drawer-in w-full max-w-2xl overflow-hidden rounded-xl border border-base-content/10 bg-surface shadow-2xl"
         phx-click-away="sources_close"
         role="dialog"
         aria-modal="true"

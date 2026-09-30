@@ -25,7 +25,7 @@
   )
 </script>
 
-<div class="w-56 rounded-2xl border border-base-content/10 bg-surface p-1.5 shadow-md">
+<div class="w-56 rounded-xl border border-base-content/10 bg-surface p-1.5 shadow-md">
   <button
     type="button"
     class="flex w-full items-center gap-1.5 rounded-lg px-1.5 py-1 text-left"
@@ -33,7 +33,7 @@
     aria-expanded={open}
   >
     <span class="hero-bolt-micro size-3.5 text-warning"></span>
-    <span class="text-[11px] font-semibold uppercase tracking-wide text-base-content/65">Actions</span>
+    <span class="text-[11px] font-semibold text-base-content/65">Actions</span>
     <span class={["hero-chevron-down-micro ml-auto size-3.5 opacity-50 transition-transform", !open && "-rotate-90"]}></span>
   </button>
 
@@ -42,7 +42,7 @@
       Add one, then draw an arrow from the agent it follows.
     </p>
     {#each Object.entries(groups) as [group, items]}
-      <p class="px-1.5 pb-0.5 pt-1.5 text-[10px] font-medium uppercase tracking-wide text-base-content/40">{group}</p>
+      <p class="px-1.5 pb-0.5 pt-1.5 text-[11px] font-medium text-base-content/40">{group}</p>
       {#each items as t (t.type)}
         <button
           type="button"

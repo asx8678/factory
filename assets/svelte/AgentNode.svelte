@@ -88,7 +88,7 @@
 
 <div
   class={[
-    "group w-60 rounded-2xl border bg-surface text-base-content shadow-sm transition-[box-shadow,border-color] hover:shadow-md",
+    "group w-60 rounded-xl border bg-surface text-base-content shadow-sm transition-[box-shadow,border-color] hover:shadow-md",
     selected ? "border-primary/70 ring-2 ring-primary/20" : "border-base-content/10 hover:border-base-content/20",
   ]}
 >
@@ -142,7 +142,7 @@
       <div class="truncate text-[11px] opacity-55">{data.kiro ? data.model : "Not connected"}</div>
     </div>
     {#if data.kiro}
-      <span class="shrink-0 self-start rounded-md bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium text-primary" title={data.shared ? "Talks in the shared Kiro session" : "Has its own Kiro session"}>{data.shared ? "Kiro · shared" : "Kiro"}</span>
+      <span class="shrink-0 self-start rounded-md bg-primary/15 px-1.5 py-0.5 text-[11px] font-medium text-primary" title={data.shared ? "Talks in the shared Kiro session" : "Has its own Kiro session"}>{data.shared ? "Kiro · shared" : "Kiro"}</span>
     {/if}
   </div>
 

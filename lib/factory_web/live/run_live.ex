@@ -77,7 +77,7 @@ defmodule FactoryWeb.RunLive do
             <.run_state run={@run} />
             <span class="text-xs text-base-content/45">Started {Layouts.ago(@run.inserted_at)}</span>
           </div>
-          <h1 class="mt-2 text-3xl font-semibold tracking-tight font-stretch-semi-condensed sm:text-4xl">
+          <h1 class="mt-1 text-xl font-semibold tracking-tight">
             {@run.title}
           </h1>
         </div>

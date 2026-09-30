@@ -287,7 +287,7 @@ defmodule FactoryWeb.UsageLive do
               </.link>
               <span
                 :if={d.date == @peak and @scale > 0}
-                class="pointer-events-none absolute left-1/2 -translate-x-1/2 whitespace-nowrap text-[10px] font-medium tabular-nums text-base-content/70"
+                class="pointer-events-none absolute left-1/2 -translate-x-1/2 whitespace-nowrap text-[11px] font-medium tabular-nums text-base-content/70"
                 style={"bottom: calc(#{d.credits / @scale * 100}% + 4px)"}
               >
                 {Fmt.credits(d.credits)}
@@ -383,15 +383,18 @@ defmodule FactoryWeb.UsageLive do
                                                                                do: " of this kind"}.
         </p>
 
-        <ol id="usage-sessions" class="space-y-2">
+        <ol
+          id="usage-sessions"
+          class="divide-y divide-base-300/70 overflow-hidden rounded-lg border border-base-300/70 empty:hidden"
+        >
           <li
             :for={s <- @sessions}
             id={"session-#{Usage.key_to_param(s.key)}"}
             class={[
-              "rounded-xl border",
+              "transition-colors",
               if(@open == s.key,
-                do: "task-card-active",
-                else: "border-base-300/70 bg-base-200/40 hover:border-base-content/15"
+                do: "bg-primary/[0.05]",
+                else: "hover:bg-base-content/[0.03]"
               )
             ]}
           >
@@ -401,16 +404,16 @@ defmodule FactoryWeb.UsageLive do
                   open: if(@open == s.key, do: nil, else: Usage.key_to_param(s.key))
                 )
               }
-              class="flex flex-wrap items-center gap-x-4 gap-y-1 px-4 py-3"
+              class="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2"
             >
               <span class={[
-                "rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide",
+                "rounded px-1.5 py-0.5 text-[11px] font-medium",
                 kind_class(s.kind)
               ]}>
                 {s.kind}
               </span>
               <span class="min-w-0 flex-1">
-                <span class="block truncate text-[15px] font-medium">{s.title}</span>
+                <span class="block truncate text-[14px] font-medium">{s.title}</span>
                 <span class="block text-xs text-base-content/50">
                   {time_range(s)} · {sources_summary(s.by_source)}
                 </span>

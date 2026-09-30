@@ -44,7 +44,7 @@ defmodule FactoryWeb.SuggestTasks do
     >
       <div class="absolute inset-0" phx-click="close_suggest" aria-hidden="true"></div>
 
-      <div class="relative flex max-h-full min-h-[min(34rem,100%)] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-base-300 bg-base-100 shadow-2xl">
+      <div class="relative flex max-h-full min-h-[min(34rem,100%)] w-full max-w-4xl flex-col overflow-hidden rounded-xl border border-base-300 bg-base-100 shadow-2xl">
         <header class="flex flex-wrap items-center gap-x-6 gap-y-3 border-b border-base-300 px-5 py-4 sm:px-6">
           <h2 id="suggest-title" class="text-lg font-semibold tracking-tight">
             Suggest tasks with Kiro
@@ -124,7 +124,7 @@ defmodule FactoryWeb.SuggestTasks do
     <form id="plan-read" phx-submit="plan_read" class="flex min-h-0 flex-1 flex-col">
       <div class="flex-1 overflow-y-auto px-5 py-6 sm:px-6">
         <div class="max-w-2xl">
-          <p class="text-[15px] leading-relaxed text-base-content/75">
+          <p class="text-[14px] leading-relaxed text-base-content/75">
             Kiro first reads the project to learn how it's built. It can read files but can't change
             them or run commands. Then it asks you a few questions and suggests about 20 tasks
             you can pick from.

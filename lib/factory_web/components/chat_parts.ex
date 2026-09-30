@@ -98,7 +98,7 @@ defmodule FactoryWeb.ChatParts do
         <span class="max-w-48 truncate">{@workflow.name}</span>
         <.icon name="hero-chevron-down-mini" class="size-4 opacity-50" />
       </summary>
-      <div class="absolute left-0 z-30 mt-1 w-72 rounded-2xl border border-base-content/10 bg-surface p-1.5 shadow-xl">
+      <div class="absolute left-0 z-30 mt-1 w-72 rounded-xl border border-base-content/10 bg-surface p-1.5 shadow-xl">
         <p class="px-3 pb-1 pt-1.5 text-xs text-base-content/45">Workflow</p>
         <button
           :for={w <- @workflows}
@@ -168,10 +168,10 @@ defmodule FactoryWeb.ChatParts do
       phx-click-away={JS.remove_attribute("open", to: "#chat-switcher")}
     >
       <summary class="flex cursor-pointer list-none items-center gap-1 rounded-full px-3 py-1 hover:bg-base-content/[0.06]">
-        <span class="truncate text-[15px] font-semibold">{if @run, do: @run.title, else: "New run"}</span>
+        <span class="truncate text-[14px] font-semibold">{if @run, do: @run.title, else: "New run"}</span>
         <.icon name="hero-chevron-down-mini" class="size-4 shrink-0 opacity-50" />
       </summary>
-      <div class="absolute left-0 z-30 mt-1 w-72 rounded-2xl border border-base-content/10 bg-surface p-1.5 shadow-xl">
+      <div class="absolute left-0 z-30 mt-1 w-72 rounded-xl border border-base-content/10 bg-surface p-1.5 shadow-xl">
         <.link
           navigate={~p"/chat"}
           class="flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-medium hover:bg-base-content/[0.06]"
@@ -350,10 +350,10 @@ defmodule FactoryWeb.ChatParts do
   def greeting(%{focus: nil, dir_ok: true} = assigns) do
     ~H"""
     <div id="chat-ready" class="relative w-full max-w-3xl px-1">
-      <p class="text-xs font-medium uppercase tracking-[0.12em] text-base-content/45">
+      <p class="text-xs font-medium text-base-content/45">
         New run · {Calendar.strftime(Date.utc_today(), "%-d %b")}
       </p>
-      <h1 class="mt-1.5 text-[28px] font-semibold leading-tight tracking-tight font-stretch-semi-condensed">
+      <h1 class="mt-1 text-2xl font-semibold leading-tight tracking-tight">
         What are we building in <span class="text-primary">{Path.basename(@dir)}</span>?
       </h1>
 
@@ -363,7 +363,7 @@ defmodule FactoryWeb.ChatParts do
             <.icon name="hero-folder-mini" class="size-4" />
           </span>
           <dt class="text-base-content/50">Project</dt>
-          <dd class="truncate font-mono text-[12.5px] text-base-content/80" title={@dir}>
+          <dd class="truncate font-mono text-xs font-light text-base-content/80" title={@dir}>
             {short_dir(@dir)}
           </dd>
           <button
@@ -420,7 +420,7 @@ defmodule FactoryWeb.ChatParts do
         </div>
       </dl>
 
-      <p class="mt-6 max-w-2xl text-[15px] leading-relaxed text-base-content/65">
+      <p class="mt-6 max-w-2xl text-[14px] leading-relaxed text-base-content/65">
         Describe the change below. {if is_map(@to), do: @to.name, else: "The planner"} reads
         the code, asks about anything unclear, and lists the tasks for you to refine. Starting
         from a requirements document instead?
@@ -473,7 +473,7 @@ defmodule FactoryWeb.ChatParts do
   def greeting(%{focus: nil} = assigns) do
     ~H"""
     <div id="chat-start" class="mb-8 w-full max-w-xl">
-      <h1 class="text-center text-4xl font-semibold tracking-tight font-stretch-semi-condensed">
+      <h1 class="text-center text-2xl font-semibold tracking-tight">
         What should we build?
       </h1>
       <p class="mt-3 text-center text-base-content/60">
@@ -487,7 +487,7 @@ defmodule FactoryWeb.ChatParts do
             type="button"
             phx-click="browse"
             class={[
-              "flex w-full items-center gap-3 rounded-2xl border px-4 py-3 text-left transition-colors",
+              "flex w-full items-center gap-3 rounded-xl border px-4 py-3 text-left transition-colors",
               if(@dir_ok,
                 do: "border-success/40 bg-success/[0.06] hover:border-success/70",
                 else: "border-error/50 bg-error/[0.06] hover:border-error"
@@ -514,7 +514,7 @@ defmodule FactoryWeb.ChatParts do
             <span class="text-xs text-base-content/55">{if @dir_ok, do: "Change", else: "Browse…"}</span>
           </button>
         </li>
-        <li class="flex items-center gap-3 rounded-2xl border border-base-300/70 px-4 py-3">
+        <li class="flex items-center gap-3 rounded-xl border border-base-300/70 px-4 py-3">
           <span class="grid size-6 shrink-0 place-items-center rounded-full bg-success text-success-content">
             <.icon name="hero-check-micro" class="size-4" />
           </span>
@@ -530,7 +530,7 @@ defmodule FactoryWeb.ChatParts do
             id="add-spec"
             type="button"
             phx-click="specs"
-            class="flex w-full cursor-pointer items-center gap-3 rounded-2xl border border-dashed border-base-300 px-4 py-3 text-left transition-colors hover:border-base-content/30"
+            class="flex w-full cursor-pointer items-center gap-3 rounded-xl border border-dashed border-base-300 px-4 py-3 text-left transition-colors hover:border-base-content/30"
           >
             <span class="grid size-6 shrink-0 place-items-center rounded-full border border-base-content/25 text-base-content/55">
               <.icon name="hero-document-plus-micro" class="size-3.5" />
@@ -551,10 +551,10 @@ defmodule FactoryWeb.ChatParts do
   def greeting(assigns) do
     ~H"""
     <div class="mb-8 max-w-xl text-center">
-      <span class="mx-auto grid size-12 place-items-center rounded-2xl bg-base-content/[0.06]">
+      <span class="mx-auto grid size-12 place-items-center rounded-xl bg-base-content/[0.06]">
         <.icon name="hero-cpu-chip" class="size-6" />
       </span>
-      <h1 class="mt-4 text-4xl font-semibold tracking-tight font-stretch-semi-condensed">
+      <h1 class="mt-3 text-2xl font-semibold tracking-tight">
         Chat with {@focus.name}
       </h1>
       <p class="mt-3 text-base-content/60">
@@ -577,7 +577,7 @@ defmodule FactoryWeb.ChatParts do
     ~H"""
     <div id={@id} class="flex flex-col items-end gap-1">
       <span :if={@to} class="text-xs text-base-content/45">To {@to}</span>
-      <div class="max-w-[85%] rounded-3xl border border-base-300/70 bg-base-200 px-4 py-2.5 text-[15px] leading-relaxed">
+      <div class="max-w-[85%] rounded-xl border border-base-300/70 bg-base-200 px-4 py-2.5 text-[14px] leading-relaxed">
         <.attachments names={@message.attachments} />
         <p :if={@message.body != ""} class="whitespace-pre-wrap break-words" phx-no-format>{rich(@message.body)}</p>
       </div>
@@ -679,7 +679,7 @@ defmodule FactoryWeb.ChatParts do
       :if={@e["status"] == "open"}
       id={@id}
       phx-submit="elicit_answer"
-      class="mt-3 space-y-3 rounded-2xl border border-primary/30 bg-primary/5 p-3"
+      class="mt-3 space-y-3 rounded-xl border border-primary/30 bg-primary/5 p-3"
     >
       <input type="hidden" name="key" value={@e["key"]} />
       <input type="hidden" name="agent_id" value={@message.meta["agent_id"]} />
@@ -805,7 +805,7 @@ defmodule FactoryWeb.ChatParts do
     <form
       id={@id}
       phx-submit="answer"
-      class="mt-3 space-y-3 rounded-2xl border border-base-content/10 bg-base-200/40 p-3"
+      class="mt-3 space-y-3 rounded-xl border border-base-content/10 bg-base-200/40 p-3"
     >
       <input type="hidden" name="message_id" value={@message.id} />
       <fieldset :for={{q, i} <- @questions} :if={q["options"] not in [nil, []]}>
@@ -847,8 +847,8 @@ defmodule FactoryWeb.ChatParts do
   # The planner's tasks, and the question whether to build them.
   defp plan_card(assigns) do
     ~H"""
-    <div id={@id} class="task-card-active mt-3 rounded-2xl border p-4">
-      <p class="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-base-content/55">
+    <div id={@id} class="task-card-active mt-3 rounded-xl border p-4">
+      <p class="flex items-center gap-2 text-xs font-medium text-base-content/55">
         <.icon name="hero-clipboard-document-list-mini" class="size-4 text-primary" />
         Created {length(@tasks)} {if length(@tasks) == 1, do: "task", else: "tasks"}
       </p>
@@ -1103,7 +1103,7 @@ defmodule FactoryWeb.ChatParts do
     >
       <ul
         :if={@matches != []}
-        class="absolute inset-x-0 bottom-full mb-2 overflow-hidden rounded-2xl border border-base-content/10 bg-surface p-1 text-sm shadow-xl"
+        class="absolute inset-x-0 bottom-full mb-2 overflow-hidden rounded-xl border border-base-content/10 bg-surface p-1 text-sm shadow-xl"
       >
         <li :for={{cmd, desc} <- @matches}>
           <button
@@ -1112,14 +1112,14 @@ defmodule FactoryWeb.ChatParts do
             phx-value-cmd={cmd}
             class="flex w-full gap-3 rounded-xl px-3 py-2 text-left hover:bg-base-content/[0.06]"
           >
-            <span class="w-24 shrink-0 font-mono text-[13px]">{cmd}</span>
+            <span class="w-24 shrink-0 font-mono text-xs">{cmd}</span>
             <span class="text-base-content/60">{desc}</span>
           </button>
         </li>
       </ul>
 
       <div class={[
-        "composer-box rounded-[26px] border border-base-content/15 shadow-[0_1px_2px_rgb(0_0_0/0.06),0_8px_28px_-8px_rgb(0_0_0/0.28)] transition-[border-color,box-shadow] focus-within:border-base-content/30 focus-within:shadow-[0_1px_2px_rgb(0_0_0/0.06),0_10px_32px_-8px_rgb(0_0_0/0.36)]",
+        "composer-box rounded-xl border border-base-content/15 shadow-[0_1px_2px_rgb(0_0_0/0.06),0_8px_28px_-8px_rgb(0_0_0/0.28)] transition-[border-color,box-shadow] focus-within:border-base-content/30 focus-within:shadow-[0_1px_2px_rgb(0_0_0/0.06),0_10px_32px_-8px_rgb(0_0_0/0.36)]",
         @glow && "is-glow"
       ]}>
         <div :if={@uploads.spec.entries != []} class="flex flex-wrap gap-2 px-4 pt-4">
@@ -1158,11 +1158,11 @@ defmodule FactoryWeb.ChatParts do
           phx-debounce="100"
           rows="1"
           placeholder={placeholder(recipient(@focus, @to), @run, @planner)}
-          class="block max-h-[240px] min-h-[52px] w-full resize-none bg-transparent px-5 pb-1 pt-4 text-[15px] leading-6 outline-none placeholder:text-base-content/40 focus-visible:outline-none"
+          class="block max-h-[240px] min-h-[40px] w-full resize-none bg-transparent px-4 pb-1 pt-3 text-[14px] leading-6 outline-none placeholder:text-base-content/40 focus-visible:outline-none"
           aria-label="Message"
         ></textarea>
 
-        <div class="flex items-center gap-1.5 px-3 pb-3 pt-1">
+        <div class="flex items-center gap-1.5 px-2.5 pb-2.5 pt-0.5">
           <label
             for={@uploads.spec.ref}
             class="grid size-8 cursor-pointer place-items-center rounded-full border border-base-300 text-base-content/70 transition-colors hover:bg-base-content/[0.06] hover:text-base-content"
@@ -1230,7 +1230,7 @@ defmodule FactoryWeb.ChatParts do
         <span class="max-w-40 truncate">{if @current, do: @current.name, else: "Factory"}</span>
         <.icon name="hero-chevron-down-mini" class="size-4 opacity-50" />
       </summary>
-      <div class="absolute bottom-full left-0 z-30 mb-2 w-72 rounded-2xl border border-base-content/10 bg-surface p-1.5 shadow-xl">
+      <div class="absolute bottom-full left-0 z-30 mb-2 w-72 rounded-xl border border-base-content/10 bg-surface p-1.5 shadow-xl">
         <p class="px-3 pb-1 pt-1.5 text-xs text-base-content/45">Send to</p>
         <button
           :for={a <- @agents}

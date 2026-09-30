@@ -720,7 +720,7 @@ defmodule FactoryWeb.ChatLive do
               phx-update="stream"
               phx-hook="ChatScroll"
               data-history={to_string(@history?)}
-              class="mx-auto flex max-w-3xl flex-col gap-7 px-5 pt-8"
+              class="mx-auto flex max-w-3xl flex-col gap-5 px-5 pt-6"
             >
               <.message
                 :for={{id, m} <- @streams.messages}
@@ -731,7 +731,7 @@ defmodule FactoryWeb.ChatLive do
                 focus={@focus}
               />
             </div>
-            <div :if={@live != []} class="mx-auto flex max-w-3xl flex-col gap-7 px-5 pt-7">
+            <div :if={@live != []} class="mx-auto flex max-w-3xl flex-col gap-5 px-5 pt-5">
               <.agent_reply :for={s <- @live} name={s.name} body={s.text} live />
             </div>
             <%!-- Room to scroll the last message above the floating message box. --%>
@@ -780,7 +780,7 @@ defmodule FactoryWeb.ChatLive do
             />
           </div>
 
-          <div class="pointer-events-none absolute inset-3 z-20 hidden place-items-center rounded-3xl border-2 border-dashed border-primary/60 bg-base-100/85 backdrop-blur-sm group-[.phx-drop-target-active]:grid">
+          <div class="pointer-events-none absolute inset-3 z-20 hidden place-items-center rounded-xl border-2 border-dashed border-primary/60 bg-base-100/85 backdrop-blur-sm group-[.phx-drop-target-active]:grid">
             <div class="text-center">
               <.icon name="hero-document-arrow-up" class="size-8 text-primary" />
               <p class="mt-2 font-medium">Drop spec files to attach them</p>
@@ -825,7 +825,7 @@ defmodule FactoryWeb.ChatLive do
         <div class="absolute inset-0" phx-click="browse_cancel" aria-hidden="true"></div>
         <.focus_wrap
           id="folder-dialog"
-          class="relative w-full max-w-xl overflow-hidden rounded-2xl border border-base-300 bg-base-100 shadow-2xl"
+          class="relative w-full max-w-xl overflow-hidden rounded-xl border border-base-300 bg-base-100 shadow-2xl"
         >
           <FactoryWeb.SourceParts.browser browser={@browser} />
         </.focus_wrap>

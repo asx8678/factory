@@ -309,17 +309,17 @@
     {/if}
     {#if !readonly}
       <Panel position="top-left">
-        <div class="flex items-center gap-1 rounded-2xl border border-base-content/10 bg-surface p-1 shadow-md">
-          <button class="flex h-8 items-center gap-1.5 rounded-xl bg-primary px-3 text-sm font-medium text-primary-content transition-opacity hover:opacity-90" onclick={addAgent}>
+        <div class="flex items-center gap-0.5 rounded-lg border border-base-content/10 bg-surface p-0.5 shadow-sm">
+          <button class="flex h-7 items-center gap-1 rounded-md bg-primary px-2.5 text-sm font-medium text-primary-content transition-opacity hover:opacity-90" onclick={addAgent}>
             <svg viewBox="0 0 20 20" class="size-4" fill="currentColor" aria-hidden="true"><path d="M10.75 4.75a.75.75 0 0 0-1.5 0v4.5h-4.5a.75.75 0 0 0 0 1.5h4.5v4.5a.75.75 0 0 0 1.5 0v-4.5h4.5a.75.75 0 0 0 0-1.5h-4.5v-4.5Z" /></svg>
             Add agent
           </button>
-          <span class="mx-0.5 h-5 w-px bg-base-content/15"></span>
-          <button class="flex h-8 items-center gap-1.5 rounded-xl px-2.5 text-sm hover:bg-base-content/[0.06]" onclick={() => fitView({ padding: 0.3, maxZoom: 1.1, duration: 300 })} title="Fit all agents on screen">
+          <span class="mx-0.5 h-4 w-px bg-base-content/15"></span>
+          <button class="flex h-7 items-center gap-1 rounded-md px-2 text-sm text-base-content/75 hover:bg-base-content/[0.06] hover:text-base-content" onclick={() => fitView({ padding: 0.3, maxZoom: 1.1, duration: 300 })} title="Fit all agents on screen">
             <svg viewBox="0 0 20 20" class="size-4" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M3 7V3.5h3.5M17 7V3.5h-3.5M3 13v3.5h3.5M17 13v3.5h-3.5" /></svg>
             Fit
           </button>
-          <button class="flex h-8 items-center gap-1.5 rounded-xl px-2.5 text-sm hover:bg-base-content/[0.06] disabled:opacity-40" onclick={arrange} disabled={nodes.length < 2} title="Lay agents out top-down">
+          <button class="flex h-7 items-center gap-1 rounded-md px-2 text-sm text-base-content/75 hover:bg-base-content/[0.06] hover:text-base-content disabled:opacity-40" onclick={arrange} disabled={nodes.length < 2} title="Lay agents out top-down">
             <svg viewBox="0 0 20 20" class="size-4" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="7.5" y="2.5" width="5" height="4" rx="1" /><rect x="2.5" y="13.5" width="5" height="4" rx="1" /><rect x="12.5" y="13.5" width="5" height="4" rx="1" /><path stroke-linecap="round" d="M10 6.5v3.5M5 13.5V10h10v3.5" /></svg>
             Arrange
           </button>
@@ -333,11 +333,11 @@
       <Controls showLock={false} showFitView={false} position="bottom-left" />
       {#if nodes.length === 0}
         <Panel position="top-center">
-          <p class="mt-24 rounded-full border border-base-content/10 bg-surface px-4 py-2 text-sm shadow-md">No agents yet. Click Add agent to start your workflow.</p>
+          <p class="mt-24 rounded-md border border-base-content/10 bg-surface px-3 py-1.5 text-sm shadow-sm">No agents yet. Click Add agent to start your workflow.</p>
         </Panel>
       {:else if edges.length === 0}
         <Panel position="bottom-center">
-          <p class="mb-2 rounded-full border border-base-content/10 bg-surface px-4 py-2 text-sm opacity-80 shadow-md">
+          <p class="mb-2 rounded-md border border-base-content/10 bg-surface px-3 py-1.5 text-sm opacity-80 shadow-sm">
             Drag from a dot on an agent's edge to another agent to connect them. Drop on empty space to create one.
           </p>
         </Panel>
