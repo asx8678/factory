@@ -282,6 +282,20 @@ defmodule Factory.Workflows do
   end
 
   @doc """
+  The agents in a workflow that build, in hand-off order: the ones a plan's tasks can
+  be given to (`%{name:, does:}`). Planners, researchers and reviewers only read, and
+  action cards aren't agents, so they aren't among them.
+  """
+  def builders(nil), do: []
+
+  def builders(%Workflow{id: id}) do
+    for a <- ordered_agents(id),
+        a.kind != "action",
+        not Agent.read_only?(a),
+        do: %{name: a.name, does: a.role || ""}
+  end
+
+  @doc """
   A workflow's agents as steps, in hand-off order:
   `[%{"kind" =>, "name" =>, "does" =>, "agent_id" =>}]`.
   """

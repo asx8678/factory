@@ -469,6 +469,7 @@ defmodule FactoryWeb.SpecPageParts do
   attr :editing, :any, required: true
   attr :expanded, :any, required: true
   attr :filter, :string, required: true
+  attr :builders, :list, default: [], doc: "the agents its tasks can be given to, by name"
   attr :improve, :map, required: true
   attr :selected, :any, required: true
 
@@ -600,11 +601,13 @@ defmodule FactoryWeb.SpecPageParts do
         improve={@improve}
         open={@open}
         filter={@filter}
+        builders={@builders}
       />
 
       <FactoryWeb.TaskList.new_task
         :if={@step == "tasks" && @open && (@preview || @task_list == [])}
         draft={@draft}
+        builders={@builders}
       />
 
       <div

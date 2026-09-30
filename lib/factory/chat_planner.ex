@@ -79,8 +79,11 @@ defmodule Factory.ChatPlanner do
         action = mode && %{mode: mode, thin: thin_tasks(spec), findings: findings}
 
         # What the chat plans for: a review plans checks, not changes.
-        job = with %{} = w <- Factory.Workflows.for_run(run), do: Factory.Workflows.kind(w)
-        prompt_args = [planner.name, requests, base ++ files, current, action, job]
+        workflow = Factory.Workflows.for_run(run)
+        job = workflow && Factory.Workflows.kind(workflow)
+        # Who can build: each task is given to one of them, with its model.
+        agents = Factory.Workflows.builders(workflow)
+        prompt_args = [planner.name, requests, base ++ files, current, action, job, agents]
 
         prompt = %{
           full: apply(Planner, :chat_prompt, prompt_args),

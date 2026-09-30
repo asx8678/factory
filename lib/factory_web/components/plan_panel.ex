@@ -34,6 +34,8 @@ defmodule FactoryWeb.PlanPanel do
 
   attr :spec_hint, :boolean, default: false
 
+  attr :builders, :list, default: [], doc: "the agents a task can be given to, by name"
+
   attr :job, :string,
     default: nil,
     doc: "the workflow's kind: a review's plan is started, not implemented"
@@ -124,7 +126,7 @@ defmodule FactoryWeb.PlanPanel do
           id={"chat-plan-task-#{i}"}
           class={["group px-3.5 py-2.5", mark && "bg-amber-400/[0.035]"]}
         >
-          <.edit_form :if={@editing == i} task={task} i={i} />
+          <.edit_form :if={@editing == i} task={task} i={i} builders={@builders} />
           <div :if={@editing != i} class="flex gap-2.5">
             <span class={[
               "w-4 shrink-0 pt-px text-right text-xs tabular-nums",
@@ -311,9 +313,12 @@ defmodule FactoryWeb.PlanPanel do
               </ul>
 
               <p
-                :if={task[:model] || task.requirements != []}
+                :if={task[:agent] || task[:model] || task.requirements != []}
                 class="mt-2 flex flex-wrap items-center gap-x-3 text-xs text-base-content/45"
               >
+                <span class={gold(part_changed?(mark, :agent))}>
+                  <TaskList.agent_tag agent={task[:agent]} />
+                </span>
                 <span class={gold(part_changed?(mark, :model))}>
                   <TaskList.model_tag model={task[:model]} />
                 </span>
@@ -563,12 +568,13 @@ defmodule FactoryWeb.PlanPanel do
 
   attr :task, :map, required: true
   attr :i, :integer, required: true
+  attr :builders, :list, default: []
 
   defp edit_form(assigns) do
     ~H"""
     <form id={"chat-plan-form-#{@i}"} phx-submit="plan_save" class="space-y-2.5">
       <input type="hidden" name="i" value={@i} />
-      <TaskList.task_fields task={@task} as="task" focus />
+      <TaskList.task_fields task={@task} as="task" builders={@builders} focus />
       <div class="flex justify-end gap-1.5">
         <button type="button" phx-click="plan_edit_cancel" class="btn btn-ghost btn-xs">
           Cancel
@@ -636,8 +642,12 @@ defmodule FactoryWeb.PlanPanel do
           <p class="text-xs font-medium text-primary">Kiro's version</p>
           <p class="mt-0.5 font-medium"><TaskList.inline text={@entry.suggestion.title} /></p>
           <TaskList.task_parts task={@entry.suggestion} />
-          <p :if={@entry.suggestion[:model]} class="mt-1.5 text-xs text-base-content/45">
-            <TaskList.model_tag model={@entry.suggestion.model} />
+          <p
+            :if={@entry.suggestion[:agent] || @entry.suggestion[:model]}
+            class="mt-1.5 flex flex-wrap items-center gap-x-3 text-xs text-base-content/45"
+          >
+            <TaskList.agent_tag agent={@entry.suggestion[:agent]} />
+            <TaskList.model_tag model={@entry.suggestion[:model]} />
           </p>
           <p
             :if={@entry.suggestion.why not in [nil, ""]}

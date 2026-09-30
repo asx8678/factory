@@ -12,6 +12,7 @@ defmodule Factory.Spec do
   @objective ~r/^\*{0,2}Objective:?\*{0,2}:?\s*/i
   @verify ~r/^\*{0,2}(Verify|Verification):?\*{0,2}:?\s*/i
   @model ~r/^_?\*{0,2}Model:?\*{0,2}:?\s*|_$/i
+  @agent ~r/^_?\*{0,2}Agent:?\*{0,2}:?\s*|_$/i
 
   @doc "Returns `[%{ref: \"1\" | nil, title: \"...\"}]` in document order."
   def parse_tasks(markdown) do
@@ -49,7 +50,7 @@ defmodule Factory.Spec do
   Splits a tasks file into its tasks, keeping every line so it can be written back.
   Returns `{preamble_lines, blocks}`; each block is
 
-      %{title:, ref:, done:, objective:, details: [line], verify: [line], model:,
+      %{title:, ref:, done:, objective:, details: [line], verify: [line], agent:, model:,
         requirements: [ref], lines: [raw line]}
 
   A task's sub-items say what it is for, how to build it and how to check it:
@@ -58,11 +59,13 @@ defmodule Factory.Spec do
         - Objective: A person who forgot their password can ask for a reset link.
         - Add `reset_form/1` to `lib/app_web/live/sign_in_live.ex`.
         - Verify: `mix test test/app_web/live/sign_in_live_test.exs` passes.
+        - _Agent: Coder_
         - _Model: auto_
         - _Requirements: 1.1, 1.2_
 
-  `objective` is the `Objective:` line, `verify` the `Verify:` lines, `model` the
-  `_Model: …_` line and `requirements` the `_Requirements: …_` line; every other
+  `objective` is the `Objective:` line, `verify` the `Verify:` lines, `agent` the
+  `_Agent: …_` line (which of the workflow's agents builds it), `model` the `_Model: …_`
+  line and `requirements` the `_Requirements: …_` line; every other
   sub-item is a step of the approach, in `details`. Tasks written before these had
   only steps, which read as they always did.
   """
@@ -121,6 +124,12 @@ defmodule Factory.Spec do
         [] -> nil
       end
 
+    agent =
+      case Map.get(items, :agent, []) do
+        [line | _] -> value(line, @agent)
+        [] -> nil
+      end
+
     %{
       ref: if(ref == "", do: nil, else: ref),
       title: String.trim(title),
@@ -128,6 +137,7 @@ defmodule Factory.Spec do
       objective: objective,
       details: Map.get(items, :details, []),
       verify: Enum.map(Map.get(items, :verify, []), &value(&1, @verify)),
+      agent: agent,
       model: model,
       requirements: requirements,
       lines: lines
@@ -141,6 +151,7 @@ defmodule Factory.Spec do
       Regex.match?(@objective, line) -> :objective
       Regex.match?(@verify, line) -> :verify
       Regex.match?(~r/^_?\*{0,2}Model:/i, line) -> :model
+      Regex.match?(~r/^_?\*{0,2}Agent:/i, line) -> :agent
       true -> :details
     end
   end
@@ -156,22 +167,27 @@ defmodule Factory.Spec do
 
   @doc """
   Rewrites a block with the fields in `changes` (`:title`, `:objective`, `:details`,
-  `:verify`, `:model`, `:requirements`); the others stay as they are. Written in the
-  order `blocks/1` reads them: objective, steps, checks, model, requirements.
+  `:verify`, `:agent`, `:model`, `:requirements`); the others stay as they are. Written
+  in the order `blocks/1` reads them: objective, steps, checks, agent, model,
+  requirements.
   """
   def edit_block(%{lines: [first | _]} = block, %{} = changes) do
     block =
       Map.merge(
-        %{objective: nil, verify: [], model: nil},
+        %{objective: nil, verify: [], agent: nil, model: nil},
         block
       )
 
     fields =
-      Map.merge(block, Map.take(changes, ~w(title objective details verify model requirements)a))
+      Map.merge(
+        block,
+        Map.take(changes, ~w(title objective details verify agent model requirements)a)
+      )
 
     title = fields.title |> String.replace(~r/\s*\R\s*/u, " ") |> String.trim()
     objective = blank_nil(fields.objective)
     model = blank_nil(fields.model)
+    agent = blank_nil(fields.agent)
 
     first =
       case Regex.run(~r/^([-*] \[[ xX]\]\s+(?:\d+(?:\.\d+)*\.?\s+)?|\d+[.)]\s+)/, first) do
@@ -183,6 +199,7 @@ defmodule Factory.Spec do
       List.wrap(objective && "  - Objective: #{objective}") ++
         Enum.map(fields.details, &"  - #{&1}") ++
         Enum.map(fields.verify, &"  - Verify: #{&1}") ++
+        List.wrap(agent && "  - _Agent: #{agent}_") ++
         List.wrap(model && "  - _Model: #{model}_") ++
         if(fields.requirements == [],
           do: [],
@@ -195,6 +212,7 @@ defmodule Factory.Spec do
         objective: objective,
         details: fields.details,
         verify: fields.verify,
+        agent: agent,
         model: model,
         requirements: fields.requirements,
         lines: [first | rest]

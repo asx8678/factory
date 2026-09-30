@@ -302,7 +302,13 @@ defmodule Factory.Specs do
             |> Enum.reject(&(&1.kind == "action"))
             |> Enum.map_join(" → ", & &1.name)
 
-          prompt = Planner.run_prompt(type, kiro_files(spec), write: write, agents: agents)
+          prompt =
+            Planner.run_prompt(type, kiro_files(spec),
+              write: write,
+              agents: agents,
+              builders: builders(spec)
+            )
+
           {:ok, spec} = set_write(spec, %{"status" => "running", "writing" => write})
           dir = project_dir(spec)
           model = Factory.Kiro.planning_model()
@@ -460,7 +466,10 @@ defmodule Factory.Specs do
         })
 
       {:ok, spec} = set_plan(spec, plan)
-      prompt = Planner.tasks_prompt(kiro_files(spec), plan["project"] || "", answers)
+
+      prompt =
+        Planner.tasks_prompt(kiro_files(spec), plan["project"] || "", answers, builders(spec))
+
       failed = plan |> Map.put("failed", "writing") |> Map.delete("tasks")
       token = Factory.PlanTools.grant_suggest(spec.id, ref)
 
@@ -641,6 +650,20 @@ defmodule Factory.Specs do
         do: {step <> ".md", text}
   end
 
+  @doc """
+  The agents that build, in the workflow the spec's run uses (else the current one):
+  the ones its tasks can be given to (`Factory.Workflows.builders/1`).
+  """
+  def builders(spec) do
+    workflow =
+      case home_run(spec) do
+        nil -> Factory.Workflows.current()
+        run -> Factory.Workflows.for_run(run) || Factory.Workflows.current()
+      end
+
+    Factory.Workflows.builders(workflow)
+  end
+
   @doc "The run this spec was written for: the first one it's linked to (`for_run/1`)."
   def home_run(%SpecDoc{id: id}) do
     Repo.one(
@@ -762,7 +785,9 @@ defmodule Factory.Specs do
         dir = project_dir(spec)
         topic = "spec:#{spec.id}"
         asked = (home_run(spec) || %{description: nil}).description
-        prompt = Planner.improve_prompt(kiro_files(spec), task, instruction, asked || "")
+
+        prompt =
+          Planner.improve_prompt(kiro_files(spec), task, instruction, asked || "", builders(spec))
 
         on_tool = fn update ->
           broadcast(topic, {:task_activity, task.title, Planner.describe_tool(update, dir)})
@@ -800,7 +825,7 @@ defmodule Factory.Specs do
   def draft_task(%SpecDoc{} = spec, title, notes, ref) do
     dir = project_dir(spec)
     topic = "spec:#{spec.id}"
-    prompt = Planner.draft_prompt(kiro_files(spec), title, notes)
+    prompt = Planner.draft_prompt(kiro_files(spec), title, notes, builders(spec))
 
     on_tool = fn update ->
       broadcast(topic, {:draft_activity, ref, Planner.describe_tool(update, dir)})
@@ -850,6 +875,7 @@ defmodule Factory.Specs do
             "objective" => changes[:objective],
             "details" => changes[:details] || [],
             "verify" => changes[:verify] || [],
+            "agent" => changes[:agent],
             "model" => changes[:model],
             "requirements" => changes[:requirements] || []
           }
@@ -905,6 +931,7 @@ defmodule Factory.Specs do
       "objective" => Map.get(task, :objective) || "",
       "details" => Enum.join(task.details, "\n"),
       "verify" => Enum.join(Map.get(task, :verify) || [], "\n"),
+      "agent" => Map.get(task, :agent) || "",
       "model" => Map.get(task, :model) || "",
       "requirements" => Enum.join(task.requirements, ", ")
     }
@@ -921,6 +948,7 @@ defmodule Factory.Specs do
       objective: params["objective"] && to_string(params["objective"]),
       details: params["details"] && lines.(params["details"]),
       verify: params["verify"] && lines.(params["verify"]),
+      agent: params["agent"] && params["agent"] |> to_string() |> String.trim(),
       model:
         params["model"] &&
           if(params["model"] in Factory.Kiro.models(), do: params["model"], else: ""),

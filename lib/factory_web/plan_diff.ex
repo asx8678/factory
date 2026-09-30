@@ -9,7 +9,7 @@ defmodule FactoryWeb.PlanDiff do
   removed.
   """
 
-  @fields [:title, :objective, :details, :verify, :model, :requirements]
+  @fields [:title, :objective, :details, :verify, :agent, :model, :requirements]
 
   @doc "A plan's tasks as the snapshot keeps them."
   def snapshot(tasks), do: Enum.map(tasks, &entry/1)
@@ -19,6 +19,7 @@ defmodule FactoryWeb.PlanDiff do
     |> Map.take(@fields)
     |> Map.put_new(:objective, nil)
     |> Map.put_new(:verify, [])
+    |> Map.put_new(:agent, nil)
     |> Map.put_new(:model, nil)
   end
 
@@ -26,7 +27,7 @@ defmodule FactoryWeb.PlanDiff do
   What changed in `tasks` since `snapshot`: `{marks, removed}`, a mark per task, in
   order, and the titles of the snapshot's tasks that are gone. A mark is nil for an
   unchanged task, `%{new: true}` for a new one, or says which parts changed:
-  `%{new: false, title:, objective:, model:, steps: [index], checks: [index]}`. With no
+  `%{new: false, title:, objective:, agent:, model:, steps: [index], checks: [index]}`. With no
   snapshot, nothing is marked.
   """
   def diff(nil, tasks), do: {Enum.map(tasks, fn _ -> nil end), []}
@@ -107,12 +108,14 @@ defmodule FactoryWeb.PlanDiff do
       new: false,
       title: old.title != new.title,
       objective: (old.objective || "") != (new.objective || ""),
+      agent: old.agent != new.agent,
       model: old.model != new.model,
       steps: added(old.details, new.details),
       checks: added(old.verify, new.verify)
     }
 
-    if mark.title or mark.objective or mark.model or mark.steps != [] or mark.checks != [] or
+    if mark.title or mark.objective or mark.agent or mark.model or mark.steps != [] or
+         mark.checks != [] or
          old.requirements != new.requirements or old.details != new.details or
          old.verify != new.verify,
        do: mark,

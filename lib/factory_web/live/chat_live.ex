@@ -1179,6 +1179,7 @@ defmodule FactoryWeb.ChatLive do
                 check={@plan_check}
                 before={@plan_before}
                 job={Workflows.kind(@workflow)}
+                builders={for a <- @agents, not Factory.Agents.Agent.read_only?(a), do: a.name}
                 spec_hint={plan_spec_hint?(assigns)}
               />
             </div>

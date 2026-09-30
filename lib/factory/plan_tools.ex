@@ -84,6 +84,11 @@ defmodule Factory.PlanTools do
                     "1 to 4 checks that prove it's done: a command and what it must show, a " <>
                       "test that must pass, or what to look at."
                 },
+                agent: %{
+                  type: "string",
+                  description:
+                    "Which of the workflow's agents builds it, as the prompt lists them."
+                },
                 model: %{
                   type: "string",
                   description: "The model to build it with, from the ones the prompt lists."
@@ -114,6 +119,7 @@ defmodule Factory.PlanTools do
           objective: %{type: "string"},
           details: %{type: "array", items: %{type: "string"}, description: "The steps."},
           verify: %{type: "array", items: %{type: "string"}, description: "The checks."},
+          agent: %{type: "string", description: "Who builds it."},
           model: %{type: "string"},
           requirements: %{type: "array", items: %{type: "string"}}
         },
@@ -584,6 +590,7 @@ defmodule Factory.PlanTools do
             objective: is_binary(args["objective"]) && text(args["objective"]),
             details: is_list(args["details"]) && lines(args["details"]),
             verify: is_list(args["verify"]) && lines(args["verify"]) |> Enum.take(6),
+            agent: is_binary(args["agent"]) && text(args["agent"]),
             model: args["model"] in Factory.Kiro.models() && args["model"],
             requirements:
               is_list(args["requirements"]) && lines(args["requirements"]) |> Enum.take(8)

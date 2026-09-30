@@ -14,6 +14,7 @@ defmodule FactoryWeb.TaskList do
   attr :improve, :map, default: %{}, doc: "Kiro's work on tasks, by title (see SpecLive)"
   attr :open, :boolean, default: true, doc: "whether single tasks can be edited and improved"
   attr :filter, :string, required: true
+  attr :builders, :list, default: [], doc: "the agents a task can be given to, by name"
 
   def list(assigns) do
     shown =
@@ -159,6 +160,7 @@ defmodule FactoryWeb.TaskList do
             task={draft(task, @improve[task.title])}
             i={i}
             from_kiro={match?(%{status: :done}, @improve[task.title])}
+            builders={@builders}
           />
 
           <div :if={!(@open and @editing == i)} class="min-w-0 flex-1">
@@ -206,6 +208,7 @@ defmodule FactoryWeb.TaskList do
                 />
                 {if MapSet.member?(@expanded, i), do: "Less", else: parts_count(task)}
               </button>
+              <.agent_tag agent={task[:agent]} />
               <.model_tag model={task[:model]} />
               <span :if={task.requirements != []} class="flex flex-wrap items-center gap-1">
                 <span>Req</span>
@@ -377,6 +380,7 @@ defmodule FactoryWeb.TaskList do
   attr :task, :map, required: true
   attr :i, :integer, required: true
   attr :from_kiro, :boolean, default: false
+  attr :builders, :list, default: []
 
   # Edits one task in place. Esc cancels.
   defp edit_form(assigns) do
@@ -392,7 +396,7 @@ defmodule FactoryWeb.TaskList do
       <p :if={@from_kiro} class="flex items-center gap-1.5 text-xs text-info">
         <.icon name="hero-sparkles-micro" class="size-3.5" /> Filled in with Kiro's suggestion
       </p>
-      <.task_fields task={@task} focus />
+      <.task_fields task={@task} builders={@builders} focus />
       <div class="flex items-center gap-2">
         <button type="submit" class="btn btn-primary btn-xs">Save</button>
         <button type="button" phx-click="task_edit_cancel" class="btn btn-ghost btn-xs">
@@ -411,6 +415,7 @@ defmodule FactoryWeb.TaskList do
         objective: s.objective,
         details: s.details,
         verify: s.verify,
+        agent: s.agent,
         model: s.model,
         requirements: s.requirements
       })
@@ -542,6 +547,7 @@ defmodule FactoryWeb.TaskList do
   end
 
   attr :draft, :any, required: true, doc: "the new task being written (see SpecLive), or nil"
+  attr :builders, :list, default: [], doc: "the agents a task can be given to, by name"
 
   @doc """
   Adding a task at the end of the list: a rough title and notes, added as is or
@@ -673,7 +679,7 @@ defmodule FactoryWeb.TaskList do
         phx-submit="draft_save"
         class="space-y-3"
       >
-        <.task_fields task={@draft.suggestion} focus />
+        <.task_fields task={@draft.suggestion} builders={@builders} focus />
         <div class="flex items-center gap-2">
           <button type="submit" class="btn btn-primary btn-sm">
             <.icon name="hero-plus-mini" class="size-4" /> Add task
@@ -698,6 +704,7 @@ defmodule FactoryWeb.TaskList do
       <p class="text-[14px] font-medium leading-6"><.inline text={@suggestion.title} /></p>
       <.task_parts task={@suggestion} />
       <p class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-base-content/50">
+        <.agent_tag agent={@suggestion[:agent]} />
         <.model_tag model={@suggestion[:model]} />
         <span :if={@suggestion.requirements != []} class="flex flex-wrap items-center gap-1">
           Req
@@ -757,6 +764,17 @@ defmodule FactoryWeb.TaskList do
     """
   end
 
+  attr :agent, :string, default: nil
+
+  @doc "The agent a task is given to, as a small tag; nothing when it names none."
+  def agent_tag(assigns) do
+    ~H"""
+    <span :if={@agent} title="The agent that builds it" class="flex items-center gap-1">
+      <.icon name="hero-user-micro" class="size-3" />{@agent}
+    </span>
+    """
+  end
+
   attr :model, :string, default: nil
 
   @doc "The model a task is to be built with, as a small tag; nothing when it names none."
@@ -787,6 +805,7 @@ defmodule FactoryWeb.TaskList do
   attr :task, :map, required: true
   attr :focus, :boolean, default: false
   attr :as, :string, default: nil, doc: ~s(nests the fields' names, e.g. "task" for task[title])
+  attr :builders, :list, default: [], doc: "the names of the agents a task can be given to"
 
   @doc """
   A task's fields, for editing it or a new one Kiro wrote: the form sends title,
@@ -847,7 +866,23 @@ defmodule FactoryWeb.TaskList do
         class="block w-full resize-y rounded-md border border-base-300 bg-base-100 px-2.5 py-2 text-[13px] leading-relaxed outline-none placeholder:text-base-content/35 focus:border-base-content/30"
       >{Enum.join(checks(@task), "\n")}</textarea>
     </label>
-    <div class="grid gap-3 sm:grid-cols-2">
+    <div class="grid gap-3 sm:grid-cols-3">
+      <label class="block">
+        <span class="mb-1 block text-xs font-medium text-base-content/60">Agent</span>
+        <select
+          name={@n.("agent")}
+          class="h-8 w-full rounded-md border border-base-300 bg-base-100 px-2 text-[13px] outline-none focus:border-base-content/30"
+        >
+          <option value="" selected={@task[:agent] in [nil, ""]}>First that builds</option>
+          <option
+            :for={name <- Enum.uniq(@builders ++ List.wrap(@task[:agent]))}
+            value={name}
+            selected={@task[:agent] == name}
+          >
+            {name}
+          </option>
+        </select>
+      </label>
       <label class="block">
         <span class="mb-1 block text-xs font-medium text-base-content/60">Model</span>
         <select
