@@ -41,33 +41,6 @@ defmodule Factory.Runs.Types do
       ]
     },
     %{
-      id: "issue",
-      label: "Resolve an issue",
-      short: "Issue",
-      blurb: "Work from an issue or ticket: triage it, then fix or build it.",
-      describe: "Paste the issue, or a link and a summary. Say what done looks like.",
-      workflow: [
-        {"planner", "Triage", "Reads the issue and the code, decides fix or feature"},
-        {"coder", "Coder", "Makes the change"},
-        {"tester", "Tester", "Covers it with tests"},
-        {"reviewer", "Reviewer", "Checks it resolves the issue"}
-      ]
-    },
-    %{
-      id: "deps",
-      label: "Update dependencies",
-      short: "Dependencies",
-      blurb: "Find what's outdated, upgrade in small batches, keep tests green.",
-      describe:
-        "Which packages (or all of them), how far to go (minor and patch, or majors too), and anything to watch out for.",
-      workflow: [
-        {"researcher", "Auditor", "Lists outdated packages and reads their changelogs"},
-        {"coder", "Upgrader", "Upgrades in small batches and fixes breakages"},
-        {"tester", "Tester", "Runs the suite after each batch"},
-        {"reviewer", "Reviewer", "Checks for risky changes"}
-      ]
-    },
-    %{
       id: "review",
       label: "Review a PR",
       short: "PR review",

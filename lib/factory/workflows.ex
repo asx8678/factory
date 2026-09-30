@@ -3,7 +3,8 @@ defmodule Factory.Workflows do
   Named workflows: each a set of agents and the hand-offs between them.
 
   The standard workflows match the jobs on the start screen (build a feature, fix a
-  bug, resolve an issue, update dependencies, review a pull request). They're created from
+  bug, review a pull request). One that's no longer standard (resolve an issue, update
+  dependencies) can be deleted like a custom one, and isn't made again. They're created from
   `Factory.Runs.Types` when first needed, can be changed like any other, and can be
   restored to their default. Custom workflows are made new or cloned.
 
@@ -15,7 +16,7 @@ defmodule Factory.Workflows do
   alias Factory.Agents.{Agent, Link, Workflow}
   alias Factory.Runs.{Run, Types}
 
-  @standard ~w(feature bug issue deps review)
+  @standard ~w(feature bug review)
 
   @doc "The run types that have a standard workflow."
   def standard_keys, do: @standard
@@ -113,7 +114,7 @@ defmodule Factory.Workflows do
     do: w |> Workflow.changeset(%{name: name}) |> Repo.update() |> changed()
 
   @doc "Deletes a custom workflow and its agents. Standard ones can only be restored."
-  def delete(%Workflow{key: nil} = w) do
+  def delete(%Workflow{key: key} = w) when key not in @standard do
     agents = Agents.list_agents(w.id)
 
     result =
@@ -252,7 +253,7 @@ defmodule Factory.Workflows do
   def restore(%Workflow{}), do: {:error, :custom}
 
   @doc "Whether a standard workflow differs from its default. Custom ones are never modified."
-  def modified?(%Workflow{key: nil}), do: false
+  def modified?(%Workflow{key: key}) when key not in @standard, do: false
 
   def modified?(%Workflow{key: key} = w) do
     type = Types.get(key)

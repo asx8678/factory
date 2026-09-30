@@ -1552,14 +1552,6 @@ defmodule FactoryWeb.ChatParts do
       "Run the tests and fix what fails",
       "Fix the warnings the build prints",
       "Find errors the code swallows and handle them"
-    ],
-    "issue" => [
-      "Resolve this issue: (paste the link or the text)"
-    ],
-    "deps" => [
-      "Update all dependencies to their latest minor versions",
-      "Upgrade the framework to its newest major version",
-      "Fix the security advisories in our dependencies"
     ]
   }
 
