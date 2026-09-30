@@ -121,6 +121,9 @@ defmodule Factory.ChatPlanner do
       m = Regex.run(~r{/pull/(\d+)}, text) ->
         "Reviewing pull request ##{Enum.at(m, 1)}"
 
+      m = Regex.run(~r/\bpull request #(\d+)/i, text) ->
+        "Reviewing pull request ##{Enum.at(m, 1)}"
+
       m = Regex.run(~r/\bbranch\s+`([^`]+)`/i, text) ->
         "Reviewing the branch #{Enum.at(m, 1)}"
 

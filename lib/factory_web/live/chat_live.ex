@@ -26,7 +26,7 @@ defmodule FactoryWeb.ChatLive do
      |> assign(message_ids: [], earlier?: false, history?: false)
      |> assign(commands: Chat.commands())
      |> assign(workflows: Workflows.list(), browser: nil, folder_warn: false, to: nil)
-     |> assign(scout: nil, ideas: nil)
+     |> assign(scout: nil, ideas: nil, cloning: nil, clone_error: nil)
      |> assign(pick: Workflows.picked())
      |> assign(base_ids: [])
      |> assign(
@@ -367,10 +367,25 @@ defmodule FactoryWeb.ChatLive do
     end
   end
 
+  # A repository's link: Factory clones it with SSH (or fetches it again) into its own
+  # folder, then the chat opens on it with its branches listed (Factory.Repos).
+  def handle_event("review_link", %{"link" => link}, socket) do
+    case Factory.Repos.parse(link) do
+      {:ok, repo} ->
+        {:noreply,
+         socket
+         |> assign(cloning: repo.label, clone_error: nil)
+         |> start_async(:clone, fn -> Factory.Repos.clone(link) end)}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, clone_error: reason)}
+    end
+  end
+
   def handle_event("review_branch", %{"branch" => branch}, socket) do
-    with {:ok, %{base: base, branches: branches}} <- socket.assigns.scout,
+    with {:ok, %{branches: branches}} <- socket.assigns.scout,
          %{} = b <- Enum.find(branches, &(&1.name == branch)) do
-      against = if base && base != branch, do: " against `#{base}`", else: ""
+      against = if b.base && b.base != branch, do: " against `#{b.base}`", else: ""
 
       latest =
         if b.ahead && b.ahead > 0,
@@ -378,7 +393,13 @@ defmodule FactoryWeb.ChatLive do
             ": #{b.ahead} #{if b.ahead == 1, do: "commit", else: "commits"}, the latest “#{b.subject}”",
           else: ""
 
-      send_message(socket, "Review the branch `#{branch}`#{against}#{latest}.")
+      what =
+        case Regex.run(~r/^pr-(\d+)$/, b.label) do
+          [_, n] -> "Review pull request ##{n}, fetched as the branch `#{branch}`"
+          _ -> "Review the branch `#{branch}`"
+        end
+
+      send_message(socket, "#{what}#{against}#{latest}.")
     else
       _ -> {:noreply, put_flash(socket, :error, "That branch isn't there any more. Scout again.")}
     end
@@ -952,6 +973,47 @@ defmodule FactoryWeb.ChatLive do
   def handle_async(:scout, {:exit, _reason}, socket),
     do: {:noreply, assign(socket, scout: {:error, "Couldn't read the folder's branches."})}
 
+  # Cloned (or fetched): the chat becomes a review of that repository, kept as a run
+  # of its own with the clone as its folder, so it's there after a reload. The folder
+  # picked for new chats stays as it was.
+  def handle_async(:clone, {:ok, {:ok, cloned}}, socket) do
+    run =
+      case socket.assigns.run do
+        %{status: "draft"} = run -> run
+        _ -> Runs.unused_review(cloned.dir) || elem(Runs.create_run("Review #{cloned.label}"), 1)
+      end
+
+    {:ok, run} =
+      Runs.update_run(run, %{
+        title: "Review #{cloned.label}",
+        kind: "review",
+        settings:
+          Map.merge(run.settings || %{}, %{
+            "workflow_id" => socket.assigns.workflow.id,
+            "base_spec_ids" => socket.assigns.base_ids,
+            "project_dir" => cloned.dir,
+            "title" => "manual"
+          })
+      })
+
+    said =
+      if cloned.fresh,
+        do: "Cloned #{cloned.label}.",
+        else: "Fetched the latest of #{cloned.label}."
+
+    {:noreply,
+     socket
+     |> assign(cloning: nil, clone_error: nil)
+     |> put_flash(:info, said)
+     |> push_patch(to: ~p"/chat/#{run.id}")}
+  end
+
+  def handle_async(:clone, {:ok, {:error, reason}}, socket),
+    do: {:noreply, assign(socket, cloning: nil, clone_error: reason)}
+
+  def handle_async(:clone, {:exit, _reason}, socket),
+    do: {:noreply, assign(socket, cloning: nil, clone_error: "The clone stopped unexpectedly.")}
+
   def handle_async(:ideas, {:ok, {dir, ideas}}, socket) do
     if socket.assigns.dir_ok and Path.expand(socket.assigns.dir) == dir,
       do: {:noreply, assign(socket, ideas: ideas)},
@@ -1236,6 +1298,8 @@ defmodule FactoryWeb.ChatLive do
               last_run={last_run(@runs, @run)}
               scout={@scout}
               ideas={@ideas}
+              cloning={@cloning}
+              clone_error={@clone_error}
             />
           </div>
 

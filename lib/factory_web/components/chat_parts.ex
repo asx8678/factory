@@ -374,6 +374,9 @@ defmodule FactoryWeb.ChatParts do
     default: nil,
     doc: "what there is to pick up in the folder (Factory.Scout.ideas/2), or nil while it looks"
 
+  attr :cloning, :string, default: nil, doc: "the repository being cloned, while it is"
+  attr :clone_error, :string, default: nil
+
   attr :scout, :any,
     default: nil,
     doc: "what there is to review in the folder (Factory.Scout): nil, :loading or a result"
@@ -383,8 +386,15 @@ defmodule FactoryWeb.ChatParts do
   # place, and the two ways to plan it. Left-aligned with the message box it leads to.
   # Review a PR, set up: a pull request's link, or a branch from the folder, the one
   # it's on first. Each starts the review as a message to the Scout.
-  def greeting(%{focus: nil, dir_ok: true, workflow: %{key: "review"}} = assigns) do
-    assigns = assign(assigns, picks: review_picks(assigns.scout))
+  # Review a PR: the repository to review first (cloned with SSH into its own folder),
+  # then, for the folder the chat is on, the branch with the latest changes and the
+  # rest. Each starts the review as a message to the Scout.
+  def greeting(%{focus: nil, workflow: %{key: "review"}} = assigns) do
+    assigns =
+      assign(assigns,
+        picks: if(assigns.dir_ok, do: review_picks(assigns.scout), else: []),
+        root: Factory.Repos.root() |> String.replace_prefix(System.user_home!(), "~")
+      )
 
     ~H"""
     <div id="chat-review" class="relative w-full max-w-3xl px-1">
@@ -392,29 +402,68 @@ defmodule FactoryWeb.ChatParts do
         Review · {Calendar.strftime(Date.utc_today(), "%-d %b")}
       </p>
       <h1 class="mt-1 text-2xl font-semibold leading-tight tracking-tight">
-        What should we review in <span class="text-primary">{Path.basename(@dir)}</span>?
+        <%= if @dir_ok do %>
+          What should we review in <span class="text-primary">{Path.basename(@dir)}</span>?
+        <% else %>
+          What should we review?
+        <% end %>
       </h1>
       <p class="mt-2 text-base-content/60">
-        Paste a pull request's link, or pick a branch. The Scout finds the change and plans
-        what to check; the Reviewer then reports what to fix.
+        Paste the repository's link, or a pull request's. Factory clones it and lists its
+        branches, latest changes first; pick one, and the Scout plans what to check before
+        the Reviewer reports.
       </p>
 
       <form
-        id="review-pr-form"
-        phx-submit="review_pr"
-        class="mt-5 flex items-center gap-2 rounded-xl border border-base-300 bg-base-100 py-1.5 pl-3 pr-1.5 transition-colors focus-within:border-primary/50"
+        id="review-repo-form"
+        phx-submit="review_link"
+        class={[
+          "mt-5 flex items-center gap-2 rounded-xl border bg-base-100 py-1.5 pl-3 pr-1.5 transition-colors focus-within:border-primary/50",
+          if(@clone_error, do: "border-error/50", else: "border-base-300")
+        ]}
       >
         <.icon name="hero-link-mini" class="size-4 shrink-0 text-base-content/45" />
         <input
-          name="url"
+          name="link"
           autocomplete="off"
-          placeholder="https://github.com/owner/repo/pull/123"
+          spellcheck="false"
+          disabled={@cloning != nil}
+          placeholder="git@github.com:owner/repo.git, or a repository or pull request link"
           class="h-7 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-base-content/35"
         />
-        <button class="btn btn-primary btn-sm">Review</button>
+        <button class="btn btn-primary btn-sm" disabled={@cloning != nil}>
+          <span :if={@cloning} class="loading loading-spinner loading-xs"></span>
+          {if @cloning, do: "Cloning…", else: "Clone & scan"}
+        </button>
       </form>
+      <p :if={@cloning} id="review-cloning" class="mt-1.5 px-1 text-xs text-base-content/55">
+        Cloning {@cloning} with SSH into {@root}…
+      </p>
+      <p
+        :if={@clone_error && !@cloning}
+        id="review-clone-error"
+        class="mt-1.5 px-1 text-xs text-error"
+      >
+        {@clone_error}
+      </p>
+      <p :if={!@cloning && !@clone_error} class="mt-1.5 px-1 text-xs text-base-content/45">
+        Cloned with SSH into {@root}; asked for again, it's fetched instead.
+      </p>
 
-      <section id="review-scout" class="mt-3 rounded-xl border border-base-300">
+      <button
+        :if={!@dir_ok}
+        type="button"
+        phx-click="browse"
+        class="mt-4 flex w-full items-center gap-3 rounded-xl border border-base-300 px-3.5 py-2.5 text-left transition-colors hover:border-base-content/25"
+      >
+        <.icon name="hero-folder-mini" class="size-4 shrink-0 text-base-content/50" />
+        <span class="min-w-0 flex-1 text-sm">
+          Or review a repository that's already on this computer
+        </span>
+        <span class="text-xs text-base-content/55">Browse…</span>
+      </button>
+
+      <section :if={@dir_ok} id="review-scout" class="mt-4 rounded-xl border border-base-300">
         <header class="flex items-center gap-2 border-b border-base-content/10 px-3.5 py-2">
           <.icon name="hero-code-bracket-square-mini" class="size-4 shrink-0 text-base-content/50" />
           <h2 class="min-w-0 flex-1 truncate text-xs font-medium text-base-content/70">
@@ -470,6 +519,12 @@ defmodule FactoryWeb.ChatParts do
                   {pick.label}
                 </span>
                 <span
+                  :if={pick[:latest]}
+                  class="shrink-0 rounded bg-amber-400/15 px-1.5 text-[10.5px] font-medium text-amber-600 dark:text-amber-300"
+                >
+                  Latest changes
+                </span>
+                <span
                   :if={pick[:current]}
                   class="shrink-0 rounded bg-primary/10 px-1.5 text-[10.5px] font-medium text-primary"
                 >
@@ -488,7 +543,7 @@ defmodule FactoryWeb.ChatParts do
               type="button"
               phx-click="review_branch"
               phx-value-branch={pick.value}
-              class="btn btn-ghost btn-sm shrink-0"
+              class={["btn btn-sm shrink-0", if(pick[:latest], do: "btn-primary", else: "btn-ghost")]}
             >
               Review
             </button>
@@ -1572,20 +1627,31 @@ defmodule FactoryWeb.ChatParts do
   # isn't the base), then the open pull requests, then the other branches with work
   # beyond the base, latest first.
   defp review_picks({:ok, scout}) do
+    worth = Enum.filter(scout.branches, &(&1.label != scout.base and (&1.ahead || 1) > 0))
+
+    # The latest changes: the branch with the newest commit, suggested.
+    latest =
+      Enum.max_by(worth, &DateTime.to_unix(&1.at || ~U[1970-01-01 00:00:00Z]), fn -> nil end)
+
     branch = fn b ->
+      pr = with [_, n] <- Regex.run(~r/^pr-(\d+)$/, b.label), do: n
+
       %{
         kind: :branch,
         value: b.name,
-        label: b.name,
+        label: if(is_binary(pr), do: "Pull request ##{pr}", else: b.label),
         current: b.current,
         ahead: b.ahead,
-        detail: b.subject,
+        latest: latest != nil and b.name == latest.name,
+        detail: Enum.join(Enum.reject([b.subject, b.author], &(&1 in [nil, ""])), " · "),
         at: b.at
       }
     end
 
-    worth = Enum.filter(scout.branches, &(&1.name != scout.base and (&1.ahead || 1) > 0))
+    # A pull request fetched as `pr-12` first, then the branch that's checked out.
+    {prs_here, worth} = Enum.split_with(worth, &Regex.match?(~r/^pr-\d+$/, &1.label))
     {current, others} = Enum.split_with(worth, & &1.current)
+    current = prs_here ++ current
 
     prs =
       for p <- scout.prs || [] do
@@ -1615,7 +1681,8 @@ defmodule FactoryWeb.ChatParts do
               kind: :recent,
               value: "#{length(commits)}",
               label: "Latest commits on #{scout.current || "this branch"}",
-              detail: "#{length(commits)} commits, the latest “#{latest.subject}”",
+              detail:
+                "#{length(commits)} #{if length(commits) == 1, do: "commit", else: "commits"}, the latest “#{latest.subject}”",
               at: latest.at
             }
           ]
@@ -1624,7 +1691,8 @@ defmodule FactoryWeb.ChatParts do
           []
       end
 
-    Enum.map(current, branch) ++ changes ++ prs ++ recent ++ Enum.map(others, branch)
+    # Branches first, the latest changes leading; the base's own commits last.
+    Enum.map(current, branch) ++ changes ++ prs ++ Enum.map(others, branch) ++ recent
   end
 
   defp review_picks(_scout), do: []

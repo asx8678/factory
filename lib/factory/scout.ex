@@ -9,14 +9,14 @@ defmodule Factory.Scout do
   a click: a branch, a pull request, or a link pasted in.
   """
 
-  @branches 8
+  @branches 10
   @gh_timeout 6_000
 
   @doc """
   The folder's review candidates:
 
       {:ok, %{current:, base:, dirty:, recent: [%{sha:, subject:, at:}],
-             branches: [%{name:, current:, ahead:, behind:,
+             branches: [%{name:, label:, remote:, current:, ahead:, behind:, base:,
              subject:, author:, at:}], prs: [%{number:, title:, branch:, url:, at:}] | nil,
              prs_note: nil | text}}
 
@@ -34,8 +34,10 @@ defmodule Factory.Scout do
 
       branches =
         for b <- branches(dir) do
-          {ahead, behind} = if base, do: ahead_behind(dir, base, b.name), else: {nil, nil}
-          Map.merge(b, %{current: b.name == current, ahead: ahead, behind: behind})
+          # A branch on the server is compared with the server's base.
+          against = if b.remote and base, do: remote_base(dir, b, base), else: base
+          {ahead, behind} = if against, do: ahead_behind(dir, against, b.name), else: {nil, nil}
+          Map.merge(b, %{current: b.name == current, ahead: ahead, behind: behind, base: against})
         end
 
       {prs, note} =
@@ -208,24 +210,57 @@ defmodule Factory.Scout do
       end)
   end
 
+  # The branches here and on the server, latest work first. A branch on the server is
+  # `origin/name` (what git knows it by) with the label `name`; one that's also a branch
+  # here is only listed once, as this one's.
   defp branches(dir) do
-    format = "%(refname:short)%09%(committerdate:iso-strict)%09%(authorname)%09%(subject)"
+    format =
+      "%(refname)%09%(refname:short)%09%(committerdate:iso-strict)%09%(authorname)%09%(subject)"
 
     case git(dir, [
            "for-each-ref",
            "--sort=-committerdate",
-           "--count=#{@branches}",
            "--format=" <> format,
-           "refs/heads"
+           "refs/heads",
+           "refs/remotes"
          ]) do
       {:ok, out} ->
-        for line <- String.split(out, "\n", trim: true),
-            [name, at, author, subject] <- [String.split(line, "\t", parts: 4)] do
-          %{name: name, at: time(at), author: author, subject: subject}
-        end
+        refs =
+          for line <- String.split(out, "\n", trim: true),
+              [ref, name, at, author, subject] <- [String.split(line, "\t", parts: 5)],
+              not String.ends_with?(ref, "/HEAD") do
+            remote = String.starts_with?(ref, "refs/remotes/")
+            label = if remote, do: name |> String.split("/", parts: 2) |> List.last(), else: name
+
+            %{
+              name: name,
+              label: label,
+              remote: remote,
+              at: time(at),
+              author: author,
+              subject: subject
+            }
+          end
+
+        here = for r <- refs, not r.remote, into: MapSet.new(), do: r.label
+
+        refs
+        |> Enum.reject(&(&1.remote and MapSet.member?(here, &1.label)))
+        |> Enum.take(@branches)
 
       _ ->
         []
+    end
+  end
+
+  # The server's copy of the base, when there is one: `origin/main`.
+  defp remote_base(dir, branch, base) do
+    remote = branch.name |> String.split("/") |> hd()
+    ref = "#{remote}/#{base}"
+
+    case git(dir, ["rev-parse", "--verify", "--quiet", "refs/remotes/" <> ref]) do
+      {:ok, _} -> ref
+      _ -> base
     end
   end
 
