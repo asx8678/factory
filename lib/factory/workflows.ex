@@ -253,15 +253,15 @@ defmodule Factory.Workflows do
 
   @doc """
   Puts a standard workflow back as it came: its name, agents, prompts and hand-offs,
-  and the arrow from its reviewer back to the agent that builds.
+  and the arrow from its reviewer back to the agent that builds. The agents it still
+  has are put back rather than made again, so runs that used them still find what they
+  handed over.
   """
   def restore(%Workflow{key: key} = w) when key in @standard do
     stop_sessions(w)
     type = Types.get(key)
 
     Repo.transact(fn ->
-      Repo.delete_all(from a in Agent, where: a.workflow_id == ^w.id)
-
       with {:ok, w} <-
              w
              |> Workflow.changeset(%{name: type.label, description: type.blurb})
@@ -405,25 +405,33 @@ defmodule Factory.Workflows do
     :ok
   end
 
-  # Agents on Kiro, one under the other, each handing off to the next.
+  # Agents on Kiro, one under the other, each handing off to the next. The workflow's
+  # own agents are kept for them (a run keys what each handed over by its id): the one
+  # of the same name, else one of the same kind, in order. The rest go.
   defp build(workflow, key) do
-    agents =
-      for {step, i} <- Enum.with_index(Types.workflow(key)) do
-        {:ok, a} =
-          Agents.create_agent(%{
-            workflow_id: workflow.id,
-            name: step["name"],
-            kind: step["kind"],
-            role: step["does"],
-            prompt: prompt(step),
-            web: step["web"] == true,
-            model: "auto",
-            x: 0.0,
-            y: i * 190.0
-          })
+    steps = Enum.with_index(Types.workflow(key))
+    have = ordered_agents(workflow.id)
+    cards = Enum.reject(have, &(&1.kind == "action"))
 
-        a
-      end
+    {named, left} =
+      Enum.map_reduce(steps, cards, fn {step, _}, left ->
+        take(left, &(&1.name == step["name"]))
+      end)
+
+    {kept, _left} =
+      steps
+      |> Enum.zip(named)
+      |> Enum.map_reduce(left, fn
+        {{step, _}, nil}, left -> take(left, &(&1.kind == step["kind"]))
+        {_, same}, left -> {same, left}
+      end)
+
+    agents =
+      for {{step, i}, same} <- Enum.zip(steps, kept), do: put_agent(same, workflow, step, i)
+
+    ids = Enum.map(agents, & &1.id)
+    Agents.delete_agents(for a <- have, a.id not in ids, do: a.id)
+    Repo.delete_all(from l in Link, where: l.source_id in ^ids or l.target_id in ^ids)
 
     for [a, b] <- Enum.chunk_every(agents, 2, 1, :discard),
         do: Agents.link(a.id, b.id, %{source: "bottom", target: "top"})
@@ -433,6 +441,57 @@ defmodule Factory.Workflows do
          do: Agents.link(from, to, %{source: "right", target: "right"})
 
     :ok
+  end
+
+  # The first agent `fun` picks, and the others.
+  defp take(agents, fun) do
+    case Enum.find(agents, fun) do
+      nil -> {nil, agents}
+      agent -> {agent, List.delete(agents, agent)}
+    end
+  end
+
+  defp put_agent(agent, workflow, step, i) do
+    prompt = prompt(step)
+
+    (agent || %Agent{})
+    |> Agent.changeset(%{
+      workflow_id: workflow.id,
+      name: step["name"],
+      kind: step["kind"],
+      role: step["does"],
+      prompt: prompt,
+      web: step["web"] == true,
+      model: "auto",
+      session: "own",
+      kiro_mode: "vibe",
+      action: %{},
+      x: 0.0,
+      y: i * 190.0
+    })
+    |> Ecto.Changeset.put_change(:default_prompt, prompt)
+    |> Repo.insert_or_update!()
+  end
+
+  @doc """
+  Gives the standard workflows' agents the prompts Factory has now, where an agent's
+  prompt is still the one Factory gave it: one someone changed keeps theirs (Restore
+  puts the default back). An agent from before Factory kept track takes its prompt as
+  Factory's when it's the current one. Called at startup. Returns how many changed.
+  """
+  def update_prompts do
+    updates =
+      for w <- Repo.all(from w in Workflow, where: w.key in ^@standard),
+          latest = Map.new(Types.workflow(w.key), &{&1["name"], prompt(&1)}),
+          a <- Agents.list_agents(w.id),
+          prompt = latest[a.name],
+          prompt != nil and a.prompt != nil,
+          a.default_prompt != prompt,
+          a.prompt == prompt or a.prompt == a.default_prompt,
+          do: a |> Ecto.Changeset.change(prompt: prompt, default_prompt: prompt) |> Repo.update!()
+
+    if updates != [], do: Agents.notify_changed()
+    length(updates)
   end
 
   defp prompt(step),

@@ -29,6 +29,8 @@ defmodule Factory.Agents.Agent do
     field :y, :float, default: 0.0
     # For kind "action": %{"type" => …, "config" => %{…}} (see Factory.Actions).
     field :action, :map, default: %{}
+    # The prompt a standard workflow last gave it, set by Factory.Workflows only.
+    field :default_prompt, :string
     belongs_to :workflow, Factory.Agents.Workflow
 
     timestamps(type: :utc_datetime)
