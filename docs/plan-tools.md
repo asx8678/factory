@@ -118,9 +118,14 @@ Verified on Kiro 2.26 (30 Sep 2026): after a run finished, the planner added a t
 - An agent set to search the web (`web` on its card, like the troubleshooting
   workflow's Error Researcher and Fact Checker) fetches without asking. It isn't shown
   the person's own material (the job), and what it's handed is filtered first
-  (`Factory.Redact`: internal hosts, IPs, emails, `user=` names, paths in a home folder,
-  IDs, keys and tokens come out, and the names listed under Settings → Web searches, as
-  whole words).
+  (`Factory.Redact`: internal hosts, IPs, emails, paths in a home folder, IDs, keys and
+  tokens come out, and the names listed under Settings → Web searches, as whole words).
+  User names are taken out where they show as one (`user=…`, `for user "…"`, `role "…"`,
+  `psql -U …`, `curl -u …:…`), and the ones that look like an account's (`orders_svc`,
+  not a plain word like `grafana`) are learned from the whole run, attached files
+  included, and taken out wherever else they appear. So are the run's folders (the
+  project, the attached files, Kiro's workspace), wherever they are. The task list, base
+  specs and the repository line are filtered too.
 - Comments in a command (`# why`) don't count when deciding whether it only looks, as
   the shell ignores them; nor does a `sed 's/…/…/'` that only changes what it prints.
 - Factory waits for Kiro to say its tools are loaded (`_kiro/mcp/status`, at most

@@ -11,7 +11,8 @@ defmodule Factory.Evidence do
   def dir(%{id: id}), do: dir(id)
   def dir(id), do: Path.join(root(), "run-#{id}")
 
-  defp root do
+  @doc "The folder every run's files are kept under."
+  def root do
     Application.get_env(:factory, :evidence_dir) ||
       Path.join(Path.dirname(Factory.Kiro.config(:workspace)), "evidence")
   end
@@ -58,6 +59,14 @@ defmodule Factory.Evidence do
           ". Search them with rg or grep, and read parts with sed -n, head or tail: they " <>
           "can be large, so don't read one whole."
     end
+  end
+
+  @doc "The start of each of the run's files, `bytes` of each at most, to look through."
+  def heads(run, bytes \\ 16 * 1024 * 1024) do
+    for {name, _size} <- list(run),
+        {:ok, text} when is_binary(text) <-
+          [File.open(Path.join(dir(run), name), [:read, :binary], &IO.binread(&1, bytes))],
+        do: text
   end
 
   @doc "Removes the run's files."

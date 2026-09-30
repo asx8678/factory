@@ -12,7 +12,10 @@ defmodule Factory.Redact do
 
   Names only the person knows are theirs (the company's, its products', its customers'):
   they list them in Settings (`"redact_names"` in `Factory.Prefs`), and each is taken
-  out as a whole word, whatever its case.
+  out as a whole word, whatever its case. User names the text shows where they're
+  plainly one (`user=…`, `for user "…"`, `psql -U …`) are learned from it and taken out
+  wherever else they appear too; `users_in/1` learns them from a whole run, and the
+  run's own folders go by `:paths`, wherever they are.
   """
 
   # Cloud services whose hostnames start with the customer's own name: the service is
@@ -28,24 +31,43 @@ defmodule Factory.Redact do
   # Top-level names only used inside a network.
   @internal ~w(internal local localdomain corp lan intranet private home svc)
 
-  @doc """
-  The text with what identifies anyone replaced by a marker such as `[host]`. `names`
-  are the words to take out too; by default, the ones saved in Settings.
-  """
-  def text(text, names \\ nil)
-  def text(nil, _names), do: nil
+  # Where a user name shows: `user=name`, `User ID=name`, `usename='name'`; `--user name`;
+  # `psql -U name`; and in database errors, `for user "name"`, `role "name"`.
+  @users [
+    ~r/\b((?:user(?:[ _-]?(?:name|id))?|usename|rolname|uid|login)\s*=\s*["']?)([^\s;,&"'<>)\]]+)/i,
+    ~r/(--user(?:name)?[=\s]+["']?)([^\s:;,&"'<>)\]]+)/i,
+    ~r/(\b(?:psql|pg_dump|pg_dumpall|pg_restore|pg_isready|createdb|dropdb|createuser|dropuser|vacuumdb|reindexdb|clusterdb|pgbench)\b[^\n|;&]*?\s-U\s*["']?)([A-Za-z_][\w.$-]*)/,
+    ~r/(\b(?:user|role|login)\s+["'])([^"'\s]+)(?=["'])/i,
+    ~r/(\s-u\s*["']?)([^\s:"']+)(?=:)/
+  ]
 
-  def text(text, names) when is_binary(text) do
+  @doc """
+  The text with what identifies anyone replaced by a marker such as `[host]`. Options:
+
+    * `:names` - the words to take out too; by default, the ones saved in Settings
+    * `:users` - user names to take out, learned elsewhere (`users_in/1`); the ones the
+      text shows itself are always learned
+    * `:paths` - folders to take out wherever they are, with the rest of each path
+  """
+  def text(text, opts \\ [])
+  def text(nil, _opts), do: nil
+
+  def text(text, opts) when is_binary(text) do
+    names = Keyword.get_lazy(opts, :names, &saved_names/0)
+    users = Keyword.get(opts, :users, []) ++ users_in(text)
+
     text
+    |> paths_out(Keyword.get(opts, :paths, []))
     |> sub(~r/-----BEGIN [A-Z ]+-----.*?-----END [A-Z ]+-----/s, "[key]")
     |> sub(~r/\beyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}/, "[token]")
     |> sub(~r/\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/=-]{8,}/i, "\\1 [token]")
     |> sub(
-      ~r/\b((?:password|passwd|pwd|secret|client[_-]?secret|token|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|sig|signature)\s*[=:]\s*)[^\s;,&"'<>]+/i,
+      ~r/\b((?:password|passwd|pwd|secret|client[_-]?secret|token|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|sig|signature)\s*[=:]\s*)(?!(?:yes|no|true|false|null|none)\b)[^\s;,&"'<>)]+/i,
       "\\1[secret]"
     )
+    |> sub(~r/((?:\s-u|--user)[=\s]+["']?[^\s:"']+:)[^\s"'<>]+/, "\\1[secret]")
     |> sub(~r/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/, "[email]")
-    |> sub(~r/\b((?:user(?:[ _-]?(?:name|id))?|uid|login)\s*=\s*)[^\s;,&"'<>)]+/i, "\\1[user]")
+    |> then(&Enum.reduce(@users, &1, fn regex, text -> sub(text, regex, "\\1[user]") end))
     |> sub(
       ~r{(?<![\w.:/~-])(?:/Users|/home)/[^/\s]+(?:/[^\s"'`<>()\[\]]*)?|[A-Za-z]:\\Users\\[^\s"'`<>]+},
       "[path]"
@@ -60,7 +82,29 @@ defmodule Factory.Redact do
     )
     |> sub(~r/\b(?:[0-9a-f]{1,4}:){4,7}[0-9a-f]{1,4}\b/i, "[ip]")
     |> sub(~r/\b[0-9a-f]{24,}\b/i, "[id]")
-    |> names_out(names || saved_names())
+    |> words_out(users, "[user]")
+    |> words_out(names, "[name]")
+  end
+
+  @doc """
+  The user names `texts` show (`user=…`, `for user "…"`, `psql -U …`), to take out
+  wherever else they appear: the ones that look like an account's (`orders_svc`,
+  `svc-etl`, `CORP\\etl`, `adam2`), not plain words or numbers. A plain word may be a
+  product the search needs elsewhere (`user=grafana`); it's still taken out where it's
+  given as a user, and the person can list it in Settings.
+  """
+  def users_in(texts) do
+    for text <- List.wrap(texts),
+        is_binary(text),
+        regex <- @users,
+        [_, _, name] <- Regex.scan(regex, text),
+        name = String.trim_trailing(name, "."),
+        String.length(name) >= 3,
+        Regex.match?(~r/\p{L}/u, name),
+        not String.starts_with?(name, "["),
+        Regex.match?(~r/[_.\\@\d-]|\p{Ll}\p{Lu}/u, name),
+        uniq: true,
+        do: name
   end
 
   @doc "The names saved in Settings to keep out of web searches."
@@ -72,7 +116,7 @@ defmodule Factory.Redact do
   end
 
   # Longest first, so "Acme Corp" goes whole before "Acme" does.
-  defp names_out(text, names) do
+  defp words_out(text, names, marker) do
     names
     |> Enum.map(&String.trim/1)
     |> Enum.reject(&(&1 == ""))
@@ -85,7 +129,21 @@ defmodule Factory.Redact do
           "iu"
         )
 
-      Regex.replace(word, text, "[name]")
+      Regex.replace(word, text, marker)
+    end)
+  end
+
+  # Each folder with the rest of its path: `/srv/app/logs/x.log`, not `/srv/application`.
+  defp paths_out(text, paths) do
+    paths
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&(&1 |> Path.expand() |> String.trim_trailing("/")))
+    |> Enum.reject(&(&1 in ["", "/"]))
+    |> Enum.uniq()
+    |> Enum.sort_by(&(-String.length(&1)))
+    |> Enum.reduce(text, fn path, text ->
+      regex = Regex.compile!(Regex.escape(path) <> ~S{(?![\w.-])(?:/[^\s"'`<>()\[\]]*)?})
+      Regex.replace(regex, text, "[path]")
     end)
   end
 

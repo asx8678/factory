@@ -886,9 +886,12 @@ defmodule Factory.Engine do
     # An agent that searches the web gets everything with what identifies anyone taken
     # out (`Factory.Redact`), whatever the agents before it wrote.
     clean =
-      if step.agent && Agent.web?(step.agent),
-        do: &Factory.Redact.text/1,
-        else: & &1
+      if step.agent && Agent.web?(step.agent) do
+        redact = redaction(run)
+        &Factory.Redact.text(&1, redact)
+      else
+        & &1
+      end
 
     # Each arrow in: what the agent before handed over, then what the arrow says.
     handoffs =
@@ -921,12 +924,12 @@ defmodule Factory.Engine do
         "You are #{step.name}, one agent in a team that works through a job step by step. " <>
           "Your part: #{blank(step.does, "do what the job needs")}.",
         job(run, step, kind),
-        kind == "incident" && Factory.Runs.Troubleshooting.mode_line(project_dir(run)),
+        kind == "incident" && clean.(Factory.Runs.Troubleshooting.mode_line(project_dir(run))),
         # Where the attached files are, for the agents that may read them.
         kind == "incident" && !Agent.web?(step.agent || %{}) && Factory.Evidence.describe(run),
-        base_specs(run),
+        run |> base_specs() |> List.wrap() |> Enum.map(&clean_part(&1, clean)),
         run.spec && tag("<spec>", clean.(run.spec), "</spec>", 96 * 1024),
-        clean_sources(sources(step), clean),
+        clean_part(sources(step), clean),
         own != "" && %{head: "Your instructions:\n", body: own, tail: "", max: 16 * 1024}
       ]
       |> List.flatten()
@@ -935,7 +938,7 @@ defmodule Factory.Engine do
     # What this pass is: what's done, what was handed over, feedback, and how to finish.
     ask =
       [
-        task_status(run),
+        clean_part(task_status(run), clean),
         handoffs != [] && ["What the agents before you handed over:" | handoffs],
         feedback &&
           [
@@ -981,8 +984,24 @@ defmodule Factory.Engine do
       else: tag("<job>", run.description || run.title, "</job>", job_room(kind))
   end
 
-  defp clean_sources(nil, _clean), do: nil
-  defp clean_sources(%{body: body} = part, clean), do: %{part | body: clean.(body)}
+  defp clean_part(%{body: body} = part, clean), do: %{part | body: clean.(body)}
+  defp clean_part(text, clean) when is_binary(text), do: clean.(text)
+  defp clean_part(nil, _clean), do: nil
+
+  # What an agent that searches the web never sees, besides what `Factory.Redact` finds
+  # itself: the names listed in Settings, the user names anything in the run shows (the
+  # attached files too), and the run's folders.
+  defp redaction(run) do
+    texts =
+      [run.description, run.spec] ++
+        Map.values(run.progress["outputs"] || %{}) ++ Factory.Evidence.heads(run)
+
+    [
+      names: Factory.Redact.saved_names(),
+      users: Factory.Redact.users_in(texts),
+      paths: [project_dir(run), Factory.Evidence.root(), Factory.Kiro.config(:workspace)]
+    ]
+  end
 
   defp job_room("incident"), do: 96 * 1024
   defp job_room(_kind), do: 16 * 1024
