@@ -370,10 +370,14 @@ defmodule Factory.Chat do
           true ->
             with {:ok, steps} <- Engine.executable_steps(run) do
               # From the start: a new run, or one run again for tasks added after it.
+              # A paused one goes on from where it stopped, without the error that
+              # paused it (a failed step, or a restart: `Engine.recover/0`).
+              progress = Map.delete(run.progress || %{}, "error")
+
               attrs =
                 if expected_status in ["draft", "done"],
                   do: %{status: "queued", progress: %{}},
-                  else: %{status: "queued"}
+                  else: %{status: "queued", progress: progress}
 
               {:ok, run} = Runs.update_run(run, attrs)
               {:ok, {run, steps}}

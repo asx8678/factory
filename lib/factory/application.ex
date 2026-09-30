@@ -15,14 +15,16 @@ defmodule Factory.Application do
       {Registry, keys: :unique, name: Factory.Kiro.Registry},
       {DynamicSupervisor, name: Factory.Kiro.Supervisor, strategy: :one_for_one},
       {Task.Supervisor, name: Factory.TaskSupervisor},
-      # No Kiro session or review survives a restart: clear leftover context and statuses.
-      # Off in tests, where the sandbox owns the database.
+      # No Kiro session, review or run worker survives a restart: clear leftover context
+      # and statuses, and pause the runs left queued or running, telling their chats
+      # (`Factory.Engine.recover/0`). Runs after the Repo and PubSub above are up. Off
+      # in tests, where the sandbox owns the database.
       {Task,
        fn ->
          if Application.get_env(:factory, :reset_on_boot, true) do
            Factory.Agents.reset_sessions()
            Factory.Specs.reset_reviews()
-           Factory.Engine.reset_runs()
+           Factory.Engine.recover()
          end
 
          # The models Kiro offers: the last list at once, then a fresh check.

@@ -310,11 +310,22 @@ defmodule Factory.Kiro do
   defdelegate ask(text, opts \\ []), to: Factory.Kiro.Ask, as: :run
 
   @doc """
-  Starts `kiro-cli acp --agent-engine v3` in `workdir`, with its stderr going to
-  `log_name` in the log folder. Messages arrive as `{port, {:data, {:eol | :noeol, text}}}`.
+  Starts `kiro-cli acp --agent-engine v3` in `workdir`, with its stderr going to a
+  fresh log in the log folder: `log_name` with the start time before its extension
+  (`agent-7.log` → `agent-7-20260930-141500.log`). Older logs of the same name beyond
+  `config :factory, :kiro, log_keep` (default 5) are removed (`prune_logs/2`).
+  Messages arrive as `{port, {:data, {:eol | :noeol, text}}}`.
   """
   def open_port(workdir, log_name) do
-    log = Path.join(config(:log_dir), log_name)
+    # The logs hold what Kiro was sent, prompts and request headers among it: the
+    # folder (tmp/, ignored by git) must stay out of version control, and each start
+    # gets its own file (truncated, not appended to) so it can't grow without bound.
+    log_dir = config(:log_dir)
+    File.mkdir_p(log_dir)
+    base = Path.rootname(log_name)
+    log = Path.join(log_dir, "#{base}-#{stamp()}#{Path.extname(log_name)}")
+    # Room for the one about to be written.
+    prune_logs(base, max(log_keep() - 1, 0))
 
     # v3 rejects --model; the model and mode are set on the session, per turn.
     args = ["acp", "--agent-engine", "v3", "--auth-method", "cli"]
@@ -330,9 +341,46 @@ defmodule Factory.Kiro do
          {~c"KIRO_FABRIC_LAUNCH_WORKSPACE", ~c"#{workdir}"},
          {~c"KIRO_LOG", ~c"#{log}"}
        ]},
-      {:args, ["-c", ~s(exec "$0" "$@" 2>>"$KIRO_LOG"), config(:cli) | args]}
+      {:args, ["-c", ~s(exec "$0" "$@" 2>"$KIRO_LOG"), config(:cli) | args]}
     ])
   end
+
+  @doc """
+  Removes the oldest logs of an agent (its id, or a log name's stem such as "shared")
+  beyond `keep` (default `config :factory, :kiro, log_keep`, else 5). Log names carry
+  the session's start time, so sorted by name the oldest come first. Never raises: a
+  log that can't be listed or removed is left where it is.
+  """
+  def prune_logs(agent, keep \\ log_keep())
+
+  def prune_logs(agent_id, keep) when is_integer(agent_id),
+    do: prune_logs("agent-#{agent_id}", keep)
+
+  def prune_logs(base, keep) when is_binary(base) and is_integer(keep) do
+    dir = config(:log_dir)
+    dated = ~r/^#{Regex.escape(base)}-\d{8}-\d{6}\.log$/
+
+    case File.ls(dir) do
+      {:ok, names} ->
+        names
+        |> Enum.filter(&Regex.match?(dated, &1))
+        |> Enum.sort()
+        |> Enum.drop(-max(keep, 0))
+        |> Enum.each(&File.rm(Path.join(dir, &1)))
+
+      {:error, _} ->
+        :ok
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  # How many logs to keep per agent; `:log_keep` in `config :factory, :kiro`, else 5.
+  defp log_keep, do: Application.fetch_env!(:factory, :kiro) |> Keyword.get(:log_keep, 5)
+
+  defp stamp, do: Calendar.strftime(DateTime.utc_now(), "%Y%m%d-%H%M%S")
 
   defp blank_to_nil(nil), do: nil
   defp blank_to_nil(s), do: if(String.trim(s) == "", do: nil, else: String.trim(s))

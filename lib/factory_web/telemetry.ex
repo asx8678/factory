@@ -52,6 +52,17 @@ defmodule FactoryWeb.Telemetry do
         unit: {:native, :millisecond}
       ),
 
+      # Factory Metrics: how long each run step takes, by the kind of agent and how it
+      # ended (`Factory.Engine`), and the runs paused at boot after a restart.
+      summary("factory.run.step.stop.duration",
+        unit: {:native, :millisecond},
+        tags: [:agent_kind, :outcome],
+        description: "The time a run step took, by agent kind and outcome"
+      ),
+      counter("factory.run.recovered.count",
+        description: "Runs found queued or running at boot and paused"
+      ),
+
       # Database Metrics
       summary("factory.repo.query.total_time",
         unit: {:native, :millisecond},

@@ -505,6 +505,48 @@ defmodule Factory.EngineTest do
     end
   end
 
+  test "a restart pauses the runs left running or queued, says why, and /resume clears it" do
+    %{w: w, coder: coder} = workflow("true")
+    running = queued_run(w)
+    queued = queued_run(w)
+    running_id = running.id
+
+    {:ok, _} =
+      Runs.update_run(running, %{
+        status: "running",
+        progress: %{"done" => [], "outputs" => %{}, "current" => "agent-#{coder.id}"}
+      })
+
+    Agents.set_activity(coder.id, "running", "Working")
+    Runs.subscribe(running.id)
+
+    assert Engine.recover() >= 2
+
+    running = Runs.get_run(running.id)
+    assert running.status == "paused"
+    assert running.progress["error"] == "Factory restarted while this run was running"
+    assert running.progress["current"] == "agent-#{coder.id}"
+    assert Agents.get_agent(coder.id).status == "idle"
+    assert_received {:run_updated, %{id: ^running_id, status: "paused"}}
+    assert_received {:message, %{role: "factory", body: "Factory restarted. " <> _}}
+
+    queued = Runs.get_run(queued.id)
+    assert queued.status == "paused"
+    assert queued.progress["error"] == "Factory restarted while this run was queued"
+
+    # A paused run is left alone by a later recovery: it isn't told twice.
+    Engine.recover()
+    assert Runs.get_run(running.id).status == "paused"
+    assert Enum.count(Runs.list_messages(running.id), &(&1.body =~ "Factory restarted")) == 1
+
+    # The engine is off in tests, so /resume leaves the run queued, without the error.
+    Chat.handle(running, "/resume")
+    resumed = Runs.get_run(running.id)
+    assert resumed.status == "queued"
+    refute Map.has_key?(resumed.progress, "error")
+    assert resumed.progress["current"] == "agent-#{coder.id}"
+  end
+
   defp with_task(run) do
     {:ok, run} =
       Runs.attach_spec(run, [{"tasks.md", "- [ ] 1. Ship it"}], [%{ref: "1", title: "Ship it"}])

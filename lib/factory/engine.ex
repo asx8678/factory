@@ -287,7 +287,7 @@ defmodule Factory.Engine do
 
       {:ok, run} = Runs.update_run(run, %{progress: progress})
 
-      case do_step(run, steps, step) do
+      case timed_step(run, steps, step) do
         {:ok, output, sent} ->
           # Read again: the step's tools may have written to the run while it worked.
           run = Runs.get_run(run.id)
@@ -583,6 +583,21 @@ defmodule Factory.Engine do
       nil -> nil
     end
   end
+
+  # Each step's duration and outcome go out as `[:factory, :run, :step, :stop]`, with
+  # the run and the agent in its metadata (see `FactoryWeb.Telemetry.metrics/0`).
+  defp timed_step(run, steps, step) do
+    meta = %{run_id: run.id, agent_kind: step.kind, agent_name: step.name}
+
+    :telemetry.span([:factory, :run, :step], meta, fn ->
+      result = do_step(run, steps, step)
+      {result, Map.put(meta, :outcome, step_outcome(result))}
+    end)
+  end
+
+  defp step_outcome({:ok, _output, _sent}), do: :ok
+  defp step_outcome({:error, _reason}), do: :error
+  defp step_outcome(:stopped), do: :stopped
 
   defp do_step(run, _steps, %{kind: "action", agent: card} = step) do
     set_activity(card, "running", "Running for “#{run.title}”")
@@ -1086,14 +1101,51 @@ defmodule Factory.Engine do
   defp set_activity(nil, _status, _activity), do: :ok
   defp set_activity(card, status, activity), do: Agents.set_activity(card.id, status, activity)
 
-  @doc "Runs left running when Factory stopped are paused, to resume by hand."
-  def reset_runs do
+  @doc """
+  Runs left "running" or "queued" when Factory stopped have no worker any more: pauses
+  each, keeps why in its progress (`"error"`), says so in its chat and sets the agent
+  it was on idle, so it can be resumed by hand with /resume. Run once at boot
+  (`Factory.Application`), after the database and PubSub are up. Returns how many runs
+  it paused, which also goes out as `[:factory, :run, :recovered]`.
+  """
+  def recover do
     import Ecto.Query
 
-    Factory.Repo.update_all(from(r in Run, where: r.status == "running"),
-      set: [status: "paused"]
-    )
+    ids =
+      Factory.Repo.all(
+        from r in Run, where: r.status in ["running", "queued"], order_by: r.id, select: r.id
+      )
+
+    recovered =
+      Enum.count(ids, fn id ->
+        match?({:ok, :recovered}, Runs.with_locked_run(id, &recover_locked/1))
+      end)
+
+    if recovered > 0,
+      do: Logger.info("Paused #{recovered} run(s) left over from before the restart")
+
+    :telemetry.execute([:factory, :run, :recovered], %{count: recovered}, %{})
+    recovered
   end
+
+  # Under the row lock: a run that was resumed or cancelled meanwhile is left alone.
+  defp recover_locked(%Run{status: status} = run) when status in ["running", "queued"] do
+    reason = "Factory restarted while this run was #{status}"
+    progress = Map.put(run.progress || %{}, "error", reason)
+    {:ok, run} = Runs.update_run(run, %{status: "paused", progress: progress})
+
+    # `{:error, :gone}` when the run went meanwhile: nothing more to say then.
+    Runs.post(run, "factory", "Factory restarted. Type /resume to carry on.")
+
+    case Enum.find(steps(run), &(&1.id == run.progress["current"])) do
+      %{agent: card} -> set_activity(card, "idle", nil)
+      nil -> :ok
+    end
+
+    {:ok, :recovered}
+  end
+
+  defp recover_locked(_run), do: {:ok, :unchanged}
 
   defp blank(s, default), do: if(String.trim(s || "") == "", do: default, else: s)
 end
