@@ -50,9 +50,9 @@ defmodule Factory.Chat do
           {:error, reason} = Engine.executable_steps(run)
           say(run, reason)
 
-        planning?(run, agent, text) ->
+        planner = planning?(run, agent, text) ->
           run = if files != [], do: Factory.ChatPlanner.keep_files(run, files), else: run
-          Factory.ChatPlanner.start(run, agent)
+          Factory.ChatPlanner.start(run, planner)
 
         true ->
           run = if files != [], do: attach(run, files), else: run
@@ -69,10 +69,36 @@ defmodule Factory.Chat do
     :ok
   end
 
-  # A planner plans the tasks until the run starts; after that it's an agent to talk to.
-  defp planning?(%Run{status: "draft"}, %{kind: "planner"}, "/" <> _), do: false
-  defp planning?(%Run{status: "draft"}, %{kind: "planner"}, _text), do: true
+  # Until the run starts, what's written to its planner (or to Factory itself) is planned
+  # into tasks; after that the planner is an agent to talk to. A workflow without a
+  # planner agent plans with its first agent when that one reads and works out what to
+  # do (a bug's Investigator, say); other agents are just talked to.
+  defp planning?(%Run{status: "draft"}, _agent, "/" <> _), do: false
+
+  defp planning?(%Run{status: "draft"} = run, agent, text) do
+    case planner_for(run) do
+      nil -> false
+      planner when agent == nil -> text != "" and planner
+      planner -> agent.id == planner.id and planner
+    end
+  end
+
   defp planning?(_run, _agent, _text), do: false
+
+  @doc """
+  The agent that plans a run's tasks: its workflow's planner, else its first agent if
+  that one is a researcher or an orchestrator, else nil.
+  """
+  def planner_for(%Run{} = run) do
+    case Enum.find(agents(run), &(&1.kind == "planner")) do
+      nil ->
+        first = run |> Engine.steps() |> Enum.find(&(&1.kind != "action"))
+        if first && first.kind in ~w(researcher orchestrator), do: first.agent
+
+      planner ->
+        planner
+    end
+  end
 
   @doc "Runs a button action shown under a factory message."
   def action(%Run{} = run, "start"), do: command(Runs.get_run(run.id), "/run")
@@ -127,7 +153,8 @@ defmodule Factory.Chat do
   defp command(run, _text) do
     say(
       run,
-      "I only understand slash commands for now. Type /help to see them, or attach a spec to start."
+      "Write to one of the agents, or type /help to see the commands. " <>
+        "Attach a spec, or describe the change before the run starts, to plan its tasks."
     )
   end
 
