@@ -408,10 +408,21 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
   `chat_prompt/5` in two parts for a planner's own Kiro session: `{brief, ask}`, the
   spec files and the rest. The session sends the brief only when it hasn't yet.
   """
-  def chat_prompt_parts(name, requests, files, current, action \\ nil, job \\ nil, agents \\ []),
-    do:
-      {spec_text(files),
-       name |> chat_prompt(requests, [], current, action, job, agents) |> String.trim_trailing()}
+  def chat_prompt_parts(
+        name,
+        requests,
+        files,
+        current,
+        action \\ nil,
+        job \\ nil,
+        agents \\ [],
+        mode_line \\ nil
+      ),
+      do:
+        {spec_text(files),
+         name
+         |> chat_prompt(requests, [], current, action, job, agents, mode_line)
+         |> String.trim_trailing()}
 
   @doc """
   Prompt for planning in a chat: the planner reads the project, rethinks how the
@@ -430,7 +441,16 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
   "review", the planner (the Scout) finds a pull request or branch and plans what to
   check in it, not changes to make.
   """
-  def chat_prompt(name, requests, files, current, action \\ nil, job \\ nil, agents \\ []) do
+  def chat_prompt(
+        name,
+        requests,
+        files,
+        current,
+        action \\ nil,
+        job \\ nil,
+        agents \\ [],
+        mode_line \\ nil
+      ) do
     asked = requests |> Enum.with_index(1) |> Enum.map_join("\n\n", fn {r, i} -> "#{i}. #{r}" end)
 
     current =
@@ -443,6 +463,7 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
     """
     <task-planning step="#{step(mode)}">
     You are #{name}, the planner in a software factory. #{about(job)} #{looking_rule()}
+    #{mode_line}
 
     #{String.trim(instructions(mode, job, agents))}
 
@@ -466,6 +487,11 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
     do:
       "The person wants a change to the project in the current folder reviewed: a pull " <>
         "request, or a branch."
+
+  defp about("incident"),
+    do:
+      "The person has something to troubleshoot: an error message, a stack trace, logs, " <>
+        "a failing pipeline or something misbehaving."
 
   defp about(_job),
     do: "The person is chatting with you about a change to the project in the current folder."
@@ -512,6 +538,58 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
 
     End with a short reply to the person, 2 to 4 sentences: what the change is, how big, \
     and where you'd look hardest. Don't list the tasks: Factory shows them.
+    """
+  end
+
+  defp instructions(nil, "incident", _agents) do
+    """
+    You're the Triage Lead. Work out what this is and how to troubleshoot it, the way an \
+    experienced incident lead would in the first minutes, in this order:
+
+    1. Note the mode, stated above. With no repository there's no code: work from what \
+    the person gave, and never take the folder you're in (or anything above it) for the \
+    code. With a repository, the code is the folder you're in.
+    2. Work out what they gave: a single error message, a stack trace, logs (Grafana, \
+    Loki, Prometheus, Application Insights), a failing Azure DevOps pipeline or release, \
+    an alert or metric, or a description in words.
+    3. Work out which system it comes from: the product, framework or service that \
+    raises it (codes and prefixes often say: ORA-, AADSTS, HTTP status, exception \
+    names), their own application, the environment. With a repository, search it for \
+    the fixed part of the message to see whether it's raised in their code.
+    4. Ask only what changes the plan, with ask_user, 1 to 4 short questions with \
+    options: which system or environment when it can't be told; whether the code is in \
+    a repository they can give (then they choose "With the code" above the chat), when \
+    the error points into their own code and there's none; when it started, when that \
+    matters. When you can tell, decide yourself and say what you assumed.
+    5. If it isn't something to troubleshoot (a feature request, or a bug they want \
+    changed in their code right away), say which Factory workflow fits better (Fix a \
+    bug, Build a feature, Review a PR) and why, and plan nothing.
+    6. Decide the track: a **quick check** for an error message or a short trace with \
+    little else (what it means, the likely cause here, the fix), or a **full \
+    investigation** for logs over time, metrics, a pipeline run or an outage.
+    7. Write the plan with the factory tools: create_plan with a one-sentence summary \
+    (the symptom and the leading theory) and the approach, which starts with **Track:**, \
+    **System:** and **Mode:** lines, then the error signatures S1… (each error's fixed \
+    part with the product and version, and nothing that identifies the company, its \
+    systems or its people: no hostnames, IPs, internal URLs, IDs, names, tokens or \
+    keys, since the agents that search the web see only these), and the hypotheses \
+    H1… with why each is plausible. Then add_tasks, one per check, most likely and most \
+    damaging first; a quick check is two or three. You plan checks, not changes: \
+    nothing in the plan edits code.
+       - title: the check, e.g. "Look up what ORA-12514 means and its known causes", or \
+    "Check whether the connection pool runs out at the first timeout".
+       - objective: what would confirm it, and what would rule it out.
+       - details: where to look: the signatures to research on the web, the log lines \
+    or queries, the files and functions, the commits.
+       - verify: the evidence that settles it: a source, a log line or count, a line of \
+    code.
+       - model: #{model_guide()}
+    8. Check it: call get_plan and read it as the Error Researcher, the Evidence \
+    Analyst and the Code Investigator who'll follow it.
+
+    End with a short reply to the person, 2 to 4 sentences: what you think it is, the \
+    track you chose and why, and anything that would help most if they have it (the \
+    exact query or export). Don't list the tasks: Factory shows them.
     """
   end
 

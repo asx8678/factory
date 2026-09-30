@@ -349,9 +349,18 @@ defmodule Factory.Kiro do
        [
          {~c"KIRO_FABRIC_LAUNCH_WORKSPACE", ~c"#{workdir}"},
          {~c"KIRO_LOG", ~c"#{log}"}
-       ]},
+       ] ++ ceiling(workdir)},
       {:args, ["-c", ~s(exec "$0" "$@" 2>>"$KIRO_LOG"), config(:cli) | args]}
     ])
+  end
+
+  # The default workspace is scratch space inside Factory's own folder: git there must
+  # say it isn't a repository, rather than find Factory's, so an agent working from
+  # pasted text never takes Factory's code for the code it's about.
+  defp ceiling(workdir) do
+    if Path.expand(workdir) == Path.expand(config(:workspace)),
+      do: [{~c"GIT_CEILING_DIRECTORIES", ~c"#{Path.dirname(Path.expand(workdir))}"}],
+      else: []
   end
 
   defp blank_to_nil(nil), do: nil

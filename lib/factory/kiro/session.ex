@@ -634,15 +634,16 @@ defmodule Factory.Kiro.Session do
          else: "reject"
 
     # Some of what one that only reads may do goes to the person first
-    # (`Kiro.Permission.ask_first/4`): a web page, a pull request's own code, a file
-    # outside the project.
+    # (`Kiro.Permission.ask_first/4`): a web page (unless the agent is set to search the
+    # web, `Agent.web?/1`), a pull request's own code, a file outside the project.
     ask =
       cond do
         looking? ->
           Kiro.Permission.ask_first(kind, command, [], state.workdir)
 
         state.turn != nil and Agent.read_only?(state.turn.agent) and
-            (kind == "fetch" or (wanted == "allow" and kind in ["read", "search"])) ->
+            ((kind == "fetch" and not Agent.web?(state.turn.agent)) or
+               (wanted == "allow" and kind in ["read", "search"])) ->
           Kiro.Permission.ask_first(kind, command, paths(params, state.turn), state.workdir)
 
         true ->

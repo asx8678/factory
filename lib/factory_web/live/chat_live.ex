@@ -68,6 +68,7 @@ defmodule FactoryWeb.ChatLive do
           # A new chat works in the folder picked last, until another is picked.
           |> set_dir(Factory.Prefs.project_dir())
           |> load_agents()
+          |> job_dir()
 
         focus = chat_agent(socket, params["agent"])
 
@@ -99,6 +100,7 @@ defmodule FactoryWeb.ChatLive do
               |> keep_dir(run)
               |> assign(base_ids: run.settings["base_spec_ids"] || [])
               |> load_agents()
+              |> job_dir()
 
             {:noreply,
              socket
@@ -238,6 +240,10 @@ defmodule FactoryWeb.ChatLive do
       review? and socket.assigns.review_step != :analysis ->
         assign(socket, scout: nil, ideas: nil)
 
+      # Troubleshooting starts from the problem, not from what the folder suggests.
+      incident?(socket) ->
+        assign(socket, scout: nil, ideas: nil)
+
       review? ->
         socket
         |> assign(scout: :loading, ideas: nil)
@@ -256,6 +262,25 @@ defmodule FactoryWeb.ChatLive do
     dir = run.settings["project_dir"] || (settable?(run) && Factory.Prefs.project_dir())
     set_dir(socket, dir || "")
   end
+
+  # The folder follows the workflow. Troubleshooting works from what's pasted (logs
+  # only) until a repository is chosen for it, so it doesn't take the folder picked
+  # last; the others start a new chat in that one (`keep_dir/2`).
+  defp job_dir(socket) do
+    run = socket.assigns.run
+    saved = run && String.trim(run.settings["project_dir"] || "")
+    saved = if saved in [nil, ""], do: nil, else: saved
+
+    cond do
+      incident?(socket) -> set_dir(socket, saved || "")
+      saved != nil -> socket
+      socket.assigns.dir == "" and settable?(run) -> set_dir(socket, Factory.Prefs.project_dir())
+      true -> socket
+    end
+  end
+
+  defp incident?(socket),
+    do: socket.assigns.workflow != nil and Workflows.kind(socket.assigns.workflow) == "incident"
 
   defp set_dir(socket, dir) do
     dir = String.trim(dir || "")
@@ -402,6 +427,7 @@ defmodule FactoryWeb.ChatLive do
          |> save_setting("workflow_id", workflow.id)
          |> save_setting("base_spec_ids", workflow.base_spec_ids)
          |> load_agents()
+         |> job_dir()
          |> derive()
          |> scout()}
     end
@@ -538,9 +564,17 @@ defmodule FactoryWeb.ChatLive do
       when event in ["browse_go", "browse_hidden", "browse_cancel"],
       do: FolderBrowser.handle_event(event, params, socket)
 
-  # In a review not yet under way, the folder picked is the repository to review.
+  # In a review not yet under way, the folder picked is the repository to review; in
+  # troubleshooting, the repository whose code the agents search.
   def handle_event("browse_pick", %{"path" => path}, %{assigns: %{review_step: step}} = socket)
       when step in [:source, :analysis],
+      do: pick_repository(socket, path)
+
+  def handle_event(
+        "browse_pick",
+        %{"path" => path},
+        %{assigns: %{workflow: %{key: "incident"}}} = socket
+      ),
       do: pick_repository(socket, path)
 
   def handle_event("browse_pick", %{"path" => path}, socket) do
@@ -552,6 +586,16 @@ defmodule FactoryWeb.ChatLive do
      |> save_setting("project_dir", Path.expand(path))
      |> derive()
      |> scout()}
+  end
+
+  # Troubleshooting from what's pasted only again: the repository is set aside.
+  def handle_event("without_code", _, socket) do
+    {:noreply,
+     socket
+     |> save_setting("project_dir", nil)
+     |> set_dir("")
+     |> assign(folder_error: nil, clone_error: nil)
+     |> derive()}
   end
 
   def handle_event("action", %{"action" => action}, socket) do
@@ -713,7 +757,8 @@ defmodule FactoryWeb.ChatLive do
   end
 
   defp send_chat(%{"chat" => %{"body" => body}}, socket) do
-    if socket.assigns.dir_ok or String.starts_with?(String.trim(body), "/") do
+    # Troubleshooting works from what's pasted: its repository is optional.
+    if socket.assigns.dir_ok or incident?(socket) or String.starts_with?(String.trim(body), "/") do
       socket =
         if String.starts_with?(String.trim(body), "/"), do: socket, else: Plan.remember(socket)
 
@@ -828,8 +873,8 @@ defmodule FactoryWeb.ChatLive do
 
   def handle_async(:ideas, {:exit, _reason}, socket), do: {:noreply, assign(socket, ideas: [])}
 
-  # A folder picked as the repository to review: its repository (a folder picked inside
-  # one is all of it), or why it won't do.
+  # A folder picked as the repository to review or to search: its repository (a folder
+  # picked inside one is all of it), or why it won't do.
   defp pick_repository(socket, path) do
     case Factory.Scout.repository(path) do
       {:ok, top} ->
@@ -854,26 +899,34 @@ defmodule FactoryWeb.ChatLive do
   # `source` is where it came from ("clone" or "local"); `pr_branch` a pull request's
   # branch fetched with it, suggested first.
   defp open_review(socket, dir, label, source, pr_branch \\ nil) do
+    incident? = incident?(socket)
+
     run =
       case socket.assigns.run do
         %{status: "draft"} = run -> run
+        _ when incident? -> elem(Runs.create_run("Troubleshoot #{label}"), 1)
         _ -> Runs.unused_review(dir) || elem(Runs.create_run("Review #{label}"), 1)
       end
 
+    # A review is named after its repository. Troubleshooting is named after the problem
+    # once it's described (`Factory.Runs.Titles`), so its title is left to that.
+    named =
+      if incident?,
+        do: %{kind: "incident"},
+        else: %{kind: "review", title: "Review #{label}"}
+
+    settings =
+      %{
+        "workflow_id" => socket.assigns.workflow.id,
+        "base_spec_ids" => socket.assigns.base_ids,
+        "project_dir" => dir,
+        "review_source" => source,
+        "review_pr_branch" => pr_branch
+      }
+      |> Map.merge(if incident?, do: %{}, else: %{"title" => "manual"})
+
     {:ok, run} =
-      Runs.update_run(run, %{
-        title: "Review #{label}",
-        kind: "review",
-        settings:
-          Map.merge(run.settings || %{}, %{
-            "workflow_id" => socket.assigns.workflow.id,
-            "base_spec_ids" => socket.assigns.base_ids,
-            "project_dir" => dir,
-            "title" => "manual",
-            "review_source" => source,
-            "review_pr_branch" => pr_branch
-          })
-      })
+      Runs.update_run(run, Map.put(named, :settings, Map.merge(run.settings || %{}, settings)))
 
     push_patch(socket, to: ~p"/chat/#{run.id}")
   end
@@ -1032,7 +1085,13 @@ defmodule FactoryWeb.ChatLive do
             ok={@dir_ok}
             warn={@folder_warn}
             locked={!settable?(@run)}
-            pending={if @review_step == :source, do: "No repository yet"}
+            pending={
+              cond do
+                @review_step == :source -> "No repository yet"
+                @workflow && Workflows.kind(@workflow) == "incident" && !@dir_ok -> "No repository"
+                true -> nil
+              end
+            }
           />
           <.workflow_picker
             workflows={@workflows}

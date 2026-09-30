@@ -20,6 +20,9 @@ defmodule FactoryWeb.ChatParts do
       planner && settable?(run) && job == "review" ->
         "Paste a pull request's link or name a branch for #{planner.name}, or type / for commands"
 
+      planner && settable?(run) && job == "incident" ->
+        "Paste the error or logs for #{planner.name}, or type / for commands"
+
       planner && settable?(run) ->
         "Describe a change for #{planner.name} to plan, or type / for commands"
 
@@ -32,6 +35,9 @@ defmodule FactoryWeb.ChatParts do
     cond do
       planner && planner.id == agent.id && settable?(run) && job == "review" ->
         "Paste a repository or pull request link to clone it, or name the branch to review…"
+
+      planner && planner.id == agent.id && settable?(run) && job == "incident" ->
+        "Paste the error, a stack trace or logs, and say where it happens…"
 
       planner && planner.id == agent.id && settable?(run) ->
         "Describe a change, e.g. add an export button to the invoices page…"
@@ -64,7 +70,7 @@ defmodule FactoryWeb.ChatParts do
     default: nil,
     doc:
       "what shows while no repository is chosen, when the folder remembered isn't it: " <>
-        "a review's first step"
+        "a review's first step, or troubleshooting from what's pasted only"
 
   # Where the agents work: red until a folder is chosen, green once it is.
   def folder_button(%{pending: pending} = assigns) when is_binary(pending) do
@@ -419,6 +425,10 @@ defmodule FactoryWeb.ChatParts do
   # Review a PR: its own greeting (FactoryWeb.ReviewParts).
   def greeting(%{focus: nil, workflow: %{key: "review"}} = assigns),
     do: FactoryWeb.ReviewParts.greeting(assigns)
+
+  # Troubleshooting: its own greeting, with its two modes (FactoryWeb.IncidentParts).
+  def greeting(%{focus: nil, workflow: %{key: "incident"}} = assigns),
+    do: FactoryWeb.IncidentParts.greeting(assigns)
 
   def greeting(%{focus: nil, dir_ok: true} = assigns) do
     ~H"""

@@ -7,7 +7,7 @@ defmodule Factory.WorkflowsTest do
     workflows = Workflows.list()
 
     assert Enum.map(Enum.filter(workflows, & &1.key), & &1.key) ==
-             ~w(feature bug review)
+             ~w(feature bug review incident)
 
     bug = Workflows.standard("bug")
     assert bug.name == "Fix a bug"

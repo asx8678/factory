@@ -23,6 +23,8 @@ defmodule Factory.Agents.Agent do
     field :usage, :map, default: %{}
     field :session, :string, default: "own"
     field :kiro_mode, :string, default: "vibe"
+    # An agent that only reads asks before it fetches a web page, unless this is set.
+    field :web, :boolean, default: false
     field :x, :float, default: 0.0
     field :y, :float, default: 0.0
     # For kind "action": %{"type" => …, "config" => %{…}} (see Factory.Actions).
@@ -35,10 +37,21 @@ defmodule Factory.Agents.Agent do
   @doc """
   The Kiro tool kinds an agent may use, the same in a chat and in a run: reading and
   searching for the kinds that only look (planner, researcher, reviewer), everything
-  for the rest. Kiro asks before it edits or runs a command; other requests are denied.
+  for the rest. Kiro asks before it edits or runs a command; other requests are denied,
+  except that the person is asked when one that only looks wants to fetch a web page
+  (see `Factory.Kiro.Session`), unless it's set to search the web (`web?/1`).
   """
-  def tools(%{kind: kind}) when kind in @read_only, do: @read_tools
+  def tools(%{kind: kind} = agent) when kind in @read_only,
+    do: if(web?(agent), do: @read_tools ++ ["fetch"], else: @read_tools)
+
   def tools(_agent), do: @all_tools
+
+  @doc """
+  Whether the agent searches the web without asking. The ones that only look ask first
+  (their reading could be steered to send what they read anywhere), except one set to
+  (`web`), given claims to check rather than the raw material, like the Fact Checker.
+  """
+  def web?(agent), do: Map.get(agent, :web) == true
 
   @doc "Whether the agent only reads and checks, never changes the project."
   def read_only?(%{kind: kind}), do: kind in @read_only
@@ -63,7 +76,8 @@ defmodule Factory.Agents.Agent do
       :x,
       :y,
       :workflow_id,
-      :action
+      :action,
+      :web
     ])
     |> update_change(:name, &String.trim/1)
     |> validate_required([:name])

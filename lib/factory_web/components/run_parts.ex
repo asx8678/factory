@@ -9,6 +9,7 @@ defmodule FactoryWeb.RunParts do
     "feature" => {"hero-sparkles", "hero-sparkles-micro"},
     "bug" => {"hero-bug-ant", "hero-bug-ant-micro"},
     "review" => {"hero-magnifying-glass", "hero-magnifying-glass-micro"},
+    "incident" => {"hero-lifebuoy", "hero-lifebuoy-micro"},
     "other" => {"hero-chat-bubble-left-ellipsis", "hero-chat-bubble-left-ellipsis-micro"}
   }
 

@@ -115,6 +115,7 @@ defmodule FactoryWeb.PlanPanel do
           {cond do
             @checking -> "Checking the scope"
             @job == "review" -> "Reviewing"
+            @job == "incident" -> "Triaging"
             true -> "Reworking the plan"
           end}
         </span>
@@ -430,7 +431,11 @@ defmodule FactoryWeb.PlanPanel do
 
       <footer class="flex flex-wrap items-center gap-2 border-t border-base-content/10 px-3.5 py-2.5">
         <span class="mr-auto text-sm">
-          {if @job == "review", do: "Start the review?", else: "Implement this plan?"}
+          {case @job do
+            "review" -> "Start the review?"
+            "incident" -> "Start the investigation?"
+            _ -> "Implement this plan?"
+          end}
         </span>
         <button
           type="button"
@@ -447,7 +452,11 @@ defmodule FactoryWeb.PlanPanel do
           class="btn btn-primary btn-sm"
         >
           <.icon name="hero-play-micro" class="size-3.5" />
-          {if @job == "review", do: "Yes, review", else: "Yes, implement"}
+          {case @job do
+            "review" -> "Yes, review"
+            "incident" -> "Yes, investigate"
+            _ -> "Yes, implement"
+          end}
         </button>
       </footer>
     </section>
@@ -682,9 +691,9 @@ defmodule FactoryWeb.PlanPanel do
     """
   end
 
-  # What the plan's items are called: a review's are checks.
-  defp count_word("review", 1), do: "check"
-  defp count_word("review", _n), do: "checks"
+  # What the plan's items are called: a review's and an investigation's are checks.
+  defp count_word(job, 1) when job in ["review", "incident"], do: "check"
+  defp count_word(job, _n) when job in ["review", "incident"], do: "checks"
   defp count_word(_job, 1), do: "task"
   defp count_word(_job, _n), do: "tasks"
 

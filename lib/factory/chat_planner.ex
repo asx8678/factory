@@ -85,7 +85,26 @@ defmodule Factory.ChatPlanner do
         job = workflow && Factory.Workflows.kind(workflow)
         # Who can build: each task is given to one of them, with its model.
         agents = Factory.Workflows.builders(workflow)
-        prompt_args = [planner.name, requests, base ++ files, current, action, job, agents]
+        # Troubleshooting says which mode it's in: a repository, or none.
+        mode_line =
+          job == "incident" &&
+            Factory.Runs.Troubleshooting.mode_line(
+              case String.trim(run.settings["project_dir"] || "") do
+                "" -> nil
+                dir -> dir
+              end
+            )
+
+        prompt_args = [
+          planner.name,
+          requests,
+          base ++ files,
+          current,
+          action,
+          job,
+          agents,
+          mode_line || nil
+        ]
 
         prompt = %{
           full: apply(Planner, :chat_prompt, prompt_args),
@@ -110,11 +129,16 @@ defmodule Factory.ChatPlanner do
   # a review, what it's reviewing (the pull request, the branch…), never "planning".
   defp doing(:scope, _job, _requests, title), do: "Checking the scope of “#{title}”"
   defp doing(:refine, "review", _requests, title), do: "Reworking the review of “#{title}”"
+
+  defp doing(:refine, "incident", _requests, title),
+    do: "Reworking the investigation of “#{title}”"
+
   defp doing(:refine, _job, _requests, title), do: "Refining “#{title}”"
 
   defp doing(_mode, "review", requests, title),
     do: Enum.find_value(Enum.reverse(requests), &review_target/1) || "Reviewing “#{title}”"
 
+  defp doing(_mode, "incident", _requests, title), do: "Triaging “#{title}”"
   defp doing(_mode, _job, _requests, title), do: "Planning “#{title}”"
 
   # What a review request names, as the chat's buttons write it or as typed.

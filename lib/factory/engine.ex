@@ -787,6 +787,7 @@ defmodule Factory.Engine do
   # (job, spec, hand-offs, sources) can be shortened; Factory's own lines can't.
   defp fit_prompt(run, steps, step, focus \\ nil) do
     notes = Map.get(step, :notes, %{})
+    kind = (workflow = Workflows.for_run(run)) && Workflows.kind(workflow)
 
     # Each arrow in: what the agent before handed over, then what the arrow says.
     handoffs =
@@ -818,7 +819,8 @@ defmodule Factory.Engine do
       [
         "You are #{step.name}, one agent in a team that works through a job step by step. " <>
           "Your part: #{blank(step.does, "do what the job needs")}.",
-        tag("<job>", run.description || run.title, "</job>", 16 * 1024),
+        job(run, step, kind),
+        kind == "incident" && Factory.Runs.Troubleshooting.mode_line(project_dir(run)),
         base_specs(run),
         run.spec && tag("<spec>", run.spec, "</spec>", 96 * 1024),
         sources(step),
@@ -861,6 +863,29 @@ defmodule Factory.Engine do
       brief: Enum.join(brief_parts, "\n\n"),
       ask: Enum.join(ask_parts, "\n\n")
     })
+  end
+
+  # The job as the person wrote it. A troubleshooting run's is mostly the errors and
+  # logs they pasted, so it gets as much room as a spec. An agent that searches the web
+  # isn't shown it (`Agent.web?/1`): what it looks up comes from the hand-overs, where
+  # the signatures have nothing that identifies anyone, so it can't send the person's
+  # material anywhere, whatever that material says.
+  defp job(run, step, kind) do
+    if step.agent && Agent.web?(step.agent),
+      do:
+        "<job>Not shown to agents that search the web. Work from the hand-over and the " <>
+          "case file: what to look up is there.</job>",
+      else: tag("<job>", run.description || run.title, "</job>", job_room(kind))
+  end
+
+  defp job_room("incident"), do: 96 * 1024
+  defp job_room(_kind), do: 16 * 1024
+
+  defp project_dir(run) do
+    case String.trim(run.settings["project_dir"] || "") do
+      "" -> nil
+      dir -> dir
+    end
   end
 
   # One task to build this turn, as the spec writes it.

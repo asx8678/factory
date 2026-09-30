@@ -610,6 +610,16 @@ defmodule FactoryWeb.WorkflowParts do
                 options={[{"Own session", "own"}, {"Shared session", "shared"}]}
               />
             </.prop>
+            <%!-- Agents that only read ask before they fetch a web page, unless set to search freely. --%>
+            <.prop
+              :if={Factory.Agents.Agent.read_only?(%{kind: to_string(@form[:kind].value)})}
+              label="Web"
+            >
+              <.plain_select
+                field={@form[:web]}
+                options={[{"Asks first", "false"}, {"Searches freely", "true"}]}
+              />
+            </.prop>
             <.prop label="Kiro">
               <span :if={!Kiro.running?(@selected)} class="px-1.5 text-base-content/50">
                 Starts on first message

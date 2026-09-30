@@ -3,7 +3,7 @@ defmodule Factory.Workflows do
   Named workflows: each a set of agents and the hand-offs between them.
 
   The standard workflows match the jobs on the start screen (build a feature, fix a
-  bug, review a pull request). One that's no longer standard (resolve an issue, update
+  bug, review a pull request, troubleshoot an issue). One that's no longer standard (resolve an issue, update
   dependencies) can be deleted like a custom one, and isn't made again. They're created from
   `Factory.Runs.Types` when first needed, can be changed like any other, and can be
   restored to their default. Custom workflows are made new or cloned.
@@ -16,7 +16,7 @@ defmodule Factory.Workflows do
   alias Factory.Agents.{Agent, Link, Workflow}
   alias Factory.Runs.{Run, Types}
 
-  @standard ~w(feature bug review)
+  @standard ~w(feature bug review incident)
 
   @doc "Every workflow: the standard ones in start-screen order, then custom ones by name."
   def list do
@@ -250,7 +250,7 @@ defmodule Factory.Workflows do
              w
              |> Workflow.changeset(%{name: type.label, description: type.blurb})
              |> Repo.update() do
-        build(w, Types.workflow(key))
+        build(w, key)
         {:ok, w}
       end
     end)
@@ -264,28 +264,39 @@ defmodule Factory.Workflows do
 
   def modified?(%Workflow{key: key} = w) do
     type = Types.get(key)
-    default = Enum.map(Types.workflow(key), &{&1["name"], &1["kind"], prompt(&1)})
-    agents = ordered_agents(w.id)
-    now = Enum.map(agents, &{&1.name, &1.kind, &1.prompt})
 
-    w.name != type.label or now != default or not chain?(w.id, agents)
+    default =
+      Enum.map(Types.workflow(key), &{&1["name"], &1["kind"], prompt(&1), &1["web"] == true})
+
+    agents = ordered_agents(w.id)
+    now = Enum.map(agents, &{&1.name, &1.kind, &1.prompt, &1.web})
+
+    w.name != type.label or now != default or not chain?(w.id, key, agents)
   end
 
-  # The hand-offs are exactly one chain through the agents in order.
-  # The hand-offs are one chain through the agents in order, plus the review loop.
-  defp chain?(workflow_id, agents) do
+  # The hand-offs are one chain through the agents in order, plus the arrow back.
+  defp chain?(workflow_id, key, agents) do
     pairs = agents |> Enum.map(& &1.id) |> Enum.chunk_every(2, 1, :discard)
-    pairs = if loop = review_loop(agents), do: pairs ++ [loop], else: pairs
+    pairs = if loop = loop(key, agents), do: pairs ++ [loop], else: pairs
     Enum.sort(Enum.map(links(workflow_id), &[&1.source_id, &1.target_id])) == Enum.sort(pairs)
   end
 
-  # A standard workflow's arrow back: from its reviewer to the agent that builds, so the
-  # reviewer can send work back (`Factory.Engine`). Only with one of each.
-  defp review_loop(agents) do
-    case {Enum.filter(agents, &(&1.kind == "reviewer")),
-          Enum.filter(agents, &(&1.kind == "coder"))} do
-      {[reviewer], [coder]} -> [reviewer.id, coder.id]
-      _ -> nil
+  # A standard workflow's arrow back, so an agent can send the work back
+  # (`Factory.Engine`): the one its type names (`Factory.Runs.Types.loop/1`), else from
+  # its reviewer to the agent that builds, when it has one of each.
+  defp loop(key, agents) do
+    case Types.loop(key) do
+      {from, to} ->
+        with %{id: a} <- Enum.find(agents, &(&1.name == from)),
+             %{id: b} <- Enum.find(agents, &(&1.name == to)),
+             do: [a, b]
+
+      nil ->
+        case {Enum.filter(agents, &(&1.kind == "reviewer")),
+              Enum.filter(agents, &(&1.kind == "coder"))} do
+          {[reviewer], [coder]} -> [reviewer.id, coder.id]
+          _ -> nil
+        end
     end
   end
 
@@ -370,7 +381,7 @@ defmodule Factory.Workflows do
           |> Repo.insert(on_conflict: :nothing, conflict_target: :key)
 
         # Another process may have made it first.
-        if w.id, do: build(w, Types.workflow(key))
+        if w.id, do: build(w, key)
         {:ok, w}
       end)
     end
@@ -379,9 +390,9 @@ defmodule Factory.Workflows do
   end
 
   # Agents on Kiro, one under the other, each handing off to the next.
-  defp build(workflow, steps) do
+  defp build(workflow, key) do
     agents =
-      for {step, i} <- Enum.with_index(steps) do
+      for {step, i} <- Enum.with_index(Types.workflow(key)) do
         {:ok, a} =
           Agents.create_agent(%{
             workflow_id: workflow.id,
@@ -389,6 +400,7 @@ defmodule Factory.Workflows do
             kind: step["kind"],
             role: step["does"],
             prompt: prompt(step),
+            web: step["web"] == true,
             model: "auto",
             x: 0.0,
             y: i * 190.0
@@ -401,8 +413,8 @@ defmodule Factory.Workflows do
         do: Agents.link(a.id, b.id, %{source: "bottom", target: "top"})
 
     # Drawn down the right-hand side, so it doesn't cross the hand-offs.
-    with [reviewer, coder] <- review_loop(agents),
-         do: Agents.link(reviewer, coder, %{source: "right", target: "right"})
+    with [from, to] <- loop(key, agents),
+         do: Agents.link(from, to, %{source: "right", target: "right"})
 
     :ok
   end
