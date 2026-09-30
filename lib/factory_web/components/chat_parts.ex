@@ -8,15 +8,21 @@ defmodule FactoryWeb.ChatParts do
   alias Factory.Workflows
   alias FactoryWeb.WorkflowMap
 
-  def placeholder(nil, _run), do: "Message the factory, or type / for commands"
+  # Before the run starts, a message to the agent that plans it (or to Factory, which
+  # passes it on) is planned into tasks: the box says so.
+  def placeholder(agent, run, planner \\ nil)
 
-  def placeholder(%{kind: "planner"} = agent, run) do
-    if settable?(run),
+  def placeholder(nil, run, planner) do
+    if planner && settable?(run),
+      do: "Describe a change for #{planner.name} to plan, or type / for commands",
+      else: "Message the factory, or type / for commands"
+  end
+
+  def placeholder(agent, run, planner) do
+    if planner && planner.id == agent.id && settable?(run),
       do: "Describe a change, e.g. add an export button to the invoices page…",
       else: "Message #{agent.name}…"
   end
-
-  def placeholder(agent, _run), do: "Message #{agent.name}…"
 
   # The agent a message goes to, or nil for the factory.
   def recipient(focus, _to) when focus != nil, do: focus
@@ -927,6 +933,11 @@ defmodule FactoryWeb.ChatParts do
   attr :focus, :any, required: true
   attr :to, :any, default: nil
   attr :run, :any, required: true
+
+  attr :planner, :any,
+    default: nil,
+    doc: "the agent that plans the run (Factory.Chat.planner_for/1)"
+
   attr :glow, :boolean, default: false
 
   # Rounded card: attachments, the message, then a toolbar with attach, recipient and send.
@@ -1006,7 +1017,7 @@ defmodule FactoryWeb.ChatParts do
           phx-hook="ChatInput"
           phx-debounce="100"
           rows="1"
-          placeholder={placeholder(recipient(@focus, @to), @run)}
+          placeholder={placeholder(recipient(@focus, @to), @run, @planner)}
           class="block max-h-[240px] min-h-[52px] w-full resize-none bg-transparent px-5 pb-1 pt-4 text-[15px] leading-6 outline-none placeholder:text-base-content/40 focus-visible:outline-none"
           aria-label="Message"
         ></textarea>

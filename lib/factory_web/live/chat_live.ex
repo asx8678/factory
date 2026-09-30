@@ -98,8 +98,15 @@ defmodule FactoryWeb.ChatLive do
         old -> (old && Enum.find(agents, &(&1.id == old.id))) || default_to(agents)
       end
 
+    # The agent a draft's plain text is planned by (Factory.Chat.planner_for/1).
+    planner =
+      Chat.planner_for(
+        run || %Factory.Runs.Run{settings: %{"workflow_id" => workflow.id}, status: "draft"}
+      )
+
     assign(socket,
       workflow: workflow,
+      planner: planner,
       graph: Agents.graph(workflow.id),
       agents: agents,
       to: to,
@@ -729,6 +736,7 @@ defmodule FactoryWeb.ChatLive do
               focus={@focus}
               to={@to}
               run={@run}
+              planner={@planner}
               glow={@empty and @dir_ok and @focus == nil}
             />
           </div>
