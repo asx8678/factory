@@ -23,6 +23,24 @@ end
 config :factory, FactoryWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
+# Actions read tokens and webhook addresses from environment variables an action names
+# (`Factory.Actions.env_allowed?/1`). Unset, any plain upper-case name will do except
+# Factory's own secrets; FACTORY_ACTION_ENV_VARS keeps actions to the names it lists:
+#
+#     FACTORY_ACTION_ENV_VARS="GITHUB_TOKEN,SLACK_WEBHOOK_URL"
+#
+# or, in a config file: config :factory, :action_env_vars, ~w(GITHUB_TOKEN SLACK_WEBHOOK_URL)
+if names = System.get_env("FACTORY_ACTION_ENV_VARS") do
+  config :factory, :action_env_vars, String.split(names, ~r/[\s,]+/, trim: true)
+end
+
+# Actions call public addresses only (`Factory.Actions.safe_url?/1`). To let them reach
+# this machine or a private network (an API on the office LAN), set it to true:
+#
+#     FACTORY_ALLOW_PRIVATE_ACTION_URLS=true
+config :factory, :allow_private_action_urls,
+  System.get_env("FACTORY_ALLOW_PRIVATE_ACTION_URLS") in ~w(true 1)
+
 if config_env() == :dev do
   # Reload browser tabs when matching files change.
   config :factory, FactoryWeb.Endpoint,

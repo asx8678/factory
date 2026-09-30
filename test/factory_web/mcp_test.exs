@@ -55,15 +55,32 @@ defmodule FactoryWeb.MCPTest do
     assert {"There's no tool add_tasks.", true} = call_tool(conn, token, "add_tasks", %{})
   end
 
-  test "a session's token doesn't expire; a step's does after a day" do
-    signed_at = System.system_time(:second) - 3 * 86_400
-    old = &Phoenix.Token.sign(FactoryWeb.Endpoint, "factory run tools", &1, signed_at: signed_at)
+  test "a session's token is only good with its running session; a step's expires after a day" do
+    sign = fn data, days ->
+      Phoenix.Token.sign(FactoryWeb.Endpoint, "factory run tools", data,
+        signed_at: System.system_time(:second) - days * 86_400
+      )
+    end
 
-    assert Factory.RunTools.token?(old.(%{session: 1}))
-    assert length(Factory.RunTools.tools(old.(%{session: 1}))) == 3
+    # No session with this key runs, so no nonce matches: an old-style token without a
+    # nonce, one with a made-up nonce, and one minted for it now are all refused.
+    refute Factory.RunTools.token?(sign.(%{session: 1}, 3))
+    refute Factory.RunTools.token?(sign.(%{session: 1, nonce: "made-up"}, 0))
+    refute Factory.RunTools.token?(Factory.RunTools.grant_session(1))
+    assert Factory.RunTools.tools(Factory.RunTools.grant_session(1)) == []
+
+    assert {"Factory didn't recognise" <> _, true} =
+             call_tool(build_conn(), Factory.RunTools.grant_session(1), "get_tasks", %{})
+
+    # A session's token is also a week old at most.
+    refute Factory.RunTools.token?(sign.(%{session: 1, nonce: "n"}, 8))
 
     refute Factory.RunTools.token?(
-             old.(%{run_id: 1, step_id: "agent-1", tasks: true, verdict: false})
+             sign.(%{run_id: 1, step_id: "agent-1", tasks: true, verdict: false}, 3)
+           )
+
+    assert Factory.RunTools.token?(
+             sign.(%{run_id: 1, step_id: "agent-1", tasks: true, verdict: false}, 0)
            )
   end
 

@@ -32,13 +32,16 @@ defmodule FactoryWeb.MCP do
           {:error, code, text} -> reply(conn, error(id, code, text))
         end
 
-      # The client's answer to our elicitation/create: to the tool call waiting for it.
+      # The client's answer to our elicitation/create: to the tool call waiting for it,
+      # when it comes with the token that call was made with (so nobody else who
+      # learns the id can answer for the person).
       %{"jsonrpc" => "2.0", "id" => id} = msg when is_binary(id) ->
         case Registry.lookup(Factory.Kiro.Registry, {__MODULE__, id}) do
-          [{pid, _}] ->
-            send(pid, {:elicitation_answer, id, msg["result"] || %{"action" => "cancel"}})
+          [{pid, token}] when is_binary(token) ->
+            if same_token?(token(conn), token),
+              do: send(pid, {:elicitation_answer, id, msg["result"] || %{"action" => "cancel"}})
 
-          [] ->
+          _ ->
             :ok
         end
 
@@ -115,7 +118,8 @@ defmodule FactoryWeb.MCP do
 
   defp elicit(conn, call_id, request, then) do
     id = "factory-elicit-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
-    {:ok, _} = Registry.register(Factory.Kiro.Registry, {__MODULE__, id}, nil)
+    # The answer must come with the same token as the call (`call/2`).
+    {:ok, _} = Registry.register(Factory.Kiro.Registry, {__MODULE__, id}, token(conn) || "")
 
     conn =
       conn
@@ -157,6 +161,14 @@ defmodule FactoryWeb.MCP do
       _ -> nil
     end
   end
+
+  # Whether the answer's token is the call's. A call made without a token (a planner's
+  # tools/list needs none, but every tool that asks a question checks its token first)
+  # takes no answer at all.
+  defp same_token?(given, expected) when is_binary(given) and expected != "",
+    do: Plug.Crypto.secure_compare(given, expected)
+
+  defp same_token?(_given, _expected), do: false
 
   defp error(id, code, text), do: %{jsonrpc: "2.0", id: id, error: %{code: code, message: text}}
 

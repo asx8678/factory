@@ -20,7 +20,9 @@ config :factory, FactoryWeb.Endpoint,
   # Binding to loopback ipv4 address prevents access from other machines.
   # Change to `ip: {0, 0, 0, 0}` to allow access from other machines.
   http: [ip: {127, 0, 0, 1}],
-  check_origin: false,
+  # Only pages opened as localhost may connect to LiveView: a site elsewhere that
+  # points its own name at 127.0.0.1 (DNS rebinding) can't (see FactoryWeb.Plugs.HostCheck).
+  check_origin: ["//localhost", "//127.0.0.1", "//[::1]"],
   code_reloader: true,
   debug_errors: true,
   secret_key_base: "C3g6b+FibjxsUnAkRiXj7FGu2tnmJog0pvdi1qyspdoB9PcmibEy13fDanZXNDyP",

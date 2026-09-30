@@ -79,6 +79,64 @@ defmodule Factory.Kiro.PermissionTest do
     end
   end
 
+  describe "paths/2" do
+    test "collects the call's locations and input paths, and those announced earlier" do
+      params = %{
+        "toolCall" => %{
+          "toolCallId" => "c1",
+          "locations" => [%{"path" => "lib/a.ex"}, %{"path" => "lib/b.ex"}],
+          "rawInput" => %{"path" => "lib/a.ex"}
+        }
+      }
+
+      assert Permission.paths(params, %{"c1" => ["README.md"]}) == [
+               "lib/a.ex",
+               "lib/b.ex",
+               "README.md"
+             ]
+
+      assert Permission.paths(%{"toolCall" => %{"rawInput" => %{"paths" => ["x", "y"]}}}) ==
+               ["x", "y"]
+
+      assert Permission.paths(%{"toolCall" => %{"rawInput" => %{"command" => "ls"}}}) == []
+      assert Permission.paths(%{}) == []
+    end
+  end
+
+  describe "allowed_path?/3" do
+    @workdir "/home/me/project"
+    @roots ["/home/me/sources/docs", "/srv/clones/"]
+
+    test "the project folder and the roots, relative or absolute" do
+      assert Permission.allowed_path?("lib/a.ex", @workdir, @roots)
+      assert Permission.allowed_path?(".", @workdir, @roots)
+      assert Permission.allowed_path?("/home/me/project", @workdir, @roots)
+      assert Permission.allowed_path?("/home/me/project/_build/dev/x", @workdir, @roots)
+      assert Permission.allowed_path?("deps/phoenix/mix.exs", @workdir, @roots)
+      assert Permission.allowed_path?("lib/../.git/config", @workdir, @roots)
+      assert Permission.allowed_path?("/home/me/sources/docs/guide.md", @workdir, @roots)
+      assert Permission.allowed_path?("../sources/docs/guide.md", @workdir, @roots)
+      assert Permission.allowed_path?("/srv/clones/owner/repo/lib", @workdir, @roots)
+    end
+
+    test "anything else, however it's spelled" do
+      refute Permission.allowed_path?("/etc/passwd", @workdir, @roots)
+      refute Permission.allowed_path?("../../.ssh/id_rsa", @workdir, @roots)
+      refute Permission.allowed_path?("lib/../../other", @workdir, @roots)
+      refute Permission.allowed_path?("/home/me/project-2/lib", @workdir, @roots)
+      refute Permission.allowed_path?("/home/me/sources/docs-private/x", @workdir, @roots)
+      refute Permission.allowed_path?("~/.bashrc", @workdir, @roots)
+      refute Permission.allowed_path?("/home/me", @workdir, @roots)
+      refute Permission.allowed_path?(nil, @workdir, @roots)
+      refute Permission.allowed_path?("lib/a.ex", nil, @roots)
+    end
+
+    test "empty and missing roots are ignored" do
+      assert Permission.allowed_path?("lib/a.ex", @workdir, [nil, ""])
+      refute Permission.allowed_path?("/etc/hosts", @workdir, [nil, ""])
+    end
+  end
+
   describe "looking?/2 in a repository cloned for review" do
     test "the tests and checks aren't looking there" do
       dir = Path.join([Factory.Repos.root(), "owner", "repo"])

@@ -54,6 +54,8 @@ read it when they run, so set these in the shell that starts Factory:
 | `AZURE_DEVOPS_PAT` | Azure DevOps PRs and tickets, and cloning Azure DevOps repositories |
 | `SLACK_WEBHOOK_URL` | Slack or Teams message (default name) |
 | `TZ` | The time zone the Usage page counts days in (else the system zone) |
+| `FACTORY_ACTION_ENV_VARS` | The variables actions may name, comma-separated (`config :factory, :action_env_vars`). Unset, any plain upper-case name but Factory's own secrets (`SECRET_KEY_BASE`, `DATABASE_URL`, anything with SECRET, PRIVATE_KEY or PASSWORD in it) |
+| `FACTORY_ALLOW_PRIVATE_ACTION_URLS` | `true` lets API requests and webhooks reach this machine or a private network; by default they call public addresses only |
 
 ## Running it for others
 

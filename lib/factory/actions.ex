@@ -10,10 +10,29 @@ defmodule Factory.Actions do
   placeholders: `{{run}}` (the run's title), `{{summary}}`, `{{branch}}`, `{{run_id}}`.
 
   Tokens and webhook URLs are never stored: settings name environment variables,
-  read when the action runs. `plan/2` says exactly what an action would do (a dry
-  run); `run/2` does it.
+  read when the action runs. An action may only name variables that look like
+  settings (`env_allowed?/1`): never Factory's own secrets, and only those in
+  `config :factory, :action_env_vars` when that list is set. The addresses it calls
+  must be public (`safe_url?/1`): nothing on this machine or a private network,
+  unless `config :factory, :allow_private_action_urls` is true. `plan/2` says exactly
+  what an action would do (a dry run); `run/2` does it.
   """
   alias Factory.Agents.Agent
+
+  # Environment variables no action may read, by name or by what the name says.
+  @env_denied ~w(SECRET_KEY_BASE DATABASE_URL)
+  @env_denied_pattern ~r/SECRET|PRIVATE_KEY|PASSWORD/
+  @env_name ~r/^[A-Z][A-Z0-9_]*$/
+
+  # What a setting must look like, beyond being filled in, for the ones that go into an
+  # address: {type, key, regex, hint}. (Azure DevOps names are encoded, so any will do.)
+  @shapes [
+    {"github_pr", "repo", ~r{^[\w.-]+/[\w.-]+$}, "owner/name"},
+    {"github_issue", "repo", ~r{^[\w.-]+/[\w.-]+$}, "owner/name"},
+    {"github_issue", "issue", ~r/^\d+$/, "a number"},
+    {"azure_item_update", "item", ~r/^\d+$/, "a number"},
+    {"azure_item_close", "item", ~r/^\d+$/, "a number"}
+  ]
 
   # {type, label, group, what it does, fields}; a field is
   # {key, label, input, placeholder or default, required?}. Inputs: :text, :textarea,
@@ -147,6 +166,120 @@ defmodule Factory.Actions do
 
   def missing(_), do: ["Type"]
 
+  @doc """
+  What's wrong with the settings that are filled in, as sentences: a token variable an
+  action may not read (`env_allowed?/1`), an address that isn't public (`safe_url?/1`),
+  a repository or ticket number that isn't one. Empty when all is well.
+  """
+  def invalid(%Agent{action: %{"type" => type} = action}) do
+    config = action["config"] || %{}
+
+    for {key, label, _, _, _} <- get(type).fields,
+        value = Factory.Text.presence(config[key]),
+        problem = problem(type, key, label, value),
+        do: problem
+  end
+
+  def invalid(_), do: []
+
+  defp problem(type, key, label, value) do
+    shape = Enum.find(@shapes, fn {t, k, _, _} -> t == type and k == key end)
+
+    cond do
+      String.ends_with?(key, "_env") and not env_allowed?(value) ->
+        "#{label}: #{value} isn't an environment variable an action may read."
+
+      key == "url" and not safe_url?(value) ->
+        "#{label}: #{value} must be a public http(s) address."
+
+      shape != nil and not Regex.match?(elem(shape, 2), value) ->
+        "#{label} must be #{elem(shape, 3)}, not #{value}."
+
+      true ->
+        nil
+    end
+  end
+
+  @doc """
+  Whether an action may read the environment variable `name`: a plain upper-case name
+  that isn't one of Factory's own secrets (`SECRET_KEY_BASE`, `DATABASE_URL`, anything
+  with SECRET, PRIVATE_KEY or PASSWORD in it) and, when `config :factory,
+  :action_env_vars` lists names, one of those.
+  """
+  def env_allowed?(name) when is_binary(name) do
+    name = String.trim(name)
+
+    Regex.match?(@env_name, name) and name not in @env_denied and
+      not Regex.match?(@env_denied_pattern, name) and listed_env?(name)
+  end
+
+  def env_allowed?(_name), do: false
+
+  defp listed_env?(name) do
+    case Application.get_env(:factory, :action_env_vars) do
+      nil -> true
+      names when is_list(names) -> name in names
+    end
+  end
+
+  @doc """
+  Whether an action may call `url`: an http(s) address whose host isn't this machine
+  or a private network (loopback, link-local, 10/8, 172.16/12, 192.168/16, fc00::/7,
+  `localhost`, `.local`, `.internal`). A name is judged by its spelling alone, not by
+  what it resolves to (no DNS lookup: this stays quick and synchronous), so a public
+  name that points at a private address isn't caught here. `config :factory,
+  :allow_private_action_urls` set to true allows them all.
+  """
+  def safe_url?(url) when is_binary(url) do
+    case URI.parse(String.trim(url)) do
+      %URI{scheme: scheme, host: host} when scheme in ["http", "https"] and is_binary(host) ->
+        host != "" and
+          (Application.get_env(:factory, :allow_private_action_urls) == true or
+             public_host?(host))
+
+      _ ->
+        false
+    end
+  end
+
+  def safe_url?(_url), do: false
+
+  defp public_host?(host) do
+    name =
+      host
+      |> String.downcase()
+      |> String.trim_leading("[")
+      |> String.trim_trailing("]")
+      |> String.trim_trailing(".")
+
+    case :inet.parse_strict_address(String.to_charlist(name)) do
+      {:ok, ip} ->
+        not private_ip?(ip)
+
+      {:error, _} ->
+        name not in ["localhost", "localhost.localdomain"] and
+          not String.ends_with?(name, [".localhost", ".local", ".internal", ".home.arpa"])
+    end
+  end
+
+  defp private_ip?({127, _, _, _}), do: true
+  defp private_ip?({10, _, _, _}), do: true
+  defp private_ip?({172, b, _, _}) when b in 16..31, do: true
+  defp private_ip?({192, 168, _, _}), do: true
+  defp private_ip?({169, 254, _, _}), do: true
+  defp private_ip?({0, _, _, _}), do: true
+  defp private_ip?({_, _, _, _}), do: false
+  # ::1, ::, fc00::/7 (unique local), fe80::/10 (link-local), and IPv4 mapped in IPv6.
+  defp private_ip?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
+  defp private_ip?({0, 0, 0, 0, 0, 0, 0, 0}), do: true
+  defp private_ip?({a, _, _, _, _, _, _, _}) when a in 0xFC00..0xFDFF, do: true
+  defp private_ip?({a, _, _, _, _, _, _, _}) when a in 0xFE80..0xFEBF, do: true
+
+  defp private_ip?({0, 0, 0, 0, 0, 0xFFFF, hi, lo}),
+    do: private_ip?({div(hi, 256), rem(hi, 256), div(lo, 256), rem(lo, 256)})
+
+  defp private_ip?(_ip), do: false
+
   @doc "Fills `{{run}}`, `{{summary}}`, `{{branch}}` and `{{run_id}}` from the context."
   def render(text, ctx) do
     Regex.replace(~r/\{\{\s*(\w+)\s*\}\}/, to_string(text || ""), fn whole, key ->
@@ -224,9 +357,10 @@ defmodule Factory.Actions do
         {k, v} -> {k, render(v, ctx)}
       end)
 
-    case missing(card) do
-      [] -> build(type, c, ctx, mode)
-      labels -> {:error, "Fill in: #{Enum.join(labels, ", ")}."}
+    case {missing(card), invalid(card)} do
+      {[], []} -> build(type, c, ctx, mode)
+      {[], problems} -> {:error, Enum.join(problems, " ")}
+      {labels, _} -> {:error, "Fill in: #{Enum.join(labels, ", ")}."}
     end
   end
 
@@ -253,7 +387,7 @@ defmodule Factory.Actions do
     with {:ok, token} <- env(c["token_env"], mode) do
       {:ok,
        [
-         {:http, :post, "https://api.github.com/repos/#{c["repo"]}/pulls", github(token),
+         {:http, :post, "https://api.github.com/repos/#{github_repo(c)}/pulls", github(token),
           %{title: c["title"], head: c["head"], base: c["base"], body: c["body"] || ""},
           "Open a pull request on #{c["repo"]}: #{c["head"]} → #{c["base"]}, “#{c["title"]}”"}
        ]}
@@ -312,7 +446,7 @@ defmodule Factory.Actions do
 
   defp build("github_issue", c, _ctx, mode) do
     with {:ok, token} <- env(c["token_env"], mode) do
-      base = "https://api.github.com/repos/#{c["repo"]}/issues/#{c["issue"]}"
+      base = "https://api.github.com/repos/#{github_repo(c)}/issues/#{enc(c["issue"])}"
 
       steps =
         [
@@ -342,7 +476,8 @@ defmodule Factory.Actions do
   end
 
   defp build("webhook", c, _ctx, mode) do
-    with {:ok, url} <- env(c["url_env"], mode) do
+    with {:ok, url} <- env(c["url_env"], mode),
+         :ok <- if(mode == :plan, do: :ok, else: check_url(url)) do
       {:ok,
        [
          {:http, :post, url, [], %{text: c["text"]},
@@ -355,7 +490,8 @@ defmodule Factory.Actions do
     method = c["method"] |> to_string() |> String.downcase()
     method = if method in ~w(get post put patch delete), do: String.to_atom(method), else: :post
 
-    with {:ok, auth} <- api_auth(Factory.Text.presence(c["token_env"]), mode) do
+    with {:ok, auth} <- api_auth(Factory.Text.presence(c["token_env"]), mode),
+         :ok <- check_url(c["url"]) do
       headers = api_headers(c["headers"]) ++ auth
 
       body =
@@ -403,15 +539,33 @@ defmodule Factory.Actions do
     end
   end
 
-  # A token or URL from the environment. A dry run only says which variable it reads.
-  defp env(var, :plan), do: {:ok, "$#{var}"}
+  # A token or URL from the environment, one an action may read (`env_allowed?/1`). A
+  # dry run only says which variable it reads.
+  defp env(var, mode) do
+    var = String.trim(to_string(var))
 
-  defp env(var, :run) do
-    case System.get_env(to_string(var)) do
-      nil -> {:error, "The environment variable #{var} isn't set. Set it and restart Factory."}
-      "" -> {:error, "The environment variable #{var} is empty."}
-      value -> {:ok, value}
+    cond do
+      not env_allowed?(var) ->
+        {:error, "#{var} isn't an environment variable an action may read."}
+
+      mode == :plan ->
+        {:ok, "$#{var}"}
+
+      true ->
+        case System.get_env(var) do
+          nil -> {:error, "The environment variable #{var} isn't set. Set it and restart Factory."}
+          "" -> {:error, "The environment variable #{var} is empty."}
+          value -> {:ok, value}
+        end
     end
+  end
+
+  # The address an action is about to call must be public (`safe_url?/1`). (A dry run's
+  # webhook address is the variable's name, not an address, so it's only checked when run.)
+  defp check_url(url) do
+    if safe_url?(url),
+      do: :ok,
+      else: {:error, "#{url} isn't a public http(s) address, so the action didn't call it."}
   end
 
   defp api_auth(nil, _mode), do: {:ok, []}
@@ -461,6 +615,11 @@ defmodule Factory.Actions do
   defp azure(pat), do: [{"authorization", "Basic " <> Base.encode64(":" <> pat)}]
 
   defp azure_base(c), do: "https://dev.azure.com/#{enc(c["org"])}/#{enc(c["project"])}"
+
+  # "owner/name", each part on its own in the address (`invalid/1` checked the shape).
+  defp github_repo(c),
+    do: c["repo"] |> to_string() |> String.split("/", parts: 2) |> Enum.map_join("/", &enc/1)
+
   defp enc(s), do: URI.encode(String.trim(to_string(s)), &URI.char_unreserved?/1)
 
   defp describe({:cmd, folder, args, label}),
@@ -516,6 +675,12 @@ defmodule Factory.Actions do
   end
 
   defp perform({:http, method, url, headers, body, label}) do
+    with :ok <- check_url(url) do
+      request({:http, method, url, headers, body, label})
+    end
+  end
+
+  defp request({:http, method, url, headers, body, label}) do
     payload =
       case body do
         nil -> []

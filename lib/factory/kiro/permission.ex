@@ -55,6 +55,51 @@ defmodule Factory.Kiro.Permission do
     end
   end
 
+  @doc """
+  The files a permission request is about: the tool call's `locations` and the paths in
+  its input (`path`, `paths`), plus those its earlier `tool_call` update announced
+  (`known` maps tool call ids to lists of paths). Empty when it names none.
+  """
+  def paths(params, known \\ %{}) do
+    call = params["toolCall"] || %{}
+
+    (paths_of(call) ++ List.wrap(Map.get(known, call["toolCallId"])))
+    |> Enum.filter(&(is_binary(&1) and &1 != ""))
+    |> Enum.uniq()
+  end
+
+  @doc "The paths a tool call names: its `locations` and the `path`/`paths` in its input."
+  def paths_of(call) do
+    locations = for %{"path" => p} <- List.wrap(call["locations"]), do: p
+
+    input =
+      case call["rawInput"] do
+        %{"paths" => ps} when is_list(ps) -> ps
+        %{"path" => p} -> [p]
+        _ -> []
+      end
+
+    locations ++ input
+  end
+
+  @doc """
+  Whether `path`, relative to `workdir`, lies in one of `roots` (each a folder; `workdir`
+  itself counts as one). Paths are expanded first, so `..` can't step outside, and a
+  path that only shares a prefix with a root (`/home/me/project-2` for `/home/me/project`)
+  isn't in it.
+  """
+  def allowed_path?(path, workdir, roots) when is_binary(path) and is_binary(workdir) do
+    full = Path.expand(path, workdir)
+
+    Enum.any?([workdir | roots], fn root ->
+      is_binary(root) and root != "" and within?(full, Path.expand(root))
+    end)
+  end
+
+  def allowed_path?(_path, _workdir, _roots), do: false
+
+  defp within?(path, root), do: path == root or String.starts_with?(path, root <> "/")
+
   # Commands that only look, by their first word. git by what it's asked to do.
   @looking ~w(ls cat head tail wc grep egrep fgrep rg ag tree pwd file stat du which echo
               sort uniq cut diff basename dirname realpath readlink date printenv)

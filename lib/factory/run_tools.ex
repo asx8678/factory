@@ -13,15 +13,22 @@ defmodule Factory.RunTools do
 
   A token says which step a call is for. A run step on its agent's Kiro session
   (`Factory.Kiro.run_step/4`) is reached through the session's token
-  (`grant_session/1`): the session knows the step it's answering, and outside one (a
+  (`grant_session/2`): the session knows the step it's answering, and outside one (a
   chat message) the tools refuse. `grant/3` names a run and step directly. Either way
   a call only writes while the run is on that step (`progress["current"]`) and hasn't
   been cancelled or finished, so a step that was replaced or a run that moved on
   can't change anything.
+
+  A session's token carries a random value the session chose when it started
+  (`Factory.Kiro.Session.token_nonce/1`); it's only good while that very session runs,
+  so a token that leaked from a finished session opens nothing. It also expires after
+  a week, a step's after a day.
   """
   alias Factory.Runs
 
   @salt "factory run tools"
+  @session_max_age 7 * 86_400
+  @step_max_age 86_400
 
   @tools [
     %{
@@ -111,8 +118,26 @@ defmodule Factory.RunTools do
 
   defp plan_tool?(name), do: Enum.any?(Factory.PlanTools.tools(), &(&1.name == name))
 
-  @doc "A token for a Kiro session (`:shared` or an agent id): calls act on the step it's answering."
-  def grant_session(key), do: Phoenix.Token.sign(FactoryWeb.Endpoint, @salt, %{session: key})
+  @doc """
+  A token for a Kiro session (`:shared` or an agent id): calls act on the step it's
+  answering. `nonce` is the session's (`Factory.Kiro.Session.token_nonce/1`); given the
+  key alone, it's asked of the running session, and a token for a session that isn't
+  running is refused.
+  """
+  def grant_session(key, nonce \\ nil) do
+    nonce = nonce || session_nonce(key)
+    Phoenix.Token.sign(FactoryWeb.Endpoint, @salt, %{session: key, nonce: nonce})
+  end
+
+  # The nonce of the session `key` names, or nil when none runs.
+  defp session_nonce(key) do
+    case Factory.Kiro.whereis(key) do
+      pid when is_pid(pid) -> Factory.Kiro.Session.token_nonce(pid)
+      nil -> nil
+    end
+  catch
+    :exit, _ -> nil
+  end
 
   @doc "The MCP server to give Kiro for a step: Factory's, with the step's token."
   def mcp_server(token), do: Factory.PlanTools.mcp_server(token)
@@ -122,14 +147,26 @@ defmodule Factory.RunTools do
 
   # A step's token is used within the step, so a day is plenty. A session's token lives
   # as long as the session (it's minted when the session starts, which may be days
-  # ago); what gates it is that the session exists and is on a step (`resolve/1`).
+  # ago), so it has a week; what gates it is that the session that minted it (its
+  # nonce says which) still runs, and that it's on a step (`resolve/1`).
   defp verify(token) do
-    case Phoenix.Token.verify(FactoryWeb.Endpoint, @salt, token || "", max_age: :infinity) do
-      {:ok, %{session: _}} = ok ->
-        ok
+    token = token || ""
+
+    case Phoenix.Token.verify(FactoryWeb.Endpoint, @salt, token, max_age: @session_max_age) do
+      {:ok, %{session: key, nonce: nonce}} = ok when is_binary(nonce) ->
+        case session_nonce(key) do
+          current when is_binary(current) ->
+            if Plug.Crypto.secure_compare(current, nonce), do: ok, else: {:error, :invalid}
+
+          nil ->
+            {:error, :invalid}
+        end
+
+      {:ok, %{session: _}} ->
+        {:error, :invalid}
 
       {:ok, _step} ->
-        Phoenix.Token.verify(FactoryWeb.Endpoint, @salt, token, max_age: 86_400)
+        Phoenix.Token.verify(FactoryWeb.Endpoint, @salt, token, max_age: @step_max_age)
 
       error ->
         error

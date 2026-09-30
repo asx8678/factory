@@ -5,9 +5,12 @@ defmodule Factory.Agents.Agent do
   @statuses ~w(idle running waiting error done)
   @kinds ~w(general orchestrator planner coder tester reviewer researcher writer action)
 
-  # Agents that only look: they read and search the project, never change it.
+  # Agents that only look: they read and search the project, never change it. They
+  # have no web access (`fetch`): an agent that can read any file and also reach the
+  # web could carry what it read out of the machine, so only agents a person already
+  # trusts to edit and run commands may fetch.
   @read_only ~w(planner researcher reviewer)
-  @read_tools ~w(read search think fetch)
+  @read_tools ~w(read search think)
   @all_tools ~w(read search think fetch edit delete move execute other)
 
   schema "agents" do
@@ -32,8 +35,10 @@ defmodule Factory.Agents.Agent do
 
   @doc """
   The Kiro tool kinds an agent may use, the same in a chat and in a run: reading and
-  searching for the kinds that only look (planner, researcher, reviewer), everything
-  for the rest. Kiro asks before it edits or runs a command; other requests are denied.
+  searching for the kinds that only look (planner, researcher, reviewer), everything,
+  the web included, for the rest. Kiro asks before it edits or runs a command; other
+  requests are denied. Reading, searching and editing are also kept to the project
+  folder and the agent's attached sources (`Factory.Kiro.Session`).
   """
   def tools(%{kind: kind}) when kind in @read_only, do: @read_tools
   def tools(_agent), do: @all_tools

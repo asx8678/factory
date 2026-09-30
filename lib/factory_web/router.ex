@@ -2,6 +2,7 @@ defmodule FactoryWeb.Router do
   use FactoryWeb, :router
 
   pipeline :browser do
+    plug FactoryWeb.Plugs.HostCheck
     plug :accepts, ["html"]
     plug :fetch_session
     plug :fetch_live_flash

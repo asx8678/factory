@@ -40,6 +40,9 @@ defmodule Factory.Kiro.Session do
   alias Factory.Agents.Agent
   alias Factory.Kiro.RPC
 
+  # Tool kinds that name files, kept to the project and its sources (`request_permission`).
+  @file_kinds ~w(read search edit delete move)
+
   @doc "`key` is `:shared` or an agent id; `workdir` is the folder Kiro works in."
   def start_link({key, workdir}),
     do: GenServer.start_link(__MODULE__, {key, workdir}, name: via(key, workdir))
@@ -103,6 +106,12 @@ defmodule Factory.Kiro.Session do
   def current_step(pid), do: GenServer.call(pid, :current_step)
 
   @doc """
+  The random value this session's MCP token carries (`Factory.RunTools.grant_session/2`):
+  a token is only good while the session that minted it runs.
+  """
+  def token_nonce(pid), do: GenServer.call(pid, :token_nonce)
+
+  @doc """
   What the session is answering, for Factory's tools: `%{run_id:, agent:, step:}` (step
   nil for a chat message), or nil between turns.
   """
@@ -123,6 +132,8 @@ defmodule Factory.Kiro.Session do
   defstruct [
     :key,
     :workdir,
+    # the random part of this session's MCP token (`token_nonce/1`)
+    :nonce,
     :port,
     # the kiro-cli process, to end it if closing the port doesn't
     :os_pid,
@@ -218,7 +229,8 @@ defmodule Factory.Kiro.Session do
   @impl true
   def init({key, workdir}) do
     Process.flag(:trap_exit, true)
-    {:ok, %__MODULE__{key: key, workdir: workdir}, {:continue, :spawn}}
+    nonce = Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
+    {:ok, %__MODULE__{key: key, workdir: workdir, nonce: nonce}, {:continue, :spawn}}
   end
 
   @impl true
@@ -329,6 +341,8 @@ defmodule Factory.Kiro.Session do
     do: {:reply, %{run_id: turn.run_id, step: step}, state}
 
   def handle_call(:current_step, _from, state), do: {:reply, nil, state}
+
+  def handle_call(:token_nonce, _from, state), do: {:reply, state.nonce, state}
 
   def handle_call(:current_turn, _from, %{turn: %Turn{} = turn} = state),
     do:
@@ -581,9 +595,22 @@ defmodule Factory.Kiro.Session do
           state.workdir
         )
 
+    # Files are read, searched and changed in the project folder and the agent's
+    # attached sources only: a path elsewhere (`/etc/passwd`, `~/.ssh`, `../..`) is
+    # refused whatever the agent may otherwise do.
+    outside =
+      with true <- kind in @file_kinds and state.turn != nil,
+           [_ | _] = named <- Kiro.Permission.paths(params, paths(state.turn)) do
+        roots = roots(state)
+        Enum.reject(named, &Kiro.Permission.allowed_path?(&1, state.workdir, roots))
+      else
+        _ -> []
+      end
+
     wanted =
-      if kind in allowed or looking? or
-           (state.turn != nil and server == Factory.PlanTools.server_name()),
+      if outside == [] and
+           (kind in allowed or looking? or
+              (state.turn != nil and server == Factory.PlanTools.server_name())),
          do: "allow",
          else: "reject"
 
@@ -595,11 +622,39 @@ defmodule Factory.Kiro.Session do
     else
       title = get_in(params, ["toolCall", "title"]) || "a tool"
 
+      why =
+        if outside == [],
+          do: title,
+          else: "#{title}: #{Enum.join(outside, ", ")} is outside the project and its sources"
+
       state
-      |> update_turn(fn turn -> %{turn | denied: turn.denied ++ [title]} end)
+      |> update_turn(fn turn -> %{turn | denied: turn.denied ++ [why]} end)
       |> track_tool(Map.put(params["toolCall"] || %{}, "status", "denied"))
     end
   end
+
+  # The folders the turn's agent may reach besides the session's folder: Kiro's
+  # workspace, the folder repositories are cloned into for review, and the agent's
+  # attached sources (a folder, a file's folder, a repository's clone).
+  defp roots(%{turn: %Turn{agent: agent}}) do
+    sources =
+      case agent do
+        %{id: id, workflow_id: workflow_id} when is_integer(id) and is_integer(workflow_id) ->
+          attached = for {source_id, ^id} <- Factory.Sources.links(workflow_id), do: source_id
+
+          for source <- Factory.Sources.list(workflow_id),
+              source.id in attached,
+              path = Factory.Sources.local_path(source),
+              do: path
+
+        _ ->
+          []
+      end
+
+    [Kiro.config(:workspace), Factory.Repos.root() | sources]
+  end
+
+  defp roots(_state), do: []
 
   # A tool (over MCP) asks the person something mid-turn: the question goes to the chat
   # as a form, and the answer back to Kiro (`answer_elicitation/5`). Kiro waits.
@@ -734,7 +789,7 @@ defmodule Factory.Kiro.Session do
         %{
           title: call["title"],
           tool: call["kind"],
-          paths: call["locations"] && for(%{"path" => p} <- call["locations"], do: p),
+          paths: announced_paths(call),
           command: Kiro.Permission.command_of(call),
           outcome: outcome(call["status"])
         }
@@ -756,9 +811,22 @@ defmodule Factory.Kiro.Session do
     end)
   end
 
+  # The paths a tool call names, or nil when it names none (so an update without any
+  # keeps those an earlier one gave).
+  defp announced_paths(call) do
+    case Kiro.Permission.paths_of(call) do
+      [] -> nil
+      paths -> paths
+    end
+  end
+
   # The commands the turn's tool calls announced, by call id.
   defp commands(turn),
     do: for(t <- turn.tools, t.call_id && t[:command], into: %{}, do: {t.call_id, t.command})
+
+  # The paths the turn's tool calls announced, by call id.
+  defp paths(turn),
+    do: for(t <- turn.tools, t.call_id && t[:paths] != [], into: %{}, do: {t.call_id, t.paths})
 
   defp outcome("completed"), do: "ok"
   defp outcome("failed"), do: "failed"
@@ -1299,7 +1367,7 @@ defmodule Factory.Kiro.Session do
 
   # Factory's run tools, with a token for this session (see `Factory.RunTools`).
   defp mcp_servers(state),
-    do: [Factory.RunTools.mcp_server(Factory.RunTools.grant_session(state.key))]
+    do: [Factory.RunTools.mcp_server(Factory.RunTools.grant_session(state.key, state.nonce))]
 
   # JSON-RPC out
 
