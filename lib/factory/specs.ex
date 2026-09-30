@@ -951,7 +951,7 @@ defmodule Factory.Specs do
       agent: params["agent"] && params["agent"] |> to_string() |> String.trim(),
       model:
         params["model"] &&
-          if(params["model"] in Factory.Kiro.models(), do: params["model"], else: ""),
+          if(params["model"] in Factory.Kiro.task_models(), do: params["model"], else: ""),
       requirements:
         params["requirements"] &&
           params["requirements"] |> to_string() |> String.split(",") |> clean_lines()

@@ -734,12 +734,17 @@ defmodule Factory.Engine do
         do: {task, block}
   end
 
-  # The model for one task: the plan's, when this Kiro offers it, else the agent's.
+  # The model for one task: a coding agent's own (Auto unless set on its card), for now;
+  # for the others, the plan's when Factory may pick it (`Kiro.task_models/0`, never
+  # Sonnet), else the agent's.
+  defp task_model(run, %{kind: "coder"} = step, _block), do: model(run, step)
+
   defp task_model(run, step, block) do
-    case block[:model] do
-      m when is_binary(m) and m != "auto" -> if m in Kiro.models(), do: m, else: model(run, step)
-      _ -> model(run, step)
-    end
+    m = block[:model]
+
+    if is_binary(m) and m != "auto" and m in Kiro.task_models(),
+      do: m,
+      else: model(run, step)
   end
 
   defp sent(prompt) do

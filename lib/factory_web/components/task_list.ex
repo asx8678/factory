@@ -777,10 +777,17 @@ defmodule FactoryWeb.TaskList do
 
   attr :model, :string, default: nil
 
-  @doc "The model a task is to be built with, as a small tag; nothing when it names none."
+  @doc """
+  The model a task is to be built with, as a small tag; nothing when it names none, or
+  names one Factory doesn't use for tasks (Sonnet: it's built on Auto).
+  """
   def model_tag(assigns) do
     ~H"""
-    <span :if={@model} title="The model to build it with" class="flex items-center gap-1">
+    <span
+      :if={@model && !Factory.Kiro.avoided?(@model)}
+      title="The model to build it with"
+      class="flex items-center gap-1"
+    >
       <.icon name="hero-cpu-chip-micro" class="size-3" />{Factory.Kiro.model_name(@model)}
     </span>
     """
@@ -816,7 +823,7 @@ defmodule FactoryWeb.TaskList do
 
     assigns =
       assign(assigns,
-        models: Factory.Kiro.models() -- ["auto"],
+        models: Factory.Kiro.task_models() -- ["auto"],
         n: fn field -> if as, do: "#{as}[#{field}]", else: field end
       )
 

@@ -591,7 +591,7 @@ defmodule Factory.PlanTools do
             details: is_list(args["details"]) && lines(args["details"]),
             verify: is_list(args["verify"]) && lines(args["verify"]) |> Enum.take(6),
             agent: is_binary(args["agent"]) && text(args["agent"]),
-            model: args["model"] in Factory.Kiro.models() && args["model"],
+            model: is_binary(args["model"]) && task_model(args["model"]),
             requirements:
               is_list(args["requirements"]) && lines(args["requirements"]) |> Enum.take(8)
           }
@@ -714,6 +714,9 @@ defmodule Factory.PlanTools do
         line != "",
         do: line
   end
+
+  # A model the planner gave a task: one Factory may pick, else auto (never Sonnet).
+  defp task_model(model), do: if(model in Factory.Kiro.task_models(), do: model, else: "auto")
 
   defp text(s) when is_binary(s), do: String.trim(s)
   defp text(_), do: ""

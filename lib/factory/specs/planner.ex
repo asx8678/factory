@@ -54,7 +54,7 @@ defmodule Factory.Specs.Planner do
             if(is_binary(t["agent"]) and String.trim(t["agent"]) != "",
               do: String.trim(t["agent"])
             ),
-          "model" => if(t["model"] in Factory.Kiro.models(), do: t["model"]),
+          "model" => if(t["model"] in Factory.Kiro.task_models(), do: t["model"]),
           "requirements" =>
             t["requirements"] |> List.wrap() |> Enum.map(&to_string/1) |> lines() |> Enum.take(8)
         }
@@ -103,16 +103,17 @@ defmodule Factory.Specs.Planner do
       "work it is, a task that's only tests to the one that tests.\n"
   end
 
-  # The models a task may name, from what this Kiro offers, with when to pick each.
+  # The models a task may name, from what this Kiro offers (Sonnet never), with when to
+  # pick each. A coding agent builds on its own model, Auto unless set on its card.
   defp model_guide do
-    models = Factory.Kiro.models()
+    models = Factory.Kiro.task_models()
     strong = Factory.Kiro.strongest()
 
     light =
       models |> Enum.filter(&String.contains?(&1, "haiku")) |> Enum.sort(:desc) |> List.first()
 
     [
-      "auto" in models && "auto for most tasks",
+      "auto" in models && "auto for most tasks, and always for the ones the coding agent builds",
       strong != "auto" && "#{strong} for tricky, cross-cutting or risky ones",
       light && "#{light} for small, mechanical edits"
     ]
