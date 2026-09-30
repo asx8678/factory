@@ -20,20 +20,36 @@ defmodule Factory.ChatPlanner do
   alias Factory.Runs.Run
   alias Factory.Specs.Planner
 
+  @doc """
+  Whether a chat message is a plan review asked with the Review plan button, which
+  earlier versions posted to the chat (marked `"kind" => "review"`, or before that only
+  by its opening). Such a message isn't something the person wrote.
+  """
+  def review_message?(%{role: "user", meta: %{"kind" => "review"}}), do: true
+
+  def review_message?(%{role: "user", body: body}) when is_binary(body),
+    do: String.starts_with?(body, "Look at the code again and improve this plan.")
+
+  def review_message?(_message), do: false
+
   @doc "Adds spec files attached in the chat to the run's spec, for the planner to read."
   def keep_files(%Run{} = run, files) do
     {:ok, _spec} = run |> Specs.for_run() |> Specs.add_files(files)
     Runs.get_run(run.id)
   end
 
-  @doc "Plans in the background; the reply is posted to the run."
-  def start(%Run{} = run, planner) do
-    with {:ok, {run, files, prompt}} <- prepare(run, planner) do
+  @doc """
+  Plans in the background; the reply is posted to the run. `extra:` is one more request
+  for this turn only, not a message in the chat nor part of what the person asked
+  (a plan review asked with a button).
+  """
+  def start(%Run{} = run, planner, opts \\ []) do
+    with {:ok, {run, files, prompt}} <- prepare(run, planner, opts[:extra]) do
       start_request(run, planner, files, prompt)
     end
   end
 
-  defp prepare(run, planner) do
+  defp prepare(run, planner, extra) do
     Runs.with_locked_run(run.id, fn run ->
       if run.status == "draft" do
         requests =
@@ -41,7 +57,11 @@ defmodule Factory.ChatPlanner do
               m.role == "user",
               text = String.trim(m.body),
               text != "" and not String.starts_with?(text, "/"),
+              # Review requests posted before they became internal aren't requests.
+              not review_message?(m),
               do: text
+
+        asked = if extra, do: requests ++ [extra], else: requests
 
         spec = Specs.for_run(run)
         # Base specs are rules, not part of the run's own files.
@@ -50,8 +70,8 @@ defmodule Factory.ChatPlanner do
         current = if Specs.tasks(spec) == [], do: nil, else: PlanTools.describe(spec, :full)
 
         prompt = %{
-          full: Planner.chat_prompt(planner.name, requests, base ++ files, current),
-          parts: Planner.chat_prompt_parts(planner.name, requests, base ++ files, current)
+          full: Planner.chat_prompt(planner.name, asked, base ++ files, current),
+          parts: Planner.chat_prompt_parts(planner.name, asked, base ++ files, current)
         }
 
         run =

@@ -40,9 +40,6 @@ defmodule Factory.Chat do
     # "/ask Coder …" from the All view also belongs in Coder's own chat.
     recipient = agent || asked_agent(run, text)
     to_meta = if recipient, do: %{"to_agent_id" => recipient.id}, else: %{}
-    # `meta:` marks what the message is, e.g. %{"kind" => "review"} for a plan review asked
-    # with a button; such a message doesn't name the chat (Factory.Runs.Titles).
-    to_meta = Map.merge(to_meta, opts[:meta] || %{})
     Runs.post(run, "user", text, attachments: Enum.map(files, &elem(&1, 0)), meta: to_meta)
 
     tagged(agent, fn ->
@@ -68,8 +65,7 @@ defmodule Factory.Chat do
       end
     end)
 
-    if text != "" and to_meta["kind"] == nil and Factory.Runs.Titles.chat_message?(run),
-      do: Factory.Runs.Titles.start(run)
+    if text != "" and Factory.Runs.Titles.chat_message?(run), do: Factory.Runs.Titles.start(run)
 
     :ok
   end

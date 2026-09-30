@@ -485,8 +485,12 @@ defmodule FactoryWeb.ChatParts do
   def message(%{message: %{role: "user"}} = assigns) do
     assigns = assign(assigns, :to, to_agent_name(assigns.message, assigns.agents, assigns.focus))
 
+    # A plan review asked with the button, from before those requests went to the planner
+    # only: not something the person wrote, so not shown.
+    assigns = assign(assigns, :internal, Factory.ChatPlanner.review_message?(assigns.message))
+
     ~H"""
-    <div id={@id} class="flex flex-col items-end gap-1">
+    <div id={@id} hidden={@internal} class="flex flex-col items-end gap-1">
       <span :if={@to} class="text-xs text-base-content/45">To {@to}</span>
       <div class="max-w-[85%] rounded-xl border border-base-300/70 bg-base-200 px-4 py-2.5 text-[14px] leading-relaxed">
         <.attachments names={@message.attachments} />

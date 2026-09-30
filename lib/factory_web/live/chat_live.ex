@@ -438,17 +438,14 @@ defmodule FactoryWeb.ChatLive do
   def handle_event("plan_refine", %{"i" => i}, socket),
     do: {:noreply, ask_kiro(socket, String.to_integer(i), @refine)}
 
-  # The planner looks at the code and the whole plan again; its reply shows in the chat.
+  # The planner looks at the code and the whole plan again. The request goes to the
+  # planner only, not into the chat; its reply does.
   def handle_event("plan_review", _, socket) do
     run = socket.assigns.run && Runs.get_run(socket.assigns.run.id)
     planner = socket.assigns.planner
 
     if run && planner && run.status == "draft" do
-      Chat.handle(run, review_request(plan_tasks(socket)), [],
-        to: planner,
-        meta: %{"kind" => "review"}
-      )
-
+      Factory.ChatPlanner.start(run, planner, extra: review_request(plan_tasks(socket)))
       {:noreply, socket}
     else
       {:noreply, put_flash(socket, :error, "This run has no planner to review its plan.")}

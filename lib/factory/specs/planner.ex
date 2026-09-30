@@ -485,10 +485,27 @@ its own, naming the files it touches and the requirement numbers it covers. Incl
   defp describe_plan_tool(_title, _input), do: nil
 
   defp describe_file_tool(kind, path, update) do
-    case {kind, path} do
-      {"read", path} when is_binary(path) -> "Reading #{path}"
-      {"search", path} when is_binary(path) -> "Searching #{path}"
-      _ -> update["title"] || "Looking around"
+    case {kind, path, update["title"]} do
+      {"read", path, _} when is_binary(path) ->
+        "Reading #{path}"
+
+      {"search", path, _} when is_binary(path) ->
+        "Searching #{path}"
+
+      {_, _, title} when title in ["web_search", "Web Search"] ->
+        "Searching the web"
+
+      {"fetch", _, _} ->
+        "Reading a web page"
+
+      {_, _, title} when title in ["web_fetch", "Fetch"] ->
+        "Reading a web page"
+
+      {_, _, title} when is_binary(title) ->
+        title |> String.replace("_", " ") |> String.capitalize()
+
+      _ ->
+        "Looking around"
     end
   end
 

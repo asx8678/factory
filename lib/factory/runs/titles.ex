@@ -56,9 +56,10 @@ defmodule Factory.Runs.Titles do
   defp about(%Run{kind: nil} = run) do
     run.id
     |> Runs.list_messages()
-    # What the person wrote: not commands, nor requests made with a button (a review).
+    # What the person wrote: not commands, nor review requests that earlier versions posted.
     |> Enum.filter(
-      &(&1.role == "user" and not String.starts_with?(&1.body, "/") and &1.meta["kind"] == nil)
+      &(&1.role == "user" and not String.starts_with?(&1.body, "/") and
+          not Factory.ChatPlanner.review_message?(&1))
     )
     |> Enum.take(@chat_messages)
     |> Enum.map_join("\n\n", & &1.body)
