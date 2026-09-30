@@ -196,6 +196,14 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       if (text.includes("[test:reject-only]")) options = options.slice(1)
       if (text.includes("[test:no-options]")) options = []
       waiting = (reply) => { waiting = null; update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `[${reply.result.outcome.optionId || reply.result.outcome.outcome}] ` } }); finish() }
+      // Kiro 2.26 gives the kind on the tool call, then asks without it ("[test:kiro-2.26]"),
+      // or names only its own tool ("[test:tool-id]").
+      if (text.includes("[test:kiro-2.26]")) {
+        update(sessionId, { sessionUpdate: "tool_call", toolCallId: "call_w", kind: "edit", title: "Write File", status: "in_progress" })
+        return out({ id: 900, method: "session/request_permission", params: { sessionId, toolCall: { toolCallId: "call_w", status: "pending", title: "Write notes.md" }, options, _meta: { kiro: { toolId: "fs_write" } } } })
+      }
+      if (text.includes("[test:tool-id]"))
+        return out({ id: 900, method: "session/request_permission", params: { sessionId, toolCall: { title: "Write notes.md" }, options, _meta: { kiro: { toolId: "fs_write" } } } })
       out({ id: 900, method: "session/request_permission", params: { sessionId, toolCall: { title: "Write notes.md", kind: "edit" }, options } })
     } else finish()
   }

@@ -126,7 +126,7 @@ defmodule Factory.Kiro.Ask do
   # reply streams in before its response) and the credits it reported.
   defp call(conn, id, method, params) do
     send_json(conn.port, %{jsonrpc: "2.0", id: id, method: method, params: params})
-    acc = %{text: "", last: "", credits: 0.0, prompted: method == "session/prompt"}
+    acc = %{text: "", last: "", credits: 0.0, prompted: method == "session/prompt", kinds: %{}}
     await(conn, id, "", acc)
   end
 
@@ -176,7 +176,7 @@ defmodule Factory.Kiro.Ask do
     server = get_in(p, ["_meta", "kiro", "mcpTool", "identity", "serverName"])
 
     wanted =
-      if get_in(p, ["toolCall", "kind"]) in conn.allow or (server && server in conn.mcp),
+      if Kiro.Permission.kind(p, acc.kinds) in conn.allow or (server && server in conn.mcp),
         do: "allow",
         else: "reject"
 
@@ -240,7 +240,14 @@ defmodule Factory.Kiro.Ask do
          acc
        ) do
     conn.on_tool.(update)
-    {:cont, %{acc | last: ""}}
+
+    # Kiro 2.26 names the kind here, not on the permission request that follows.
+    kinds =
+      if is_binary(update["toolCallId"]) and is_binary(update["kind"]),
+        do: Map.put(acc.kinds, update["toolCallId"], update["kind"]),
+        else: acc.kinds
+
+    {:cont, %{acc | last: "", kinds: kinds}}
   end
 
   defp handle(_conn, _msg, _id, acc), do: {:cont, acc}

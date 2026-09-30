@@ -31,6 +31,30 @@ defmodule Factory.KiroTest do
     assert tokens > 0
   end
 
+  for marker <- ["[test:kiro-2.26]", "[test:tool-id]"] do
+    test "a request without a kind is judged by its tool call (#{marker})", %{
+      agent: agent,
+      run: run
+    } do
+      Chat.handle(run, "/ask Coder please write a file #{unquote(marker)}")
+      assert_receive {:message, %{author: "Coder", body: body}}, 5_000
+      assert body =~ "[allow] echo: please write a file"
+
+      {:ok, _} = Agents.update_agent(Agents.get_agent(agent.id), %{kind: "reviewer"})
+      Kiro.stop(agent.id)
+      Chat.handle(run, "/ask Coder please write a file #{unquote(marker)}")
+      assert_receive {:message, %{author: "Coder", body: body}}, 5_000
+      assert body =~ "[deny] echo: please write a file"
+    end
+  end
+
+  test "a one-off question judges a request without a kind the same way" do
+    assert {:ok, reply} = Kiro.ask("please write a file [test:kiro-2.26]", allow: ["edit"])
+    assert reply =~ "[allow]"
+    assert {:ok, reply} = Kiro.ask("please write a file [test:kiro-2.26]", allow: ["read"])
+    assert reply =~ "[deny]"
+  end
+
   test "an agent that changes code may edit; one that only checks may not", %{
     agent: agent,
     run: run

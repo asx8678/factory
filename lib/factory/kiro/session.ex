@@ -375,8 +375,20 @@ defmodule Factory.Kiro.Session do
     allowed = if state.turn, do: Agent.tools(state.turn.agent), else: []
     server = get_in(params, ["_meta", "kiro", "mcpTool", "identity", "serverName"])
 
+    # Kiro 2.26 gives the kind on the tool call, not the request (`Kiro.Permission`).
+    known =
+      if state.turn,
+        do:
+          for(
+            t <- state.turn.tools,
+            t.call_id && t.tool != "other",
+            into: %{},
+            do: {t.call_id, t.tool}
+          ),
+        else: %{}
+
     wanted =
-      if get_in(params, ["toolCall", "kind"]) in allowed or
+      if Kiro.Permission.kind(params, known) in allowed or
            (state.turn != nil and server == Factory.PlanTools.server_name()),
          do: "allow",
          else: "reject"
