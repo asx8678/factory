@@ -570,6 +570,7 @@ defmodule Factory.Chat do
   def retry(_run, _message), do: :ok
 
   defp plan_again("scope"), do: [action: :scope]
+  defp plan_again("grill"), do: [action: :grill]
   defp plan_again("refine"), do: [action: :refine]
   defp plan_again(_), do: []
 

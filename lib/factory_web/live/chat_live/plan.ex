@@ -4,7 +4,7 @@ defmodule FactoryWeb.ChatLive.Plan do
   `FactoryWeb.PlanPanel`): the run's spec it lives in, followed while the chat is open,
   and the panel's events. Each task can be edited (in its form or in place), removed,
   or handed to Kiro to flesh out from the code or change as asked; the planner can
-  check the plan's scope, or rework the whole plan.
+  check the plan's scope, grill the code about it, or rework the whole plan.
 
   Everything here takes the chat's socket; the chat works out what it shows from the
   plan (`show?/1`, `working/1`, `spec_hint?/1`) once these return.
@@ -185,14 +185,29 @@ defmodule FactoryWeb.ChatLive.Plan do
 
     if run && planner && run.status == "draft" do
       Factory.ChatPlanner.start(run, planner, action: :scope)
-      {:noreply, assign(socket, plan_checking: true)}
+      {:noreply, assign(socket, plan_checking: :scope)}
     else
       {:noreply, put_flash(socket, :error, "This run has no planner to check its plan.")}
     end
   end
 
+  # Grill code: the planner puts its questions to the code around what was asked and
+  # reports with the plan, asking the person what the code can't say; nothing changes
+  # (Factory.Specs.Planner has the prompt).
+  def handle_event("plan_grill", _, socket) do
+    run = socket.assigns.run && Runs.get_run(socket.assigns.run.id)
+    planner = socket.assigns.planner
+
+    if run && planner && run.status == "draft" do
+      Factory.ChatPlanner.start(run, planner, action: :grill)
+      {:noreply, assign(socket, plan_checking: :grill)}
+    else
+      {:noreply, put_flash(socket, :error, "This run has no planner to grill the code.")}
+    end
+  end
+
   # Refine (and "Refine with this"): the planner reworks the plan in place from the
-  # code, acting on the scope check shown with it. The request goes to the planner
+  # code, acting on the scope check or code grill shown with it. The request goes to the planner
   # only, not into the chat; its reply does.
   def handle_event("plan_review", _, socket) do
     run = socket.assigns.run && Runs.get_run(socket.assigns.run.id)

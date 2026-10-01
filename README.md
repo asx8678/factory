@@ -35,8 +35,8 @@ When Factory's own prompts improve, agents you haven't changed get them at start
 you've changed keeps yours until you restore it.
 
 * **Build a feature**: a planner, a coder, a tester and a reviewer. Describe the change;
-  the planner reads the code and writes the tasks; start it, and they build task by task.
-* **Fix a bug**: the same shape, starting from reproducing the bug.
+  the planner grills the code and writes the tasks; start it, and they build task by task.
+* **Fix a bug**: the same shape, starting from reproducing the bug and finding its cause.
 * **Review a PR**: first choose the repository (a folder on this computer, or a link to
   clone with SSH into `~/repo-reviews`); then see what's in it worth reviewing, the
   suggested change first. The Scout plans the checks and the Reviewer reports (see
@@ -51,6 +51,16 @@ you've changed keeps yours until you restore it.
   what you pasted, only what the others hand them, with internal hosts, user names, your
   folders, IDs and secrets taken out, and the names you list under Settings → Web
   searches. When it's done, **Fix it** starts a Fix a bug chat from the report.
+
+Before it plans, the planner grills the code so you don't have to: it puts a set of
+questions to the code around what you asked (does it exist already, how does it work
+today, what depends on it, what happens if it's built, is it a good fit) and answers
+them from what it reads. A bug and a pull request have their own questions. What it
+found is kept with the plan (the Spec page's design, under "What the code says"), where
+the agents that build read it. It then asks you only what the code can't say, up to 10
+questions with the option it recommends first. **Grill code**, on the plan, does this
+again on its own and reports with a verdict (Go ahead, Change the plan or Don't do it),
+changing nothing; **Refine** acts on the report.
 
 Agents that only read ask you first, in the chat, before they fetch a web page, read
 outside the project, or run a pull request's own code.

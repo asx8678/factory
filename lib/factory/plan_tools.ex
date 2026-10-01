@@ -23,6 +23,7 @@ defmodule Factory.PlanTools do
   # The approach the planner writes opens the spec's design with this heading, so a
   # design the person wrote is never replaced.
   @approach "# Approach"
+  @grilled "## What the code says"
 
   @tools [
     %{
@@ -44,9 +45,34 @@ defmodule Factory.PlanTools do
             type: "string",
             description:
               "Markdown: the parts of the code that change, the approach, risks and how it will be tested."
+          },
+          grilled: %{
+            type: "string",
+            description:
+              "Markdown list: what the code told you before you planned. A line for each " <>
+                "question you put to it, with its answer and where you saw it (`path/to/file.ex:line`)."
           }
         },
         required: ["summary", "approach"]
+      }
+    },
+    %{
+      name: "update_plan",
+      description:
+        "Replaces what grilling the code found (the plan's \"What the code says\") with what " <>
+          "you know now, when a later look at the code found something new or wrong. The " <>
+          "summary, the approach and the tasks stay as they are.",
+      inputSchema: %{
+        type: "object",
+        properties: %{
+          grilled: %{
+            type: "string",
+            description:
+              "Markdown list: a line for each question you put to the code, with its answer " <>
+                "and where you saw it (`path/to/file.ex:line`)."
+          }
+        },
+        required: ["grilled"]
       }
     },
     %{
@@ -141,8 +167,10 @@ defmodule Factory.PlanTools do
     %{
       name: "ask_user",
       description:
-        "Asks the person 1 to 5 short questions when the request isn't clear enough to plan " <>
-          "without guessing. They're shown when your turn ends; the answers come as the next message.",
+        "Asks the person up to #{Planner.max_questions()} short questions the code can't answer " <>
+          "and whose answers change the plan, the most decisive first. They may answer on the " <>
+          "spot; otherwise the questions are shown when your turn ends and the answers come " <>
+          "as the next message.",
       inputSchema: %{
         type: "object",
         properties: %{
@@ -238,7 +266,7 @@ defmodule Factory.PlanTools do
   end
 
   @reading_tools ~w(get_plan ask_user)
-  @writing_tools ~w(create_plan add_tasks update_task remove_tasks)
+  @writing_tools ~w(create_plan update_plan add_tasks update_task remove_tasks)
 
   # What a button's turn may not do: a scope check changes nothing, and Refine keeps the
   # plan it reworks, with the person's edits. nil when the call may go ahead.
@@ -250,7 +278,7 @@ defmodule Factory.PlanTools do
   defp refusal(%{keep_plan: true}, "create_plan"),
     do:
       {:error,
-       "You're refining this plan, so it can't be replaced: change it with update_task, remove_tasks and add_tasks."}
+       "You're refining this plan, so it can't be replaced: change it with update_task, remove_tasks, add_tasks and update_plan."}
 
   defp refusal(_turn, _name), do: nil
 
@@ -569,7 +597,7 @@ defmodule Factory.PlanTools do
       do: {:error, "Ask at least one question."},
       else:
         {:ok,
-         {{:questions, Enum.take(questions, 5)},
+         {{:questions, questions},
           "They'll be shown when your turn ends. End it now with a short message."}}
   end
 
@@ -584,10 +612,30 @@ defmodule Factory.PlanTools do
 
       attrs =
         if planner_design?(spec.design),
-          do: Map.put(attrs, :design, "#{@approach}\n\n#{summary}\n\n#{approach}" |> finish()),
+          do: Map.put(attrs, :design, design(summary, approach, Text.text(args["grilled"]))),
           else: attrs
 
       write(spec, attrs, "Plan created. Now add its tasks with add_tasks.")
+    end
+  end
+
+  # Only the findings change: the summary and approach above them stay, and a design
+  # the person wrote is theirs.
+  defp write_tool("update_plan", args, spec) do
+    grilled = Text.text(args["grilled"])
+
+    cond do
+      grilled == "" ->
+        {:error, "Say what the code told you, in `grilled`."}
+
+      not planner_design?(spec.design) ->
+        {:error,
+         "The design is the person's own, so it stays as it is. Say what you found in your reply."}
+
+      true ->
+        [kept | _] = String.split(spec.design || "", @grilled, parts: 2)
+        kept = Text.or_default(String.trim(kept), @approach)
+        write(spec, %{design: finish("#{kept}\n\n#{@grilled}\n\n#{grilled}")}, "Updated.")
     end
   end
 
@@ -677,7 +725,7 @@ defmodule Factory.PlanTools do
         question != "" do
       %{"question" => question, "options" => q["options"] |> Text.lines() |> Enum.take(4)}
     end
-    |> Enum.take(5)
+    |> Enum.take(Planner.max_questions())
   end
 
   # The queue follows the tasks: a renamed one (`renames`, old title => new) keeps its
@@ -755,6 +803,12 @@ defmodule Factory.PlanTools do
 
   # A model the planner gave a task: one Factory may pick, else auto (never Sonnet).
   defp task_model(model), do: if(model in Factory.Kiro.task_models(), do: model, else: "auto")
+
+  # The plan's design: the summary and approach, then what grilling the code found.
+  defp design(summary, approach, grilled) do
+    found = if grilled == "", do: "", else: "\n\n#{@grilled}\n\n#{grilled}"
+    finish("#{@approach}\n\n#{summary}\n\n#{approach}#{found}")
+  end
 
   defp finish(text), do: String.trim(text) <> "\n"
 end

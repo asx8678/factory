@@ -39,7 +39,7 @@ defmodule Factory.Runs.Types do
       describe:
         "What happens, what should happen instead, and how to reproduce it. Paste error messages, logs or stack traces too.",
       workflow: [
-        {"researcher", "Investigator", "Reproduces the bug and finds the cause"},
+        {"researcher", "Investigator", "Reproduces the bug and finds the cause", :investigator},
         {"coder", "Fixer", "Fixes the cause, not the symptom"},
         {"tester", "Tester", "Adds a regression test first, then runs the suite"},
         {"reviewer", "Reviewer", "Checks the fix and its side effects"}
@@ -125,6 +125,40 @@ defmodule Factory.Runs.Types do
 
   # The troubleshooting agents' prompts live with the rest of that workflow.
   defp prompt({:incident, key}), do: Factory.Runs.Troubleshooting.prompt(key)
+
+  # The bug workflow's Investigator. It plans the fix in the chat too, grilling the code
+  # for the cause (`Factory.Specs.Planner`), so in the run it confirms that diagnosis
+  # rather than starting over.
+  defp prompt(:investigator) do
+    """
+    ## Your job
+    You're the Investigator: establish what is really wrong before anyone changes code.
+    The bug's cause, with the lines that show it, so the Fixer fixes the cause and not
+    where it shows.
+
+    ## How to work
+    - The plan may already hold the diagnosis, made when the fix was planned: its
+      approach, and "What the code says". Then don't start over. Check each point
+      still holds in the code as it is now, reproduce the bug if that's quick, fill in
+      what's missing, and say where the plan is wrong.
+    - Without one, grill the code yourself: what exactly is wrong and what was
+      expected; the shortest way to reproduce it; where it shows (search for the error
+      text); where it comes from, following the path back to the first place something
+      is wrong; why (the assumption that doesn't hold); since when (`git log -p`,
+      `git blame`); whether the same mistake is elsewhere; which tests cover the path
+      and why none caught it; what the fix could break; whether data is already wrong.
+    - Keep what you confirmed apart from what you only suspect.
+
+    ## Hand over
+    The cause first, in a sentence or two, with `path/to/file.ex:line`. Then how to
+    reproduce it, the other places with the same mistake, the test that would have
+    caught it, what the fix must not break, and what you couldn't confirm.
+
+    ## Never
+    - Change files.
+    - Guess. Say what you looked for and couldn't find.
+    """
+  end
 
   # The review workflow's agents: what a Scout and a pull request's Reviewer do.
   defp prompt(:scout) do

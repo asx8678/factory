@@ -1,18 +1,23 @@
 # Planner tools (MCP): status and next steps
 
 The chat planner writes its plan with Factory's own tools instead of replying with one
-JSON blob: it reads the project, calls `create_plan` (summary + approach), then
+JSON blob: it grills the code (the questions in `Factory.Specs.Planner`, by kind of
+job), calls `create_plan` (summary + approach + `grilled`, what the code told it), then
 `add_tasks` a few at a time, and on later messages refines the plan with `update_task`
-and `remove_tasks`. It can `ask_user` questions. Tasks show up live in the planner's
-chat bubble.
+and `remove_tasks`. It can `ask_user` up to 10 questions the code can't answer. Tasks
+show up live in the planner's chat bubble. The plan's Grill code button runs the same
+questions as a check (`ChatPlanner.start(run, planner, action: :grill)`): it reports
+with the plan, like Scope, and changes nothing.
 
 ## How it fits together
 
-- `Factory.PlanTools`: the tools (`get_plan`, `create_plan`, `add_tasks`,
-  `update_task`, `remove_tasks`, `ask_user`). A signed token per planning request binds
+- `Factory.PlanTools`: the tools (`get_plan`, `create_plan`, `update_plan` (replaces
+  what grilling found, as Refine does after a check), `add_tasks`, `update_task`,
+  `remove_tasks`, `ask_user`). A signed token per planning request binds
   calls to `{run_id, planner_generation, waiting pid}`; a call only writes while the run
   is a draft and that generation is the latest. The plan is the run's spec: approach in
-  `design` (only when it's empty or starts with `# Approach`), tasks in `tasks`.
+  `design` (only when it's empty or starts with `# Approach`), with what grilling found
+  under `## What the code says`, tasks in `tasks`.
 - `FactoryWeb.MCP` at `/mcp`: minimal MCP over HTTP (JSON responses, no SSE; `GET` → 405).
   A bad token is a tool error, not HTTP 401 (Kiro treats the server as OAuth).
 - `Factory.Kiro.Ask`: `mcp_servers:` goes into ACP `session/new`; MCP permission

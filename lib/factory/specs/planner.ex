@@ -136,7 +136,7 @@ defmodule Factory.Specs.Planner do
       models |> Enum.filter(&String.contains?(&1, "haiku")) |> Enum.sort(:desc) |> List.first()
 
     [
-      "auto" in models && "auto for most tasks, and always for the ones the coding agent builds",
+      "auto" in models && "auto for most tasks, and for every task the coding agent builds",
       strong != "auto" && "#{strong} for tricky, cross-cutting or risky ones",
       light && "#{light} for small, mechanical edits"
     ]
@@ -453,8 +453,9 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
 
   `action` is a button in the chat's plan instead of a message:
   `%{mode: :scope, thin: [line]}` checks the scope of work and reports, changing
-  nothing; `%{mode: :refine, thin: [line], findings: text | nil}` reworks the plan,
-  acting on a scope check's `findings`. `thin` is what Factory's own rules found
+  nothing; `%{mode: :grill, thin: [line]}` grills the code about what was asked and
+  reports, asking the person what the code can't say; `%{mode: :refine, thin: [line],
+  findings: text | nil}` reworks the plan, acting on a check's `findings`. `thin` is what Factory's own rules found
   missing in tasks (`Factory.Specs.TaskCheck`), one line per task.
 
   `job` is the kind of workflow the chat plans for (`Factory.Workflows.kind/1`): for
@@ -513,12 +514,120 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
       "The person has something to troubleshoot: an error message, a stack trace, logs, " <>
         "a failing pipeline or something misbehaving."
 
+  defp about("bug"),
+    do:
+      "The person has a bug in the project in the current folder to fix: something that " <>
+        "behaves wrongly, fails or errors."
+
   defp about(_job),
     do: "The person is chatting with you about a change to the project in the current folder."
 
   defp step(nil), do: "chat"
   defp step(:scope), do: "scope-check"
+  defp step(:grill), do: "grill"
   defp step(:refine), do: "refine"
+
+  @doc "How many questions a planner may ask the person at once (`ask_user`)."
+  def max_questions, do: 10
+
+  # Grilling the code: the questions a planner puts to the code itself before it plans,
+  # so the person doesn't have to. Each kind of job has its own; all are answered from
+  # what's read, around what was asked rather than the whole project.
+  defp grill(job) do
+    """
+    Put these questions to the code and answer each one from what you read, with where \
+    you saw it (`path/to/file.ex:line`), or "not found" and what you searched for. Stay \
+    around what was asked: the code it touches and what depends on that code, not the \
+    whole project. Add the questions this request raises that aren't listed.
+    #{String.trim_trailing(grill_questions(job))}
+    """
+  end
+
+  defp grill_questions("bug") do
+    """
+       - What exactly is wrong? The behaviour now, the behaviour expected, and who or \
+    what it hits.
+       - Can it be reproduced? The shortest steps or input that show it; run the test or \
+    command that shows it when that's quick.
+       - Where does it show? Search for the error text, the fixed part of the message, \
+    the page or function named.
+       - Where does it come from? Follow the path back from where it shows to the first \
+    place something is wrong: the cause, not the symptom.
+       - Why does that happen? The assumption the code makes that doesn't hold: a nil, an \
+    empty or huge input, order, timing, time zones, a limit, a state nobody expected.
+       - Since when? `git log -p` and `git blame` on those lines: the change that \
+    brought it in, and what that change was for.
+       - Is the same mistake elsewhere? Search for the same pattern in the code beside it.
+       - What covers it? The tests on that path, why none caught it, and the test that \
+    would have.
+       - What could the fix break? The callers and data that rely on how it behaves \
+    today, wrong as it is.
+       - Is anything already damaged? Records the bug left wrong, and how to find them.
+       - What do the project's own rules say? Its README, and AGENTS.md, CLAUDE.md or \
+    steering files.
+    """
+  end
+
+  defp grill_questions("review") do
+    """
+       - What is it for? The description, the commits and any issue named: the problem \
+    it solves.
+       - What does it change? Each behaviour that's different afterwards, for the people \
+    who use it and for the code that calls it.
+       - Does it do that, and only that? Changes that don't serve what it's for.
+       - What depends on the changed code that the change didn't touch? Callers, \
+    templates, routes, jobs, migrations, config.
+       - What happens when things go wrong? Invalid, empty, huge or concurrent input, a \
+    failure halfway, a retry.
+       - Does it touch data, migrations, permissions, secrets, configuration or \
+    dependencies?
+       - Which changed paths have a test, and which don't? Do the tests prove the \
+    behaviour, or only run the code?
+       - What should have changed with it and didn't? Documentation, configuration, \
+    other callers, other tests.
+       - Does it follow the project's own rules? Its README, and AGENTS.md, CLAUDE.md or \
+    steering files, and how the code beside it is written.
+       - Where is the risk? The biggest, most tangled and least tested part.
+    """
+  end
+
+  defp grill_questions(_job) do
+    """
+       - Does it exist already? Search for code that does this, part of it or something \
+    close, under other names too.
+       - How does it work today? Follow the path the change touches from its entry point \
+    (a route, a page, a command, a job) down to the data.
+       - Where would it go? The files, modules and functions that change, and how the \
+    code beside them is named, structured and tested.
+       - What depends on that code? Its callers, templates, routes, jobs, migrations and \
+    config.
+       - What covers it? The tests for it, how they're written and the command that \
+    runs them; run the ones for that part when that's quick.
+       - What's going on around it? `git status`, `git log --oneline -15`, and the \
+    latest commits on those files.
+       - What do the project's own rules say? Its README, and AGENTS.md, CLAUDE.md or \
+    steering files.
+       - What happens if it's built? What changes for the people and the code that use \
+    it today, what data has to change, and what could break.
+       - How would it be built? The ways that fit this codebase, and the simplest one \
+    that fully does the job.
+       - Is it a good fit, and should it be done at all? Against the project's design \
+    and rules, and against what it costs.
+    """
+  end
+
+  # What only the person can say, once the code has been grilled.
+  defp ask_rule do
+    """
+    Whatever is still open after that and would change the tasks is the person's to \
+    decide: what should be built, how it should behave, which of two sound ways to take. \
+    Call ask_user with those questions, up to #{max_questions()}, the most decisive first, \
+    each with 2 to 4 options, the one you recommend first, and say in the question what \
+    you found ("The invoices page already exports PDF from `lib/app_web/live/invoices_live.ex`: \
+    add CSV to that menu, or as its own button?"). Never ask what the code answers, and \
+    don't ask to look careful: a small, clear change may need no questions at all.\
+    """
+  end
 
   defp instructions(nil, "review", _agents) do
     """
@@ -537,14 +646,21 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
     <oldest>~1..<newest>`.
        - Neither, or you can't find it: call ask_user, offering the branches with the \
     latest work (`git branch --sort=-committerdate`) and asking for a link.
-    2. Work out what it's for: the description, the commit messages, any issue it names.
-    3. Read the changed code in context: the code around each change, what calls it, \
-    and the tests that cover it, and the project's own rules (README, AGENTS.md, \
-    CLAUDE.md).
+    2. Grill the change before you plan the review. Read the changed code in context \
+    (the code around each change, what calls it, the tests that cover it), not the diff \
+    alone. #{String.trim_trailing(grill("review"))}
+    3. Ask the person only what the change and its description can't tell you: what to \
+    look at hardest, whether something that looks deliberate is, how careful this merge \
+    has to be. Call ask_user with those questions, up to #{max_questions()}, each with 2 \
+    to 4 options, the one you recommend first, saying what you found. Never ask what the \
+    change itself answers; a small, clear change needs none.
     4. Write the review plan with the factory tools: create_plan with a one-sentence \
-    summary of what the change does and the approach (base and branch, how many files, \
-    and where the risk is), then add_tasks, one task per area to check, riskiest \
-    first. You plan checks, not changes: nothing in the plan edits code.
+    summary of what the change does, the approach (base and branch, how many files, \
+    and where the risk is) and `grilled`: what the change told you, a line for each \
+    question you put to it, with its answer and where you saw it. Then add_tasks, one \
+    task per area to check, riskiest first, each built on what you found: name the \
+    lines and the cases, not the general worry. You plan checks, not changes: nothing \
+    in the plan edits code.
        - title: what to check, e.g. "Check the token refresh in lib/auth/session.ex".
        - objective: what must hold for that part to be right.
        - details: what to look at, file by file, and what could be wrong there.
@@ -619,6 +735,8 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
        when mode in [:scope, :refine] and job in ["review", "incident"],
        do: checks_note(job) <> "\n\n" <> instructions(mode, agents)
 
+  defp instructions(:grill, job, _agents), do: grill_report(job)
+  defp instructions(nil, job, agents), do: plan(job, agents)
   defp instructions(mode, _job, agents), do: instructions(mode, agents)
 
   defp checks_note("review"),
@@ -634,40 +752,39 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
         "checks cover the likely causes, with what the person gave and the mode and track the " <>
         "approach states. Nothing in it may edit code."
 
-  defp instructions(nil, agents) do
+  # Planning a change or a bug fix: the same order of work, with the questions the job
+  # puts to the code (`grill/1`) and what its plan must hold.
+  defp plan(job, agents) do
     """
-    Plan it the way a senior engineer would before anyone writes code, in this order:
+    #{plan_opening(job)}
 
     1. Understand the ask. Work out what the person wants and why, what "done" looks \
     like to them, and what they clearly expect but didn't say. The latest message \
     decides what this turn is about.
-    2. Look before you plan; never plan from the request alone. Check:
-       - the project's own guidance: its README, and AGENTS.md, CLAUDE.md or steering \
-    files, for its conventions and rules;
-       - what's going on in it: `git status` and `git log --oneline -15`;
-       - what's already there: search for code that does this or something close, and \
-    read the code the change touches, what calls it, and the tests that cover it;
-       - how it's built and checked: its test command, and the tests for that part if \
-    they run quickly.
+    2. Grill the code before you plan anything; never plan from the request alone. \
+    #{String.trim_trailing(grill(job))}
     3. Decide whether it should be done. Don't plan it when it would break what works, \
     repeat what the project already has, go against its design or rules, put data, \
     security or secrets at risk, or cost far more than it's worth. Reply instead, in 3 \
     to 6 sentences: say plainly that you wouldn't do it and why, pointing at what you \
     found in the code, and what you'd do instead. When part of it is sound, plan that \
     part and say what you left out. When it's already done, say where.
-    4. If it isn't clear enough to plan without guessing (what should be built, where \
-    it goes, how to tell it works), call ask_user with 1 to 5 short, specific \
-    questions, with options where that helps, and leave the plan as it is.
+    4. Ask what the code couldn't tell you. #{ask_rule()} When the answers decide what \
+    gets built, ask before you write the plan and leave the plan as it is; when they \
+    only tune it, plan with the options you recommend and ask alongside.
     5. Choose the approach: of the ways that fit this codebase, the simplest that fully \
-    does the job. Know what could go wrong with it.
+    does the job. Know what could go wrong with it.#{plan_approach(job)}
     6. Write the plan with the factory tools:
        - With no plan yet, or when the person wants a different one: create_plan with a \
-    one-sentence summary and the approach (the parts of the code that change and why, \
-    the risks, how it will be tested), then add_tasks, 2 to 5 per call, in build \
-    order. Size the plan to the work: a small change is one task, and what can't be \
-    built and checked apart stays one task.
+    one-sentence summary, the approach (the parts of the code that change and why, \
+    the risks, how it will be tested) and `grilled`: what the code told you, a line for \
+    each question you put to it, with its answer and where you saw it. Then add_tasks, \
+    2 to 5 per call, in build order, each built on what you found: the real files, \
+    functions and tests, not guesses. Size the plan to the work: a small change is one \
+    task, and what can't be built and checked apart stays one task.
        - With a plan already: refine it with what the person said last, using \
-    update_task, remove_tasks and add_tasks. Keep what still fits; the person may have \
+    update_task, remove_tasks and add_tasks, and update_plan when the code told you \
+    something new or different this time. Keep what still fits; the person may have \
     edited tasks.
     7. Check it: call get_plan and read it as the agent who'll build it. Every task \
     meets the task standard below and is given to the agent whose work it is, with the \
@@ -683,6 +800,66 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
     Only if the factory tools aren't available, reply instead with only this JSON \
     object, with no tasks when you wouldn't do it and the reply saying why:
     {"clear": true | false, "reply": "<2 to 6 sentences>", "questions": [{"question": "<question>", "options": ["<option>"]}], "tasks": [#{@task_json}]}
+    """
+  end
+
+  defp plan_opening("bug"),
+    do:
+      "Plan the fix the way a senior engineer would before anyone touches the code: find " <>
+        "the cause first, then plan the smallest change that removes it. In this order:"
+
+  defp plan_opening(_job),
+    do: "Plan it the way a senior engineer would before anyone writes code, in this order:"
+
+  # What a bug's plan holds besides the fix.
+  defp plan_approach("bug"),
+    do:
+      " Fix the cause, not where it shows. The plan has a test that fails without the " <>
+        "fix and passes with it, the same fix wherever else the mistake is, and the " <>
+        "repair of anything it damaged; the approach states the cause as you found it, " <>
+        "with the lines that show it, so the agents after you confirm it rather than " <>
+        "look for it again."
+
+  defp plan_approach(_job), do: ""
+
+  # Grill code: the button's report. Nothing changes; Refine acts on it.
+  defp grill_report(job) do
+    """
+    The person pressed Grill code: grill the code about what they asked, so they don't \
+    have to, and report what it says. This is a check: the plan tools only read the plan \
+    this turn, so don't try to change it.
+
+    Work through it in this order, and don't skip reading the code:
+    1. Pin down the ask. From the requests and the spec files, list for yourself each \
+    thing that must be true when this is done. Where they conflict, the latest request \
+    wins.
+    2. Grill the code. #{String.trim_trailing(grill(job))}
+    3. Grill the plan against the code, when there is one. For every task, open the \
+    files and functions it names: do they exist, are the names right, does the change \
+    fit how the code works today, and is anything the code needs missing from it?
+    4. Ask what the code couldn't tell you. #{ask_rule()} The person may answer on the \
+    spot: use what they say in your report.
+
+    Then reply with this report, leaving out any section with nothing in it. Back each \
+    point with evidence, `path/to/file.ex:line` or the task number, and say so when you \
+    couldn't confirm something in the code rather than guessing.
+
+    **Verdict:** Go ahead, Change the plan, or Don't do it, and in one sentence why.
+    **Already there:** what the code has of this today, and where.
+    **How it works today:** the path the change touches, step by step.
+    **What it touches:** the files and functions that change, what depends on them, \
+    and the tests that cover them.
+    **If it's done:** what changes for the people and the code that use it today, and \
+    what could break.
+    **How to do it:** the approach that fits this codebase, and what you'd avoid.
+    **Fit:** how it sits with the project's design and rules, and whether it's worth it.
+    **Plan against the code:** where the tasks don't match the code, by task number.
+    **Decided:** what the person answered.
+    **Still open:** what only the person can decide and hasn't yet, as questions.
+    **First changes:** the two or three changes to make to the plan first.
+
+    A line or two per point. Factory shows this report with the plan, and the person's \
+    Refine button acts on it.
     """
   end
 
@@ -738,8 +915,8 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
     """
     The person pressed Refine: rework the plan below so that it does everything they \
     asked and nothing more, and so that an agent can build every task without guessing. \
-    The plan exists: change it only with update_task, remove_tasks and add_tasks. Never \
-    call create_plan, which would throw away the person's edits.
+    The plan exists: change it only with update_task, remove_tasks, add_tasks and \
+    update_plan. Never call create_plan, which would throw away the person's edits.
 
     First investigate, without touching the plan:
     1. From the requests and the spec files, list for yourself what must be true when \
@@ -748,8 +925,9 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
     exists and is spelled right, and find the real ones where it's wrong. Find the tests \
     that cover that code and how they're written, and what depends on it (callers, \
     templates, routes, jobs, migrations, config).
-    3. If there's a scope check below, go through it point by point and confirm each one \
-    in the code before acting on it. Skip a point that turns out to be wrong, and say so.
+    3. If there's a scope check or a code grill below, go through it point by point and \
+    confirm each one in the code before acting on it. Skip a point that turns out to be \
+    wrong, and say so.
     4. Decide the changes: tasks to fix, split, merge, reorder, drop or add.
 
     Then change the plan, as little as it takes:
@@ -760,6 +938,9 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
     the task that needs them or the one right after.
     - Leave good tasks as they are. The person may have written or edited tasks: keep \
     their wording and intent, and only add what's missing. Don't add work nobody asked for.
+    - Keep what the code says with the plan: call update_plan with `grilled`, a line for \
+    each question put to the code with its answer and where you saw it, from the check \
+    below and what you read now. The agents that build read it.
     - If only the person can decide something the plan depends on, call ask_user rather \
     than guess.
 
@@ -792,7 +973,7 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
     """
 
     <scope-check>
-    Your scope check of this plan, from earlier in this chat:
+    Your check of this plan (a scope check or a code grill), from earlier in this chat:
 
     #{String.trim(findings)}
     </scope-check>
@@ -823,7 +1004,12 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
       unclear = data["clear"] == false and questions != []
       tasks = if unclear, do: [], else: Enum.take(tasks, 30)
 
-      {:ok, %{reply: Text.text(data["reply"]), tasks: tasks, questions: Enum.take(questions, 5)}}
+      {:ok,
+       %{
+         reply: Text.text(data["reply"]),
+         tasks: tasks,
+         questions: Enum.take(questions, max_questions())
+       }}
     end
   end
 
@@ -940,6 +1126,7 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
 
     case {tool, List.wrap(input["tasks"])} do
       {"create_plan", _} -> "Writing the plan"
+      {"update_plan", _} -> "Noting what the code says"
       {"add_tasks", [%{"title" => title}]} when is_binary(title) -> "Adding “#{title}”"
       {"add_tasks", tasks} -> "Adding #{length(tasks)} tasks"
       {"update_task", _} -> "Changing task #{input["number"]}"

@@ -32,25 +32,35 @@ defmodule FactoryWeb.ChatMessages do
     """
   end
 
-  # A scope check: its report is in the plan (FactoryWeb.PlanPanel), so here it's one
-  # line that opens to the full text, and the plan isn't pushed out of view.
+  # A scope check or a code grill: its report is in the plan (FactoryWeb.PlanPanel), so
+  # here it's one line that opens to the full text, and the plan isn't pushed out of
+  # view. What a grill left for the person to decide is asked under it.
   def message(%{message: %{author: author, meta: %{"check" => true}}} = assigns)
       when is_binary(author) do
     ~H"""
-    <details id={@id} class="group rounded-lg border border-base-content/10 text-sm">
-      <summary class="flex cursor-pointer list-none items-center gap-2 px-3 py-1.5 text-xs text-base-content/60 hover:text-base-content [&::-webkit-details-marker]:hidden">
-        <.icon name="hero-magnifying-glass-micro" class="size-3.5" />
-        <span class="font-medium text-base-content/75">Scope check</span>
-        by {@message.author} · the report is in the plan
-        <.icon
-          name="hero-chevron-down-micro"
-          class="ml-auto size-3.5 transition-transform group-open:rotate-180"
-        />
-      </summary>
-      <div class="md border-t border-base-content/10 px-3 py-2">
-        {FactoryWeb.Markdown.render(FactoryWeb.PlanPanel.report(@message.body))}
-      </div>
-    </details>
+    <div id={@id}>
+      <details class="group rounded-lg border border-base-content/10 text-sm">
+        <summary class="flex cursor-pointer list-none items-center gap-2 px-3 py-1.5 text-xs text-base-content/60 hover:text-base-content [&::-webkit-details-marker]:hidden">
+          <.icon name={FactoryWeb.PlanPanel.check_icon(@message)} class="size-3.5" />
+          <span class="font-medium text-base-content/75">
+            {FactoryWeb.PlanPanel.check_name(@message)}
+          </span>
+          by {@message.author} · the report is in the plan
+          <.icon
+            name="hero-chevron-down-micro"
+            class="ml-auto size-3.5 transition-transform group-open:rotate-180"
+          />
+        </summary>
+        <div class="md border-t border-base-content/10 px-3 py-2">
+          {FactoryWeb.Markdown.render(FactoryWeb.PlanPanel.report(@message.body))}
+        </div>
+      </details>
+      <ChatQuestions.question_form
+        :if={ChatQuestions.answerable?(@message, @run)}
+        id={"answers-#{@message.id}"}
+        message={@message}
+      />
+    </div>
     """
   end
 

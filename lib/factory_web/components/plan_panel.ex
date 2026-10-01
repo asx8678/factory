@@ -8,11 +8,15 @@ defmodule FactoryWeb.PlanPanel do
 
   A task too thin to build without guessing (`Factory.Specs.TaskCheck`) is marked with
   what it's missing. Scope (check scope of work) has the planner compare the plan with what was asked
-  and report, changing nothing; Refine has it rework the plan from the code.
+  and report, changing nothing; Grill code has it put its questions to the code (does it
+  exist, how does it work today, what happens if it's built, is it a good fit) and
+  report, asking the person only what the code can't say; Refine has it rework the plan
+  from the code.
 
   Events (to the chat LiveView): `plan_edit`, `plan_edit_cancel`, `plan_save`,
   `plan_remove`, `plan_refine`, `plan_ask_open`, `plan_ask`, `plan_use`,
-  `plan_discard`, `plan_scope`, `plan_review`; `action` with "start" to implement.
+  `plan_discard`, `plan_scope`, `plan_grill`, `plan_review`; `action` with "start" to
+  implement.
   """
   alias Factory.Specs.TaskCheck
   use FactoryWeb, :html
@@ -29,8 +33,13 @@ defmodule FactoryWeb.PlanPanel do
     default: nil,
     doc: "what the planner is doing, while it works on the plan"
 
-  attr :checking, :boolean, default: false, doc: "whether that work is a scope check"
-  attr :check, :any, default: nil, doc: "the latest scope check's message, until the plan changes"
+  attr :checking, :any,
+    default: false,
+    doc: "the check that work is, `:scope` or `:grill`, or false when it changes the plan"
+
+  attr :check, :any,
+    default: nil,
+    doc: "the latest check's message (a scope check or a code grill), until the plan changes"
 
   attr :spec_hint, :boolean, default: false
 
@@ -84,6 +93,18 @@ defmodule FactoryWeb.PlanPanel do
         >
           <.icon name="hero-magnifying-glass-micro" class="size-3.5" /> Scope
         </button>
+        <%!-- Troubleshooting may have no code to grill. --%>
+        <button
+          :if={@job != "incident"}
+          id="chat-plan-grill"
+          type="button"
+          phx-click="plan_grill"
+          disabled={@working != nil}
+          title="Grill code: Kiro puts its questions to the code around what you asked (does it exist already, how does it work today, what depends on it, what happens if it's done, is it a good fit) and reports with a verdict. It asks you only what the code can't answer, and doesn't change the plan."
+          class="flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-xs text-base-content/70 hover:bg-base-content/[0.06] hover:text-base-content disabled:opacity-40"
+        >
+          <.icon name="hero-fire-micro" class="size-3.5" /> Grill code
+        </button>
         <button
           id="chat-plan-review"
           type="button"
@@ -114,6 +135,7 @@ defmodule FactoryWeb.PlanPanel do
         <span class="loading loading-spinner loading-xs text-primary"></span>
         <span class="shrink-0 font-medium text-base-content/80">
           {cond do
+            @checking == :grill -> "Grilling the code"
             @checking -> "Checking the scope"
             @job == "review" -> "Reviewing"
             @job == "incident" -> "Triaging"
@@ -366,7 +388,7 @@ defmodule FactoryWeb.PlanPanel do
         </button>
       </p>
 
-      <%!-- The latest scope check, below the tasks it's about. --%>
+      <%!-- The latest scope check or code grill, below the tasks it's about. --%>
       <details
         :if={@check && !@checking}
         id={"chat-plan-check-#{@check.id}"}
@@ -375,8 +397,8 @@ defmodule FactoryWeb.PlanPanel do
         class="group border-t border-base-content/10 bg-base-content/[0.02]"
       >
         <summary class="flex cursor-pointer list-none items-center gap-2 px-3.5 py-2 text-xs [&::-webkit-details-marker]:hidden">
-          <.icon name="hero-magnifying-glass-micro" class="size-3.5 text-base-content/55" />
-          <span class="font-medium">Scope check</span>
+          <.icon name={check_icon(@check)} class="size-3.5 text-base-content/55" />
+          <span class="font-medium">{check_name(@check)}</span>
           <span class="text-base-content/45">by {@check.author}</span>
           <span
             :if={verdict(@check.body)}
@@ -747,8 +769,9 @@ defmodule FactoryWeb.PlanPanel do
   end
 
   @doc """
-  A scope check's report from its verdict on: the notes Kiro sometimes writes while it
-  works ("Checking dependencies…") come before the report and aren't part of it.
+  A check's report (a scope check's or a code grill's) from its verdict on: the notes
+  Kiro sometimes writes while it works ("Checking dependencies…") come before the
+  report and aren't part of it.
   """
   def report(body) do
     case Regex.split(~r/^(?=[ \t#>*_-]*Verdict\b)/im, body || "", parts: 2) do
@@ -757,19 +780,31 @@ defmodule FactoryWeb.PlanPanel do
     end
   end
 
-  # The scope check's verdict, from its report's first section (Factory.Specs.Planner
-  # asks for one of three).
+  @doc "What a check's message is called: a code grill's, else a scope check's."
+  def check_name(%{meta: %{"check_kind" => "grill"}}), do: "Code grill"
+  def check_name(_message), do: "Scope check"
+
+  @doc "The icon of a check's message."
+  def check_icon(%{meta: %{"check_kind" => "grill"}}), do: "hero-fire-micro"
+  def check_icon(_message), do: "hero-magnifying-glass-micro"
+
+  # The check's verdict, from its report's first section (Factory.Specs.Planner asks a
+  # scope check and a code grill for one of three each).
   defp verdict(body) do
     case Regex.run(
-           ~r/Verdict:?\**:?\s*\**(Ready to build|Ready after small fixes|Needs rework)/i,
+           ~r/Verdict:?\**:?\s*\**(Ready to build|Ready after small fixes|Needs rework|Go ahead|Change the plan|Don['’]t do it)/i,
            body || ""
          ) do
-      [_, v] -> String.capitalize(v)
+      [_, v] -> v |> String.replace("’", "'") |> String.capitalize()
       _ -> nil
     end
   end
 
-  defp verdict_class("Ready to build"), do: "bg-success/15 text-success"
-  defp verdict_class("Ready after small fixes"), do: "bg-warning/15 text-warning"
+  defp verdict_class(good) when good in ["Ready to build", "Go ahead"],
+    do: "bg-success/15 text-success"
+
+  defp verdict_class(fix) when fix in ["Ready after small fixes", "Change the plan"],
+    do: "bg-warning/15 text-warning"
+
   defp verdict_class(_rework), do: "bg-error/15 text-error"
 end

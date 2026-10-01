@@ -55,6 +55,9 @@ defmodule Factory.ChatPlanner do
 
     * `:scope` checks the scope of work: it reads the code and reports, and the plan
       tools only read the plan. The report is posted as it is, marked `"check" => true`.
+    * `:grill` grills the code about what was asked (`Factory.Specs.Planner`) and
+      reports the same way, marked `"check_kind" => "grill"` too; what only the person
+      can decide it asks them, on the spot or with the report.
     * `:refine` reworks the plan in place (it can't be replaced), acting on
       `findings:`, the scope check shown with the plan, if any.
 
@@ -146,6 +149,7 @@ defmodule Factory.ChatPlanner do
   # What the planner is doing, in words for its card and the chat's progress line: for
   # a review, what it's reviewing (the pull request, the branch…), never "planning".
   defp doing(:scope, _job, _requests, title), do: "Checking the scope of “#{title}”"
+  defp doing(:grill, _job, _requests, title), do: "Grilling the code for “#{title}”"
   defp doing(:refine, "review", _requests, title), do: "Reworking the review of “#{title}”"
 
   defp doing(:refine, "incident", _requests, title),
@@ -227,7 +231,7 @@ defmodule Factory.ChatPlanner do
 
       result =
         case result do
-          {:ok, r} -> {:ok, Map.put(r, :check, mode == :scope)}
+          {:ok, r} -> {:ok, Map.put(r, :check, check?(mode) && mode)}
           # A failure remembers what was asked, for its Try again.
           {:error, reason} -> {:error, reason, mode}
         end
@@ -260,19 +264,22 @@ defmodule Factory.ChatPlanner do
         planning: %{
           generation: generation,
           notify: self(),
-          read_only: mode == :scope,
+          read_only: check?(mode),
           keep_plan: mode == :refine
         },
         on_busy: :return
       )
 
-    with {:ok, reply} <- reply, do: read_result(reply, generation, mode == :scope)
+    with {:ok, reply} <- reply, do: read_result(reply, generation, check?(mode))
   end
+
+  # The buttons that only read the plan and report: Scope and Grill code.
+  defp check?(mode), do: mode in [:scope, :grill]
 
   defp plan_once(run, planner, prompt, generation, dir, mode) do
     token =
       PlanTools.grant(run.id, generation, planner,
-        read_only: mode == :scope,
+        read_only: check?(mode),
         keep_plan: mode == :refine
       )
 
@@ -288,7 +295,7 @@ defmodule Factory.ChatPlanner do
              on_tool: prompt.on_tool,
              usage: %{source: "plan_chat", run_id: run.id, agent_id: planner.id}
            ) do
-      read_result(reply, generation, mode == :scope)
+      read_result(reply, generation, check?(mode))
     end
   end
 
@@ -302,13 +309,18 @@ defmodule Factory.ChatPlanner do
   # What the tools reported while Kiro worked (`Factory.PlanTools`). Without any tool
   # call, the reply is the JSON plan the prompt asks for when the tools are missing, or
   # just an answer that leaves the plan as it is.
-  # A check's reply is what it found, never a plan to apply.
+  # A check's reply is what it found, never a plan to apply. What it asked the person
+  # and they didn't answer on the spot goes with it.
   defp read_result(reply, generation, true) do
-    _ = tool_events(generation, [])
+    questions = for {:questions, qs} <- tool_events(generation, []), q <- qs, do: q
 
     case String.trim(reply) do
-      "" -> {:error, "The check ended without a reply."}
-      reply -> {:ok, %{reply: reply, questions: [], written: true}}
+      "" ->
+        {:error, "The check ended without a reply."}
+
+      reply ->
+        {:ok,
+         %{reply: reply, questions: Enum.take(questions, Planner.max_questions()), written: true}}
     end
   end
 
@@ -330,7 +342,9 @@ defmodule Factory.ChatPlanner do
 
       events ->
         questions = for {:questions, qs} <- events, q <- qs, do: q
-        {:ok, %{reply: reply, questions: Enum.take(questions, 5), written: true}}
+
+        {:ok,
+         %{reply: reply, questions: Enum.take(questions, Planner.max_questions()), written: true}}
     end
   end
 
@@ -356,10 +370,18 @@ defmodule Factory.ChatPlanner do
     end)
   end
 
-  # A check (Check scope): what it found goes to the chat as it is; the plan is unchanged.
-  defp finish(run, planner, _files, {:ok, %{check: true, reply: reply}}) do
+  # A check (Scope, Grill code): what it found goes to the chat as it is; the plan is
+  # unchanged. A grill's questions the person hasn't answered are asked under it.
+  defp finish(run, planner, _files, {:ok, %{check: kind, reply: reply} = result})
+       when kind in [:scope, :grill] do
     Agents.set_activity(planner.id, "idle", nil)
-    post(run, planner, reply, %{"check" => true})
+    questions = Map.get(result, :questions, [])
+
+    post(run, planner, reply, %{
+      "check" => true,
+      "check_kind" => to_string(kind),
+      "questions" => questions
+    })
   end
 
   # Written with the tools: the spec already has the plan. With no tasks yet, it's the
@@ -389,7 +411,7 @@ defmodule Factory.ChatPlanner do
 
   # The plan replaces the spec's tasks: the planner rethinks it from everything asked.
   # Tasks approved on the Spec page stay as they are, as with the plan tools.
-  defp finish(run, planner, files, {:ok, %{reply: reply, tasks: tasks}}) do
+  defp finish(run, planner, files, {:ok, %{reply: reply, tasks: tasks} = plan}) do
     case Specs.ensure_for_run(run) do
       {:ok, spec} ->
         if SpecDoc.approved?(spec, "tasks") do
@@ -404,7 +426,7 @@ defmodule Factory.ChatPlanner do
             %{}
           )
         else
-          save_plan(run, planner, files, spec, reply, tasks)
+          save_plan(run, planner, files, spec, reply, tasks, Map.get(plan, :questions, []))
         end
 
       {:error, _} ->
@@ -430,7 +452,8 @@ defmodule Factory.ChatPlanner do
     )
   end
 
-  defp save_plan(run, planner, files, spec, reply, tasks) do
+  # Questions asked alongside the tasks are shown with them, as with the tools.
+  defp save_plan(run, planner, files, spec, reply, tasks, questions) do
     saved =
       with {:ok, spec} <-
              Specs.update_spec(spec, %{tasks: Planner.to_markdown(tasks, 1) <> "\n"}),
@@ -444,11 +467,12 @@ defmodule Factory.ChatPlanner do
         post(
           run,
           planner,
-          Text.or_default(reply, "Here's how I'd do it."),
+          with_questions(Text.or_default(reply, "Here's how I'd do it."), questions),
           %{
             # As saved: a repeated title got a count (`Factory.Specs.Planner.to_markdown/2`).
             "tasks" => Enum.map(Specs.tasks(spec), & &1.title),
-            "spec_hint" => files == []
+            "spec_hint" => files == [],
+            "questions" => questions
           },
           ["start"]
         )

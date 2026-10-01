@@ -88,7 +88,7 @@ defmodule FactoryWeb.MCPTest do
     %{"result" => %{"tools" => tools}} = conn |> rpc("tools/list", %{}) |> json_response(200)
 
     assert Enum.map(tools, & &1["name"]) ==
-             ~w(get_plan create_plan add_tasks update_task remove_tasks ask_user)
+             ~w(get_plan create_plan update_plan add_tasks update_task remove_tasks ask_user)
   end
 
   test "notifications are accepted without a reply; GET and unknown methods are refused", %{
