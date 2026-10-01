@@ -1304,13 +1304,11 @@ defmodule FactoryWeb.ChatLive do
             Jump to latest <.icon name="hero-arrow-down-mini" class="ml-1 size-3" />
           </button>
 
-          <%!-- Room below for the message box, which isn't there while a review's repository is chosen. --%>
+          <%!-- Room below for the message box. A review's repository step has none, but sits
+               as high as the other greetings rather than lower down the page. --%>
           <div
             :if={@empty}
-            class={[
-              "flex min-h-0 flex-1 items-center justify-center overflow-hidden px-4",
-              if(@review_step == :source, do: "pb-12", else: "pb-40")
-            ]}
+            class="flex min-h-0 flex-1 items-center justify-center overflow-hidden px-4 pb-40"
           >
             <.greeting
               focus={@focus}

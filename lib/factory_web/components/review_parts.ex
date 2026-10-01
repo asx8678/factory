@@ -38,32 +38,34 @@ defmodule FactoryWeb.ReviewParts do
         What do you want to review?
       </h1>
       <p class="mt-2 text-base-content/60">
-        Choose the repository first. Factory then shows what's in it worth reviewing, and
-        the Scout plans the checks before the Reviewer reports.
+        Choose a repository, then what in it to review. The Scout plans the checks and the
+        Reviewer reports.
       </p>
 
-      <div class="mt-6 grid gap-3 sm:grid-cols-2">
+      <div class="mt-5 grid gap-3 sm:grid-cols-2">
         <section
           id="review-local"
           class={[
-            "flex flex-col rounded-xl border bg-base-100 p-4 transition duration-150 hover:-translate-y-px hover:shadow-sm",
+            "flex flex-col rounded-xl border bg-base-100 p-4 transition-colors duration-150",
             if(@folder_error,
               do: "border-error/50",
               else: "border-base-300 hover:border-base-content/25"
             )
           ]}
         >
-          <span class="grid size-9 place-items-center rounded-lg bg-base-200 text-base-content/70">
-            <.icon name="hero-folder" class="size-5" />
-          </span>
-          <h2 class="mt-3 font-semibold">A repository on this computer</h2>
-          <p class="mt-1 text-sm text-base-content/60">
-            A folder you already have: its branches, and changes not committed yet.
+          <div class="flex items-center gap-2.5">
+            <span class="grid size-8 shrink-0 place-items-center rounded-lg bg-base-200 text-base-content/70">
+              <.icon name="hero-folder" class="size-[18px]" />
+            </span>
+            <h2 class="font-semibold">On this computer</h2>
+          </div>
+          <p class="mt-2 text-sm text-base-content/60">
+            A folder you already have, with its branches and uncommitted changes.
           </p>
           <p :if={@folder_error} id="review-folder-error" class="mt-2 text-xs text-error">
             {@folder_error}
           </p>
-          <div class="mt-auto pt-4">
+          <div class="mt-auto pt-3">
             <button
               id="review-choose-folder"
               type="button"
@@ -79,22 +81,23 @@ defmodule FactoryWeb.ReviewParts do
         <section
           id="review-remote"
           class={[
-            "flex flex-col rounded-xl border bg-base-100 p-4 transition duration-150 hover:-translate-y-px hover:shadow-sm",
+            "flex flex-col rounded-xl border bg-base-100 p-4 transition-colors duration-150",
             if(@clone_error && !@cloning,
               do: "border-error/50",
               else: "border-base-300 hover:border-base-content/25"
             )
           ]}
         >
-          <span class="grid size-9 place-items-center rounded-lg bg-base-200 text-base-content/70">
-            <.icon name="hero-cloud-arrow-down" class="size-5" />
-          </span>
-          <h2 class="mt-3 font-semibold">Clone from a link</h2>
-          <p class="mt-1 text-sm text-base-content/60">
-            A repository or a pull request, cloned with SSH into {@root}. Asked for again,
-            it's fetched instead.
+          <div class="flex items-center gap-2.5">
+            <span class="grid size-8 shrink-0 place-items-center rounded-lg bg-base-200 text-base-content/70">
+              <.icon name="hero-cloud-arrow-down" class="size-[18px]" />
+            </span>
+            <h2 class="font-semibold">Clone from a link</h2>
+          </div>
+          <p class="mt-2 text-sm text-base-content/60">
+            A repository or pull request, cloned with SSH into <span class="whitespace-nowrap">{@root}</span>, or fetched if it's already there.
           </p>
-          <div class="mt-auto pt-4">
+          <div class="mt-auto pt-3">
             <.form
               for={@link_form}
               id="review-repo-form"
