@@ -65,6 +65,9 @@ defmodule FactoryWeb.ChatMessages do
   end
 
   def message(%{message: %{author: author}} = assigns) when is_binary(author) do
+    # A review's verdict (`Factory.ReviewVerdict`) is shown as a card, not as its line.
+    assigns = assign(assigns, :verdict, Factory.ReviewVerdict.split(assigns.message.body))
+
     ~H"""
     <div id={@id}>
       <p
@@ -74,7 +77,13 @@ defmodule FactoryWeb.ChatMessages do
         <.icon name="hero-question-mark-circle-mini" class="size-4" />
         Not clear enough to plan yet: more information needed
       </p>
-      <.agent_reply id={"md-#{@id}"} name={@message.author} body={@message.body} meta={@message.meta} />
+      <.agent_reply
+        id={"md-#{@id}"}
+        name={@message.author}
+        body={elem(@verdict, 1)}
+        meta={@message.meta}
+        verdict={elem(@verdict, 0)}
+      />
       <p :if={@message.meta["unclear"]} class="mt-2 text-sm text-base-content/55">
         Answer below, and I'll make the tasks.
       </p>
@@ -193,6 +202,7 @@ defmodule FactoryWeb.ChatMessages do
   attr :body, :string, required: true
   attr :meta, :map, default: %{}
   attr :live, :boolean, default: false
+  attr :verdict, :map, default: nil, doc: "a review's verdict (Factory.ReviewVerdict)"
 
   # A reply written by an agent (via Kiro), or one still streaming in.
   def agent_reply(assigns) do
@@ -204,6 +214,7 @@ defmodule FactoryWeb.ChatMessages do
         </span>
         <span class="font-semibold">{@name}</span>
       </p>
+      <.verdict_card :if={@verdict} id={@id && "#{@id}-verdict"} verdict={@verdict} />
       <div :if={@id} id={@id} class="md" phx-hook="Markdown" phx-update="ignore">
         {FactoryWeb.Markdown.render(@body)}
       </div>
@@ -253,6 +264,73 @@ defmodule FactoryWeb.ChatMessages do
         >
           <.icon name="hero-clipboard-document-mini" class="size-3.5" /> <span>Copy</span>
         </button>
+      </div>
+    </div>
+    """
+  end
+
+  attr :id, :string, default: nil
+  attr :verdict, :map, required: true
+
+  # A review's verdict: its score as a ring in the decision's colour, the decision, why,
+  # and what to do next.
+  defp verdict_card(assigns) do
+    {tone, icon, next} =
+      case assigns.verdict.decision do
+        "ready" ->
+          {"success", "hero-check-badge",
+           "Merge it. Anything below is a nit you can take or leave."}
+
+        "not_ready" ->
+          {"warning", "hero-wrench-screwdriver",
+           "Fix the findings below, then review it again before merging."}
+
+        _ ->
+          {"error", "hero-no-symbol",
+           "Don't merge this. It needs blockers fixed or a different approach first."}
+      end
+
+    assigns = assign(assigns, tone: tone, icon: icon, next: next)
+
+    ~H"""
+    <div
+      id={@id}
+      class={[
+        "verdict-card mb-3 flex items-center gap-4 rounded-xl border px-4 py-3",
+        @tone == "success" && "border-success/30 bg-success/[0.06]",
+        @tone == "warning" && "border-warning/35 bg-warning/[0.07]",
+        @tone == "error" && "border-error/30 bg-error/[0.06]"
+      ]}
+    >
+      <div
+        class={[
+          "grid size-14 shrink-0 place-items-center rounded-full",
+          @tone == "success" && "text-success",
+          @tone == "warning" && "text-warning",
+          @tone == "error" && "text-error"
+        ]}
+        style={"background: conic-gradient(currentColor #{@verdict.score * 3.6}deg, color-mix(in oklab, currentColor 15%, transparent) 0)"}
+        role="img"
+        aria-label={"Score #{@verdict.score} out of 100"}
+      >
+        <span class="grid size-11 place-items-center rounded-full bg-base-100 text-base font-semibold tabular-nums text-base-content">
+          {@verdict.score}
+        </span>
+      </div>
+      <div class="min-w-0 flex-1">
+        <p class={[
+          "flex items-center gap-1.5 text-sm font-semibold",
+          @tone == "success" && "text-success",
+          @tone == "warning" && "text-warning",
+          @tone == "error" && "text-error"
+        ]}>
+          <.icon name={@icon} class="size-4" /> {@verdict.label}
+          <span class="font-normal text-base-content/45">· {@verdict.score}/100</span>
+        </p>
+        <p :if={@verdict.why != ""} class="mt-0.5 text-[13px] leading-snug text-base-content/80">
+          {@verdict.why}
+        </p>
+        <p class="mt-1 text-xs text-base-content/55">{@next}</p>
       </div>
     </div>
     """

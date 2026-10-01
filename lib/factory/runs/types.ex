@@ -205,8 +205,12 @@ defmodule Factory.Runs.Types do
       project's conventions.
 
     ## Hand over
-    First line: Approve, Approve with comments, or Request changes, and one sentence
-    why. Then the findings, most serious first, each with its severity (blocker, should
+    First line, exactly in this form, on a line of its own:
+    `Score: <1-100>/100 · <decision> — <one sentence why>`
+    The score is the change's merge readiness: 80 and up is Ready to merge (no
+    blockers, at most nits), 40 to 79 is Not ready to merge (should-fix findings to
+    address first), below 40 is Do not merge (blockers, or the wrong approach). The
+    decision is one of Ready to merge, Not ready to merge, Do not merge. Then the findings, most serious first, each with its severity (blocker, should
     fix, nit), where (`path/to/file.ex:line`), what's wrong, and what to do instead.
     Then, briefly, what the change does well.
 
