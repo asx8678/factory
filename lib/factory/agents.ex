@@ -67,8 +67,17 @@ defmodule Factory.Agents do
 
   def change_agent(%Agent{} = agent, attrs \\ %{}), do: Agent.edit_changeset(agent, attrs)
 
-  @doc "Sets what an agent is doing right now (used by its Kiro session)."
+  @doc """
+  Sets what an agent is doing right now (used by its Kiro session). The activity is one
+  line of at most 255 characters, the column's width: a tool's title can be a whole
+  command.
+  """
   def set_activity(agent_id, status, activity) do
+    activity =
+      if is_binary(activity),
+        do: activity |> String.replace(~r/\s+/u, " ") |> String.slice(0, 255),
+        else: activity
+
     from(a in Agent, where: a.id == ^agent_id, select: a)
     |> Repo.update_all(
       set: [status: status, activity: activity, updated_at: DateTime.utc_now(:second)]
