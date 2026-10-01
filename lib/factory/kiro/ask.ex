@@ -26,6 +26,8 @@ defmodule Factory.Kiro.Ask do
     * `:reply` - `:all` (default) for everything Kiro wrote, `:last` for only what it wrote
       after its last tool call (its closing message, without the narration in between),
       which may be empty, or `:first` for only what it wrote before its first tool call
+    * `:runtime` - the CLI to ask, `:kiro` or `:pi`; the one in use (`Factory.Runtime`)
+      unless given
     * `:usage` - what the call is for, recorded with its cost by `Factory.Usage.record/1`:
       `%{source: "review", spec_id: 1}` and so on. Without it the source is "other".
   """
@@ -38,7 +40,8 @@ defmodule Factory.Kiro.Ask do
       not File.dir?(workdir) ->
         {:error, "The folder #{workdir} doesn't exist."}
 
-      not File.exists?(Kiro.config(:cli)) ->
+      (opts[:runtime] || Factory.Runtime.current()) == :kiro and
+          not File.exists?(Kiro.config(:cli)) ->
         {:error, "kiro-cli wasn't found at #{Kiro.config(:cli)}."}
 
       true ->
@@ -47,7 +50,17 @@ defmodule Factory.Kiro.Ask do
   end
 
   defp converse(text, workdir, opts) do
-    {port, log} = Kiro.open_port(workdir, "ask.log")
+    runtime = opts[:runtime] || Factory.Runtime.current()
+
+    # pi gets Factory's tools from its extension, which asks before each tool pi runs
+    # (`Factory.Kiro.Permit`) with what this question may do.
+    {port, log} =
+      Kiro.open_port(workdir, "ask.log",
+        runtime: runtime,
+        mcp: List.first(opts[:mcp_servers] || []),
+        permit: Kiro.Permit.grant(opts[:allow] || [], workdir, opts[:roots] || [])
+      )
+
     deadline = System.monotonic_time(:millisecond) + Kiro.config(:prompt_timeout)
 
     conn = %{
@@ -57,8 +70,11 @@ defmodule Factory.Kiro.Ask do
       roots: opts[:roots] || [],
       deadline: deadline,
       allow: opts[:allow] || [],
-      mcp: Enum.map(opts[:mcp_servers] || [], & &1.name),
-      on_tool: opts[:on_tool] || fn _ -> :ok end
+      # pi's extension has the tools before pi answers: nothing to wait for.
+      mcp: if(runtime == :pi, do: [], else: Enum.map(opts[:mcp_servers] || [], & &1.name)),
+      on_tool: opts[:on_tool] || fn _ -> :ok end,
+      # what pi's adapter says about itself once the session opens, left out of the reply
+      banner: nil
     }
 
     started = System.monotonic_time(:millisecond)
@@ -72,7 +88,9 @@ defmodule Factory.Kiro.Ask do
                call(conn, 2, "session/new", %{cwd: workdir, mcpServers: opts[:mcp_servers] || []}),
              :ok <- tools_loaded(conn, created),
              sid = session["sessionId"],
-             :ok <- set_model(conn, sid, session, model) do
+             conn = %{conn | banner: get_in(session, ["_meta", "piAcp", "startupInfo"])},
+             # pi runs on the one model it was started with (`Factory.Runtime`).
+             :ok <- if(runtime == :pi, do: :ok, else: set_model(conn, sid, session, model)) do
           call(conn, 4, "session/prompt", %{sessionId: sid, prompt: [%{type: "text", text: text}]})
         end
       after
@@ -97,6 +115,7 @@ defmodule Factory.Kiro.Ask do
 
     # A usage limit says so on every page until a prompt is answered again.
     case reply do
+      _ when runtime != :kiro -> :ok
       {:error, reason} -> if Kiro.usage_limited?(reason), do: Kiro.Catalog.note_limit(reason)
       {:ok, _} -> if acc.prompted, do: Kiro.Catalog.clear_limit()
     end
@@ -105,7 +124,8 @@ defmodule Factory.Kiro.Ask do
     if acc.prompted do
       Factory.Usage.record(
         Map.merge(Map.new(opts[:usage] || %{}), %{
-          model: model,
+          # pi runs on its own one model, whatever was asked for.
+          model: if(runtime == :pi, do: Factory.Runtime.pi_model() || "pi", else: model),
           credits: acc.credits,
           input_tokens: Factory.Usage.estimate_tokens(text),
           output_tokens: Factory.Usage.estimate_tokens(acc.text),
@@ -272,6 +292,24 @@ defmodule Factory.Kiro.Ask do
     RPC.reply_error(conn.port, rid, -32601, "#{method} is not supported by Factory")
     {:cont, acc}
   end
+
+  # pi's adapter's own startup notes, not something the agent said.
+  defp handle(
+         %{banner: banner},
+         %{
+           "method" => "session/update",
+           "params" => %{
+             "update" => %{
+               "sessionUpdate" => "agent_message_chunk",
+               "content" => %{"text" => banner}
+             }
+           }
+         },
+         _id,
+         acc
+       )
+       when is_binary(banner),
+       do: {:cont, acc}
 
   defp handle(
          _conn,

@@ -12,13 +12,19 @@ defmodule FactoryWeb.KiroStatus do
 
   Kiro's usage limit gets a warning of its own (`limited`), from a prompt it refused,
   until one is answered; its Check again (`"kiro_limit_check"`) asks Kiro one word.
+  With pi installed, both warnings offer to run on pi instead (`"use_pi"`,
+  `Factory.Runtime`); while Factory runs on pi there are no warnings about Kiro, and
+  the header says it's on pi.
   """
   import Phoenix.Component, only: [assign: 3]
   import Phoenix.LiveView, only: [attach_hook: 4, connected?: 1]
   alias Factory.Kiro.Catalog
 
   def on_mount(:default, _params, _session, socket) do
-    if connected?(socket), do: Catalog.subscribe()
+    if connected?(socket) do
+      Catalog.subscribe()
+      Factory.Runtime.subscribe()
+    end
 
     socket =
       socket
@@ -30,6 +36,11 @@ defmodule FactoryWeb.KiroStatus do
           if function_exported?(socket.view, :kiro_checked, 2),
             do: {:halt, socket.view.kiro_checked(catalog, socket)},
             else: {:halt, socket}
+
+        # The CLI the agents run on changed (`Factory.Runtime`): Kiro's warnings are
+        # only for Kiro.
+        {:runtime, _runtime}, socket ->
+          {:cont, assign(socket, :kiro, status())}
 
         _msg, socket ->
           {:cont, socket}
@@ -43,6 +54,11 @@ defmodule FactoryWeb.KiroStatus do
           Catalog.check_limit_later()
           {:halt, assign(socket, :kiro, %{socket.assigns.kiro | checking: true})}
 
+        # Under Kiro's usage limit warning, when pi is installed: carry on there.
+        "use_pi", _params, socket ->
+          Factory.Runtime.choose(:pi)
+          {:halt, assign(socket, :kiro, status())}
+
         _event, _params, socket ->
           {:cont, socket}
       end)
@@ -50,6 +66,17 @@ defmodule FactoryWeb.KiroStatus do
     {:cont, socket}
   end
 
-  defp status,
-    do: %{signed_out: Catalog.signed_out?(), limited: Catalog.limited?(), checking: false}
+  defp status do
+    runtime = Factory.Runtime.current()
+
+    %{
+      signed_out: runtime == :kiro and Catalog.signed_out?(),
+      limited: runtime == :kiro and Catalog.limited?(),
+      checking: false,
+      runtime: runtime,
+      pi_model: Factory.Runtime.pi_model(),
+      # whether the warnings can offer pi instead
+      pi: runtime == :kiro and Factory.Runtime.available?(:pi)
+    }
+  end
 end

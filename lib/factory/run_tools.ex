@@ -136,6 +136,17 @@ defmodule Factory.RunTools do
     :exit, _ -> nil
   end
 
+  @doc """
+  The session a session's token was granted to (`grant_session/2`), while that session
+  still runs on the CLI it was started with: `{:ok, key, nonce}`, else `:error`.
+  """
+  def session_of(token) do
+    case verify(token) do
+      {:ok, %{session: key, nonce: nonce}} -> {:ok, key, nonce}
+      _ -> :error
+    end
+  end
+
   @doc "The MCP server to give Kiro for a step: Factory's, with the step's token."
   def mcp_server(token), do: Factory.PlanTools.mcp_server(token)
 

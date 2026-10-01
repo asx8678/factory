@@ -100,6 +100,18 @@ defmodule FactoryWeb.MCP do
 
   defp handle(_conn, "tools/call", _params), do: {:error, -32602, "Name the tool to call."}
 
+  # Not MCP: pi's extension asks before each tool pi runs, as pi doesn't ask by itself
+  # (`Factory.Kiro.Permit`). The token is the session's, or a one-off question's.
+  defp handle(conn, "factory/permit", params) do
+    token = get_req_header(conn, "x-factory-permit") |> List.first() |> Kernel.||(token(conn))
+    input = if is_map(params["input"]), do: params["input"], else: %{}
+
+    case Factory.Kiro.Permit.decide(token, params["tool"], input, params["cwd"] || "") do
+      :allow -> {:ok, %{allow: true}}
+      {:deny, why} -> {:ok, %{allow: false, reason: why}}
+    end
+  end
+
   defp handle(_conn, method, _params), do: {:error, -32601, "#{method} isn't supported."}
 
   defp tools(token), do: if(RunTools.token?(token), do: RunTools, else: PlanTools)

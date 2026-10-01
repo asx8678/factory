@@ -30,6 +30,9 @@ defmodule Factory.Application do
            Factory.Workflows.ensure_standard()
            Factory.Workflows.update_prompts()
            Factory.Workflows.current()
+           # The CLI the agents run on (Kiro, or pi), as chosen in Settings. In tests
+           # it's Kiro's stand-in, always.
+           Factory.Runtime.load()
          end
 
          # The models Kiro offers: the last list at once, then a fresh check.

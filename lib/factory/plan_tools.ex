@@ -293,7 +293,8 @@ defmodule Factory.PlanTools do
   end
 
   # Kiro runs on this machine. "localhost" may resolve to IPv6 while Phoenix listens on IPv4.
-  defp url do
+  @doc "Where Factory's MCP server is reached: `config :factory, :mcp_url`, else the endpoint's."
+  def url do
     Application.get_env(:factory, :mcp_url) ||
       FactoryWeb.Endpoint.url()
       |> URI.parse()

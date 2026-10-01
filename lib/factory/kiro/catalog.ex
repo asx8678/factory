@@ -108,7 +108,10 @@ defmodule Factory.Kiro.Catalog do
   """
   def check_limit_later do
     Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
-      case Kiro.Ask.run("Reply with the single word OK.", usage: %{source: "other"}) do
+      case Kiro.Ask.run("Reply with the single word OK.",
+             usage: %{source: "other"},
+             runtime: :kiro
+           ) do
         # Kiro.Ask forgot the limit itself.
         {:ok, _} ->
           :ok
@@ -138,7 +141,8 @@ defmodule Factory.Kiro.Catalog do
     workdir = Kiro.config(:workspace)
     File.mkdir_p!(workdir)
     File.mkdir_p!(Kiro.config(:log_dir))
-    {port, log} = Kiro.open_port(workdir, "catalog.log")
+    # Always Kiro's, whatever the agents run on (`Factory.Runtime`).
+    {port, log} = Kiro.open_port(workdir, "catalog.log", runtime: :kiro)
 
     try do
       RPC.request(port, 1, "initialize", %{protocolVersion: 1, clientCapabilities: %{}})

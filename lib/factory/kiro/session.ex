@@ -142,6 +142,17 @@ defmodule Factory.Kiro.Session do
   def token_nonce(pid), do: GenServer.call(pid, :token_nonce)
 
   @doc """
+  Whether the turn under way may use a tool, for a CLI that doesn't ask by itself (pi,
+  through its extension and `Factory.Kiro.Permit`): `:allow` or `{:deny, why}`, by the
+  rules Kiro's own permission requests get. `kind` is the tool's kind (read, search,
+  edit, execute), with its `command` or the `paths` it names; `title` is what the
+  chat's log calls it. What the person would be asked first is refused: there's no way
+  to hold pi's tool until they answer. `nonce` as for `current_step/2`.
+  """
+  def permit(pid, nonce, kind, command, paths, title),
+    do: GenServer.call(pid, {:permit, nonce, kind, command, paths, title}, 15_000)
+
+  @doc """
   What the session is answering, for Factory's tools: `%{run_id:, agent:, step:}` (step
   nil for a chat message), or nil between turns. `nonce` as for `current_step/2`.
   """
@@ -185,6 +196,11 @@ defmodule Factory.Kiro.Session do
     # what kiro-cli started (its chat process, its engine), with when, to stop them if it
     # dies on its own (`Factory.OsProcess.kill_known/1`)
     started: [],
+    # the CLI this session runs on, `:kiro` or `:pi` (`Factory.Runtime`)
+    runtime: :kiro,
+    # what pi's adapter says about itself once the session opens (its version, its
+    # extensions), sent as if the agent wrote it: left out of replies
+    banner: nil,
     # whether Kiro has Factory's tools loaded, and the wait for it (`_kiro/mcp/status`)
     mcp_ready: false,
     mcp_timer: nil,
@@ -292,6 +308,9 @@ defmodule Factory.Kiro.Session do
       not File.dir?(workdir) ->
         {:stop, "The workspace folder #{workdir} doesn't exist."}
 
+      Factory.Runtime.current() == :pi ->
+        {:ok, %__MODULE__{key: key, workdir: workdir, runtime: :pi}, {:continue, :spawn}}
+
       not File.exists?(Kiro.config(:cli)) ->
         {:stop, "kiro-cli wasn't found at #{Kiro.config(:cli)}."}
 
@@ -309,7 +328,19 @@ defmodule Factory.Kiro.Session do
 
   # Starts kiro-cli and opens a Kiro session in it (answered in handle_message/2).
   defp open(state) do
-    {port, log} = Kiro.open_port(state.workdir, log_name(state))
+    nonce = Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
+    state = %{state | nonce: nonce}
+    # pi gets Factory's tools from its extension, which also asks before each tool pi
+    # runs (`permit/6`), with the session's own token.
+    [mcp] = mcp_servers(state)
+    token = Factory.RunTools.grant_session(state.key, nonce)
+
+    {port, log} =
+      Kiro.open_port(state.workdir, log_name(state),
+        runtime: state.runtime,
+        mcp: mcp,
+        permit: token
+      )
 
     os_pid =
       case Port.info(port, :os_pid) do
@@ -317,9 +348,8 @@ defmodule Factory.Kiro.Session do
         _ -> nil
       end
 
-    nonce = Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
     params = %{protocolVersion: 1, clientCapabilities: %{}}
-    state = %{state | port: port, os_pid: os_pid, nonce: nonce, log_file: log}
+    state = %{state | port: port, os_pid: os_pid, log_file: log}
     request(state, "initialize", params, :initialize)
   end
 
@@ -401,6 +431,34 @@ defmodule Factory.Kiro.Session do
   end
 
   def handle_call(:token_nonce, _from, state), do: {:reply, state.nonce, state}
+
+  def handle_call(
+        {:permit, nonce, kind, command, paths, title},
+        _from,
+        %{nonce: nonce, turn: %Turn{} = turn} = state
+      ) do
+    call = %{"title" => title}
+
+    case judge(state, Agent.tools(turn.agent), kind, command, paths, false) do
+      {:allow, _} ->
+        {:reply, :allow, state}
+
+      {:outside, outside} ->
+        why = "#{Enum.join(outside, ", ")} is outside the project and its sources"
+        {:reply, {:deny, why}, deny(state, call, why)}
+
+      {{:ask, reason}, _} ->
+        why = "it #{reason} That needs the person's yes, which can't be asked for on pi"
+        {:reply, {:deny, why}, deny(state, call, why)}
+
+      {_reject, _} ->
+        why = "#{turn.agent.name} may not use #{kind} tools here"
+        {:reply, {:deny, why}, deny(state, call)}
+    end
+  end
+
+  def handle_call({:permit, _nonce, _kind, _command, _paths, _title}, _from, state),
+    do: {:reply, {:deny, "no turn is under way in this session"}, state}
 
   # A tool call from an earlier kiro-cli (its token has another nonce) gets nil: one it
   # still had in flight when the session restarted can't act on the turn after.
@@ -525,7 +583,9 @@ defmodule Factory.Kiro.Session do
     Factory.OsProcess.kill_known(state.started)
     reason = Kiro.stop_reason(state.log_file, code)
     # Signed out: every page says so until Kiro works again.
-    if Kiro.signed_out?(reason), do: Factory.Kiro.Catalog.note_failure(reason)
+    if state.runtime == :kiro and Kiro.signed_out?(reason),
+      do: Factory.Kiro.Catalog.note_failure(reason)
+
     fail(%{state | port: nil}, reason)
   end
 
@@ -671,11 +731,13 @@ defmodule Factory.Kiro.Session do
 
       {:new_session, %{"result" => %{"sessionId" => sid} = result}} ->
         # A session opened, so Kiro is signed in again: a check clears the warning.
-        if Factory.Kiro.Catalog.signed_out?(), do: Factory.Kiro.Catalog.check_later()
+        if state.runtime == :kiro and Factory.Kiro.Catalog.signed_out?(),
+          do: Factory.Kiro.Catalog.check_later()
 
         state = %{
           state
           | session_id: sid,
+            banner: get_in(result, ["_meta", "piAcp", "startupInfo"]),
             config: current_values(result["configOptions"]),
             started: Factory.OsProcess.descendants_with_start(state.port)
         }
@@ -683,7 +745,8 @@ defmodule Factory.Kiro.Session do
         # Kiro loads Factory's tools after the session opens and says when: nothing is
         # sent before they're there (a message could reach the model without them), or
         # before a little while has passed.
-        if state.mcp_ready do
+        # pi's extension has them before pi answers at all.
+        if state.mcp_ready or state.runtime == :pi do
           next(%{state | ready: true})
         else
           wait = Process.send_after(self(), {:mcp_wait, sid}, Kiro.config(:mcp_ready_timeout))
@@ -743,48 +806,10 @@ defmodule Factory.Kiro.Session do
 
     kind = Kiro.Permission.kind(params, known)
     turn = state.turn
-    agent = turn && turn.agent
     paths = if turn, do: paths(params, turn), else: []
-
-    # Besides the project folder: Kiro's workspace, the review clones and the agent's
-    # attached sources (`roots/1`), and a troubleshooting run's attached files, which
-    # are there to read, except for an agent that searches the web.
-    roots =
-      if(turn && not Agent.web?(agent), do: [Factory.Evidence.dir(turn.run_id)], else: []) ++
-        roots(state)
-
-    # Files are read, searched and changed in those folders only: a path elsewhere
-    # (`/etc/passwd`, `~/.ssh`, `../..`) is refused whatever the agent may otherwise do.
-    # An agent that only reads and checks asks the person first to read or search there.
-    outside =
-      if kind in @file_kinds and turn != nil,
-        do: Enum.reject(paths, &Kiro.Permission.allowed_path?(&1, state.workdir, roots)),
-        else: []
-
-    asks? = turn != nil and kind in ["read", "search"] and Agent.read_only?(agent)
-
-    # A planner while it plans, and an agent that only reads and checks (a reviewer, a
-    # researcher), may run commands that only look; some of what it does goes to the
-    # person first (`Kiro.Permission.decide/4`).
-    decision =
-      if outside != [] and not asks? do
-        :outside
-      else
-        Kiro.Permission.decide(
-          kind,
-          turn && Kiro.Permission.command(params, commands(turn)),
-          paths,
-          %{
-            allowed: allowed,
-            looks: turn != nil and (turn.planning != nil or Agent.read_only?(agent)),
-            reads_only: turn != nil and Agent.read_only?(agent),
-            web: turn != nil and Agent.web?(agent),
-            mcp: turn != nil and server == Factory.PlanTools.server_name(),
-            folder: state.workdir,
-            roots: roots
-          }
-        )
-      end
+    command = turn && Kiro.Permission.command(params, commands(turn))
+    mcp? = turn != nil and server == Factory.PlanTools.server_name()
+    {decision, outside} = judge(state, allowed, kind, command, paths, mcp?)
 
     case decision do
       {:ask, reason} ->
@@ -873,6 +898,22 @@ defmodule Factory.Kiro.Session do
          %{session_id: current} = state
        )
        when sid != current,
+       do: state
+
+  # pi's adapter's own startup notes, not something the agent said.
+  defp handle_message(
+         %{
+           "method" => "session/update",
+           "params" => %{
+             "update" => %{
+               "sessionUpdate" => "agent_message_chunk",
+               "content" => %{"text" => banner}
+             }
+           }
+         },
+         %{banner: banner} = state
+       )
+       when is_binary(banner),
        do: state
 
   defp handle_message(%{"method" => "session/update", "params" => %{"update" => update}}, state) do
@@ -1016,6 +1057,51 @@ defmodule Factory.Kiro.Session do
 
   # A tool that was refused: the turn notes it (with `why`, when there's more to say
   # than its title), and the chat shows it as denied.
+  # Whether the turn's agent may use a tool of `kind` (with its `command`, or the
+  # `paths` it names): `{decision, outside}`, the decision `:allow`, `:reject`,
+  # `:outside` (with the paths outside the project) or `{:ask, reason}`.
+  defp judge(state, allowed, kind, command, paths, mcp?) do
+    turn = state.turn
+    agent = turn && turn.agent
+
+    # Besides the project folder: Kiro's workspace, the review clones and the agent's
+    # attached sources (`roots/1`), and a troubleshooting run's attached files, which
+    # are there to read, except for an agent that searches the web.
+    roots =
+      if(turn && not Agent.web?(agent), do: [Factory.Evidence.dir(turn.run_id)], else: []) ++
+        roots(state)
+
+    # Files are read, searched and changed in those folders only: a path elsewhere
+    # (`/etc/passwd`, `~/.ssh`, `../..`) is refused whatever the agent may otherwise do.
+    # An agent that only reads and checks asks the person first to read or search there.
+    outside =
+      if kind in @file_kinds and turn != nil,
+        do: Enum.reject(paths, &Kiro.Permission.allowed_path?(&1, state.workdir, roots)),
+        else: []
+
+    asks? = turn != nil and kind in ["read", "search"] and Agent.read_only?(agent)
+
+    # A planner while it plans, and an agent that only reads and checks (a reviewer, a
+    # researcher), may run commands that only look; some of what it does goes to the
+    # person first (`Kiro.Permission.decide/4`).
+    decision =
+      if outside != [] and not asks? do
+        :outside
+      else
+        Kiro.Permission.decide(kind, command, paths, %{
+          allowed: allowed,
+          looks: turn != nil and (turn.planning != nil or Agent.read_only?(agent)),
+          reads_only: turn != nil and Agent.read_only?(agent),
+          web: turn != nil and Agent.web?(agent),
+          mcp: mcp?,
+          folder: state.workdir,
+          roots: roots
+        })
+      end
+
+    {decision, outside}
+  end
+
   defp deny(state, call, why \\ nil) do
     title = (call || %{})["title"] || "a tool"
     noted = if why, do: "#{title}: #{why}", else: title
@@ -1319,11 +1405,15 @@ defmodule Factory.Kiro.Session do
   defp next(state), do: state
 
   defp start_next(%{queue: [job | rest]} = state) do
+    # pi runs on the one model it was started with and has no modes (`Factory.Runtime`).
     wanted =
-      Enum.reject(
-        [{"model", job.model || job.agent.model}, {"mode", job.agent.kiro_mode}],
-        fn {id, value} -> state.config[id] == value end
-      )
+      if state.runtime == :pi,
+        do: [],
+        else:
+          Enum.reject(
+            [{"model", job.model || job.agent.model}, {"mode", job.agent.kiro_mode}],
+            fn {id, value} -> state.config[id] == value end
+          )
 
     switch(%{state | queue: rest, switching: job}, wanted)
   end
@@ -1467,7 +1557,9 @@ defmodule Factory.Kiro.Session do
 
   defp finish_turn(%{turn: turn} = state, error, stop_reason) do
     # A usage limit says so on every page, until a turn is answered again.
+    # (Kiro's own: a turn on pi says nothing about it.)
     cond do
+      state.runtime != :kiro -> :ok
       Kiro.usage_limited?(error) -> Factory.Kiro.Catalog.note_limit(error)
       error == nil -> Factory.Kiro.Catalog.clear_limit()
       true -> :ok

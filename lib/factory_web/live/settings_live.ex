@@ -1,7 +1,9 @@
 defmodule FactoryWeb.SettingsLive do
   @moduledoc """
   What Factory runs with. General shows where Factory keeps things and how it drives
-  Kiro, as configured (read-only: these come from `config/*.exs`). Models lists what
+  Kiro, as configured (read-only: these come from `config/*.exs`). Runtime has the CLI
+  the agents run on (Kiro or pi, `Factory.Runtime`): what's installed, which is in use,
+  and pi's model. Models lists what
   this Kiro offers, checked at startup or on demand. Tokens aren't stored anywhere:
   actions and sources read environment variables (see the README).
   """
@@ -9,6 +11,7 @@ defmodule FactoryWeb.SettingsLive do
 
   @tabs [
     {"general", "General"},
+    {"runtime", "Runtime"},
     {"models", "Models"},
     {"runs", "Runs"},
     {"web", "Web searches"}
@@ -18,7 +21,35 @@ defmodule FactoryWeb.SettingsLive do
 
   # The check's result arrives through FactoryWeb.KiroStatus, as `kiro_checked/2`.
   def mount(_params, _session, socket) do
-    {:ok, socket |> assign(page_title: "Settings", tabs: @tabs, checking: false) |> catalog()}
+    socket =
+      socket
+      |> assign(page_title: "Settings", tabs: @tabs, checking: false, pi_models: nil)
+      |> catalog()
+      |> runtime()
+
+    # pi lists its models itself, which takes a moment: after the page is up.
+    socket =
+      if connected?(socket) and Factory.Runtime.detect().pi,
+        do: start_async(socket, :pi_models, fn -> Factory.Runtime.pi_models() end),
+        else: socket
+
+    {:ok, socket}
+  end
+
+  def handle_async(:pi_models, {:ok, models}, socket),
+    do: {:noreply, assign(socket, pi_models: models)}
+
+  def handle_async(:pi_models, _failed, socket), do: {:noreply, assign(socket, pi_models: [])}
+
+  # The CLI the agents run on (Factory.Runtime): what's installed, and the one in use.
+  defp runtime(socket) do
+    found = Factory.Runtime.detect()
+
+    assign(socket,
+      runtime: Factory.Runtime.current(),
+      found: found,
+      pi_form: to_form(%{"model" => Factory.Runtime.pi_model() || ""}, as: :pi)
+    )
   end
 
   defp catalog(socket) do
@@ -94,6 +125,35 @@ defmodule FactoryWeb.SettingsLive do
     end
   end
 
+  # Kiro or pi, for every agent from now on; the sessions running stop.
+  def handle_event("runtime", %{"name" => name}, socket) when name in ["kiro", "pi"] do
+    runtime = String.to_existing_atom(name)
+
+    case Factory.Runtime.choose(runtime) do
+      :ok ->
+        {:noreply,
+         socket
+         |> runtime()
+         |> catalog()
+         |> put_flash(:info, "Agents now run on #{Factory.Runtime.label(runtime)}.")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, reason)}
+    end
+  end
+
+  # The model pi runs every agent on; "" is pi's own default.
+  def handle_event("pi_model", %{"pi" => %{"model" => model}}, socket) do
+    known = for m <- socket.assigns.pi_models || [], do: m["value"]
+
+    if model == "" or model in known do
+      Factory.Runtime.choose_pi_model(model)
+      {:noreply, runtime(socket)}
+    else
+      {:noreply, put_flash(socket, :error, "pi doesn't list that model.")}
+    end
+  end
+
   # Asks Kiro which models it has; the answer comes back as {:kiro_catalog, _}.
   def handle_event("check_models", _, socket) do
     Catalog.check_later()
@@ -108,6 +168,65 @@ defmodule FactoryWeb.SettingsLive do
   def handle_params(params, _uri, socket) do
     tab = if params["tab"] in Enum.map(@tabs, &elem(&1, 0)), do: params["tab"], else: "general"
     {:noreply, assign(socket, tab: tab)}
+  end
+
+  # pi's own default first, then what pi lists; the one chosen stays listed while pi is
+  # still being asked.
+  defp pi_model_options(models, chosen) do
+    listed = for m <- models || [], do: {m["name"], m["value"]}
+
+    chosen =
+      if chosen in [nil, ""] or List.keymember?(listed, chosen, 1),
+        do: [],
+        else: [{chosen, chosen}]
+
+    [{"pi's own default", ""}] ++ chosen ++ listed
+  end
+
+  attr :id, :string, required: true
+  attr :name, :string, required: true
+  attr :label, :string, required: true
+  attr :current, :boolean, required: true
+  attr :path, :any, required: true, doc: "where it's installed, or nil"
+  attr :missing, :string, required: true
+  attr :hint, :string, required: true
+
+  # A runtime: whether it's installed, and the button that makes it the one in use.
+  defp runtime_row(assigns) do
+    ~H"""
+    <div id={@id} class="flex items-center gap-4 px-3.5 py-3">
+      <span class={[
+        "size-2 shrink-0 rounded-full",
+        cond do
+          @current -> "bg-success"
+          @path -> "bg-base-content/25"
+          true -> "bg-base-content/10"
+        end
+      ]}></span>
+      <span class="min-w-0 flex-1">
+        <span class="block text-sm font-medium">{@label}</span>
+        <span class="block text-xs text-base-content/55">{@hint}</span>
+        <span class={[
+          "mt-0.5 block truncate text-xs",
+          if(@path, do: "font-mono font-light text-base-content/45", else: "text-warning")
+        ]}>
+          {@path || @missing}
+        </span>
+      </span>
+      <span :if={@current} class="shrink-0 px-2 text-[13px] font-medium text-success">In use</span>
+      <button
+        :if={!@current}
+        id={"#{@id}-use"}
+        type="button"
+        phx-click="runtime"
+        phx-value-name={@name}
+        disabled={!@path}
+        class="btn btn-sm shrink-0"
+      >
+        Use {@label}
+      </button>
+    </div>
+    """
   end
 
   # How Factory is set up, as the General tab shows it: {label, value, hint}.
@@ -302,6 +421,71 @@ defmodule FactoryWeb.SettingsLive do
                     </li>
                   </ul>
                 </details>
+              </section>
+            <% "runtime" -> %>
+              <section id="runtime" class="mb-8">
+                <h2 class="font-medium">Runtime</h2>
+                <p class="mt-0.5 text-sm text-base-content/55">
+                  The coding CLI every agent runs on. Factory looks for both each time this page opens.
+                </p>
+                <div class="mt-3 divide-y divide-base-300/70 rounded-xl border border-base-300/70">
+                  <.runtime_row
+                    id="runtime-kiro"
+                    name="kiro"
+                    label="Kiro"
+                    current={@runtime == :kiro}
+                    path={@found.kiro}
+                    missing="kiro-cli wasn't found"
+                    hint="Kiro's models and modes, credits, and a yes or no from you before anything risky."
+                  />
+                  <.runtime_row
+                    id="runtime-pi"
+                    name="pi"
+                    label="pi"
+                    current={@runtime == :pi}
+                    path={@found.pi && @found.pi_acp}
+                    missing={
+                      if @found.pi,
+                        do: "pi is installed, but its ACP adapter isn't: npm install -g pi-acp",
+                        else: "pi wasn't found"
+                    }
+                    hint="One model for every agent, chosen below. No credits are counted, and questions are asked when a turn ends."
+                  />
+                </div>
+
+                <.form
+                  :if={@found.pi && @found.pi_acp}
+                  for={@pi_form}
+                  id="pi-model-form"
+                  phx-change="pi_model"
+                  class="mt-3 flex items-center gap-4 rounded-xl border border-base-300/70 px-3.5 py-3"
+                >
+                  <span class="min-w-0 flex-1">
+                    <span class="block text-sm font-medium">pi's model</span>
+                    <span class="block text-xs text-base-content/55">
+                      {cond do
+                        @pi_models == nil ->
+                          "Asking pi which models it has…"
+
+                        @pi_models == [] ->
+                          "pi didn't list its models; it runs on its own default."
+
+                        true ->
+                          "Every agent on pi runs on this one, whatever its card or the plan says."
+                      end}
+                    </span>
+                  </span>
+                  <.input
+                    field={@pi_form[:model]}
+                    type="select"
+                    id="pi-model"
+                    aria-label="pi's model"
+                    disabled={@pi_models in [nil, []]}
+                    options={pi_model_options(@pi_models, @pi_form[:model].value)}
+                    class="h-8 w-full rounded-md border border-base-300 bg-base-100 px-2 text-[13px] outline-none focus:border-base-content/30 disabled:opacity-60"
+                    wrapper_class="w-64 shrink-0"
+                  />
+                </.form>
               </section>
             <% "runs" -> %>
               <section id="credit-limit">

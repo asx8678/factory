@@ -102,11 +102,28 @@ defmodule FactoryWeb.Layouts do
         </nav>
 
         <div class="flex items-center gap-4 text-sm">
-          <.kiro_signed_out :if={@kiro && @kiro.signed_out} checking={@kiro.checking} />
+          <.kiro_signed_out
+            :if={@kiro && @kiro.signed_out}
+            checking={@kiro.checking}
+            pi={@kiro[:pi] == true}
+          />
           <.kiro_limited
             :if={@kiro && @kiro[:limited] && !@kiro.signed_out}
             checking={@kiro.checking}
+            pi={@kiro[:pi] == true}
           />
+          <.link
+            :if={@kiro && @kiro[:runtime] == :pi}
+            id="runtime-pi"
+            navigate={~p"/settings?tab=runtime"}
+            title="Agents run on pi instead of Kiro. Change it in Settings."
+            class="hidden items-center gap-1.5 rounded-full border border-base-300 px-2.5 py-0.5 text-xs text-base-content/70 transition-colors hover:border-base-content/25 hover:text-base-content md:flex"
+          >
+            <.icon name="hero-cpu-chip-micro" class="size-3.5 text-base-content/45" />
+            <span class="whitespace-nowrap">
+              On pi<span :if={@kiro[:pi_model]} class="hidden lg:inline"> · {@kiro[:pi_model]}</span>
+            </span>
+          </.link>
           <.link
             :if={@active_runs > 0}
             id="active-runs"
@@ -134,6 +151,7 @@ defmodule FactoryWeb.Layouts do
   end
 
   attr :checking, :boolean, default: false
+  attr :pi, :boolean, default: false, doc: "whether pi is installed, to offer instead"
 
   # Agents can't run while Kiro is signed out: said before anything is sent, with how
   # to fix it and a way to check again (FactoryWeb.KiroStatus handles "kiro_check").
@@ -159,11 +177,22 @@ defmodule FactoryWeb.Layouts do
       >
         {if @checking, do: "Checking…", else: "Check again"}
       </button>
+      <button
+        :if={@pi}
+        id="kiro-signed-out-use-pi"
+        type="button"
+        phx-click="use_pi"
+        title="Run the agents on pi instead of Kiro. Change it back in Settings."
+        class="rounded-full border border-base-300 bg-base-100 px-2 py-0.5 font-medium text-base-content/80 transition-colors hover:border-base-content/25 hover:text-base-content"
+      >
+        Use pi
+      </button>
     </div>
     """
   end
 
   attr :checking, :boolean, default: false
+  attr :pi, :boolean, default: false, doc: "whether pi is installed, to offer instead"
 
   # Kiro refused a prompt for its usage limit: nothing gets an answer until it resets.
   # Check again asks Kiro one word (FactoryWeb.KiroStatus handles "kiro_limit_check").
@@ -187,6 +216,16 @@ defmodule FactoryWeb.Layouts do
         class="rounded-full border border-base-300 bg-base-100 px-2 py-0.5 font-medium text-base-content/80 transition-colors hover:border-base-content/25 hover:text-base-content disabled:opacity-60"
       >
         {if @checking, do: "Checking…", else: "Check again"}
+      </button>
+      <button
+        :if={@pi}
+        id="kiro-limited-use-pi"
+        type="button"
+        phx-click="use_pi"
+        title="Run the agents on pi instead of Kiro. Change it back in Settings."
+        class="rounded-full border border-base-300 bg-base-100 px-2 py-0.5 font-medium text-base-content/80 transition-colors hover:border-base-content/25 hover:text-base-content"
+      >
+        Use pi
       </button>
     </div>
     """

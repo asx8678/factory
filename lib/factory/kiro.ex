@@ -10,8 +10,16 @@ defmodule Factory.Kiro do
   @models ~w(auto claude-sonnet-4.5 claude-sonnet-4 claude-haiku-4.5 deepseek-3.2 minimax-m2.5 minimax-m2.1 glm-5 qwen3-coder-next)
   @modes ~w(vibe spec quick-spec bug-fix plan autonomous semantic_reviewer kiro-fabric)
 
-  @doc "The models this Kiro offers (see `Factory.Kiro.Catalog`), else the ones it shipped with."
-  def models, do: values(Factory.Kiro.Catalog.models()) || @models
+  @doc """
+  The models this Kiro offers (see `Factory.Kiro.Catalog`), else the ones it shipped
+  with. On pi there's the one it was started with, which is "auto" here
+  (`Factory.Runtime`): Kiro's models aren't pi's.
+  """
+  def models do
+    if Factory.Runtime.current() == :pi,
+      do: ["auto"],
+      else: values(Factory.Kiro.Catalog.models()) || @models
+  end
 
   @doc """
   The model Factory plans with: the one chosen in Settings, else the strongest this
@@ -118,11 +126,12 @@ defmodule Factory.Kiro do
 
   # Every session running: the registry's entries under a session key (`session_key/1`),
   # not the tuple keys other modules lock with (`Factory.Engine`, `FactoryWeb.Mcp`).
-  defp sessions do
+  defp sessions, do: Enum.map(session_keys(), fn {_key, pid} -> pid end)
+
+  defp session_keys do
     Factory.Kiro.Registry
     |> Registry.select([{{:"$1", :"$2", :_}, [], [{{:"$1", :"$2"}}]}])
     |> Enum.reject(fn {key, _pid} -> is_tuple(key) end)
-    |> Enum.map(fn {_key, pid} -> pid end)
   end
 
   @doc """
@@ -227,7 +236,7 @@ defmodule Factory.Kiro do
       not File.dir?(dir) ->
         {:error, "The workspace folder #{dir} doesn't exist."}
 
-      not File.exists?(config(:cli)) ->
+      Factory.Runtime.current() == :kiro and not File.exists?(config(:cli)) ->
         {:error, "kiro-cli wasn't found at #{config(:cli)}."}
 
       true ->
@@ -270,6 +279,12 @@ defmodule Factory.Kiro do
   @doc "Stops a session (`:shared` or an agent id). The next message starts a fresh one."
   def stop(key) do
     locked(key, fn -> stop_session(key) end)
+  end
+
+  @doc "Stops every session, e.g. when the runtime changes (`Factory.Runtime`)."
+  def stop_all do
+    for {key, _pid} <- session_keys(), do: stop(key)
+    :ok
   end
 
   defp stop_session(key) do
@@ -382,14 +397,16 @@ defmodule Factory.Kiro do
   end
 
   @doc """
-  Starts `kiro-cli acp --agent-engine v3` in `workdir`, with its stderr going to a
+  Starts the CLI in use (`Factory.Runtime`: `kiro-cli acp --agent-engine v3`, or pi's
+  ACP adapter; `opts` are `Factory.Runtime.command/2`'s, and `:runtime` to name one)
+  in `workdir`, with its stderr going to a
   fresh log in the log folder: `log_name` with the start time before its extension
   (`agent-7.log` → `agent-7-20260930-141500.log`). Older logs of the same name beyond
   `config :factory, :kiro, log_keep` (default 5) are removed (`prune_logs/2`).
   `{port, log}`, with the log's name for `stop_reason/2`. Messages arrive as
   `{port, {:data, {:eol | :noeol, text}}}`.
   """
-  def open_port(workdir, log_name) do
+  def open_port(workdir, log_name, opts \\ []) do
     # The logs hold what Kiro was sent, prompts and request headers among it: the
     # folder (tmp/, ignored by git) must stay out of version control, and each start
     # gets its own file (truncated, not appended to) so it can't grow without bound.
@@ -400,10 +417,11 @@ defmodule Factory.Kiro do
     # Room for the one about to be written.
     prune_logs(base, max(log_keep() - 1, 0))
 
-    # v3 rejects --model; the model and mode are set on the session, per turn.
-    args = ["acp", "--agent-engine", "v3", "--auth-method", "cli"]
+    # The CLI in use, unless the caller names one (the Kiro catalog is always Kiro's).
+    runtime = opts[:runtime] || Factory.Runtime.current()
+    {cli, args, env} = Factory.Runtime.command(runtime, opts)
 
-    # sh only redirects stderr to the log; exec replaces it with kiro-cli.
+    # sh only redirects stderr to the log; exec replaces it with the CLI.
     port =
       Port.open({:spawn_executable, "/bin/sh"}, [
         :binary,
@@ -414,8 +432,8 @@ defmodule Factory.Kiro do
          [
            {~c"KIRO_FABRIC_LAUNCH_WORKSPACE", ~c"#{workdir}"},
            {~c"KIRO_LOG", ~c"#{log}"}
-         ] ++ ceiling(workdir)},
-        {:args, ["-c", ~s(exec "$0" "$@" 2>"$KIRO_LOG"), config(:cli) | args]}
+         ] ++ ceiling(workdir) ++ for({name, value} <- env, do: {~c"#{name}", ~c"#{value}"})},
+        {:args, ["-c", ~s(exec "$0" "$@" 2>"$KIRO_LOG"), cli | args]}
       ])
 
     {port, Path.basename(log)}

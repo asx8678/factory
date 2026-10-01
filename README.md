@@ -13,6 +13,9 @@ push, open a pull request, update a ticket, or send a message.
 * Node.js, for the Svelte Flow canvas (`mix assets.setup` runs `npm install`)
 * `kiro-cli` 2.24 or later, signed in (`kiro-cli login`). Factory looks for it on your
   `PATH`, else at `~/.local/bin/kiro-cli`; see `config :factory, :kiro` in `config/config.exs`.
+* Optionally [pi](https://github.com/earendil-works/pi) with its ACP adapter
+  (`npm install -g pi-acp`), to run the agents on when Kiro can't be used: see
+  [Kiro or pi](#kiro-or-pi).
 * `git`, to clone the repositories you review and read what there is to review in a
   project folder. GitHub's `gh`, signed in, is optional: with it the chat lists a
   repository's open pull requests.
@@ -69,6 +72,29 @@ A run pauses once it has used 10 credits and asks whether to go on (Continue let
 as many again); the header shows what it has used against that. Change the limit, or
 turn it off with 0, under Settings → Runs. If Kiro refuses for its monthly usage limit,
 every page says so until it answers again.
+
+## Kiro or pi
+
+Agents run on Kiro unless you choose pi under Settings → Runtime, which shows what's
+installed (`kiro-cli`, and `pi` with `pi-acp`). When Kiro is signed out or at its usage
+limit and pi is installed, the warning in the header has a **Use pi** button; the
+header then says it's on pi. Changing the runtime stops the sessions running, and the
+next message starts on the new one.
+
+pi is driven the same way as Kiro, through its ACP adapter, with Factory's own
+extension (`priv/pi/factory.ts`) loaded instead of yours, plus the one that brings the
+chosen model's provider. What differs on pi:
+
+* **One model.** Every agent runs on the model chosen in Settings (pi's own default
+  unless you pick one); models on agents' cards and in plans are Kiro's and aren't used.
+* **Tools are checked, not asked about.** pi never asks before it uses a tool, so the
+  extension asks Factory before each one, by the same rules as on Kiro: an agent that
+  only reads can't edit or run commands that change things, and nothing is read
+  outside the project and its sources. What Kiro would ask you first (a web page, a
+  file outside the project, a pull request's own code) is refused.
+* **Questions come when the turn ends**, not during it.
+* **No credits.** pi doesn't report them, so usage shows the calls and their time, and
+  a run's credit limit never stops it.
 
 ## Review a pull request
 
