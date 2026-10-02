@@ -130,6 +130,9 @@ defmodule FactoryWeb.SpecLive do
          Spec.approved?(spec, step) or (step == "tasks" and socket.assigns.task_list != []),
        saved: false,
        undo: nil,
+       conflict: false,
+       # The step's text as this page last loaded or saved it (`write/2`).
+       known: text(spec, step),
        suggest: Map.has_key?(params, "suggest") and step == "tasks" and Spec.open?(spec, step)
      )
      |> put_spec(spec)}
@@ -150,8 +153,11 @@ defmodule FactoryWeb.SpecLive do
     end
   end
 
-  def handle_event("edit", %{"text" => text}, socket),
-    do: {:noreply, socket |> write(text) |> assign(undo: nil)}
+  def handle_event("edit", %{"text" => text}, socket) do
+    socket = write(socket, text)
+    # A save keeps no Undo; one refused as written over keeps the typed text there.
+    {:noreply, if(socket.assigns.conflict, do: socket, else: assign(socket, undo: nil))}
+  end
 
   # The upload form only exists to hold the file input; the file arrives in handle_progress.
   def handle_event("upload_changed", _, socket), do: {:noreply, socket}
@@ -560,6 +566,7 @@ defmodule FactoryWeb.SpecLive do
       {:ok, spec} -> {:noreply, put_spec(socket, spec)}
       {:error, :empty} -> {:noreply, put_flash(socket, :error, "Write something first.")}
       {:error, :running} -> {:noreply, socket}
+      {:error, _} -> {:noreply, put_flash(socket, :error, "This spec is gone.")}
     end
   end
 
@@ -768,23 +775,63 @@ defmodule FactoryWeb.SpecLive do
   defp write(socket, text) do
     %{spec: spec, step: step} = socket.assigns
 
-    if Spec.open?(spec, step) and not Spec.approved?(spec, step) do
-      case Specs.update_spec(spec, %{step => text}) do
-        {:ok, spec} ->
-          socket |> put_spec(spec) |> assign(saved: true)
+    # As it is now: the planner, a review or another tab may have changed it since.
+    current = Specs.get_spec(spec.id) || spec
+    now = text(current, step)
 
-        {:error, %Ecto.Changeset{}} ->
-          socket
+    cond do
+      not Spec.open?(spec, step) or Spec.approved?(spec, step) ->
+        socket
 
-        # The text is saved; a draft run couldn't follow it.
-        {:error, reason} ->
-          socket
-          |> put_spec(Specs.get_spec(spec.id))
-          |> assign(saved: true)
-          |> put_flash(:error, "Saved, but a run couldn't follow the change: #{why(reason)}")
-      end
-    else
-      socket
+      now != socket.assigns.known and text != now ->
+        changed_meanwhile(socket, current, text)
+
+      true ->
+        save(socket, spec, step, text)
+    end
+  end
+
+  # The step changed since this page last loaded or saved it, and what was typed began
+  # from the old text: written over, the change (tasks the planner added) would be
+  # lost unseen. The page shows the step as it is now, and keeps the typed text to put
+  # back with a click (`undo`), which then saves it over the change knowingly.
+  defp changed_meanwhile(socket, current, typed) do
+    step = socket.assigns.step
+    now = text(current, step)
+
+    socket
+    |> put_spec(current)
+    |> assign(
+      known: now,
+      saved: false,
+      conflict: true,
+      undo: %{
+        step: step,
+        text: typed,
+        name: "your edit",
+        note: "This changed while you were writing, so your edit wasn't saved over it.",
+        action: "Use mine"
+      }
+    )
+    |> push_event("set_text", %{id: "spec-#{step}", text: now})
+  end
+
+  defp save(socket, spec, step, text) do
+    socket = assign(socket, conflict: false, known: text)
+
+    case Specs.update_spec(spec, %{step => text}) do
+      {:ok, spec} ->
+        socket |> put_spec(spec) |> assign(saved: true)
+
+      {:error, %Ecto.Changeset{}} ->
+        socket
+
+      # The text is saved; a draft run couldn't follow it.
+      {:error, reason} ->
+        socket
+        |> put_spec(Specs.get_spec(spec.id))
+        |> assign(saved: true)
+        |> put_flash(:error, "Saved, but a run couldn't follow the change: #{why(reason)}")
     end
   end
 
@@ -807,8 +854,18 @@ defmodule FactoryWeb.SpecLive do
       )
 
     case socket.assigns[:step] do
-      nil -> socket
-      step -> put_step(socket, spec, step)
+      nil ->
+        socket
+
+      step ->
+        # While the text isn't open to write in, whatever it becomes is what a later
+        # edit starts from (`write/2`).
+        socket =
+          if Map.get(socket.assigns, :preview, true),
+            do: assign(socket, known: text(spec, step)),
+            else: socket
+
+        put_step(socket, spec, step)
     end
   end
 

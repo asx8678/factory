@@ -37,7 +37,16 @@ defmodule Factory.Kiro.RPC do
   so far: `{:partial, buffer}` while the line goes on, `{:message, msg}` once it's a
   complete JSON object, or `:invalid` for a complete line that isn't one (kiro-cli's own
   output on stdout). After a complete line the buffer starts empty again.
+
+  A line longer than 64 MB is `:invalid` as soon as it's past that: a CLI writing without
+  a line break can't fill the memory of whoever reads it. The rest of it then reads as
+  another line that isn't JSON.
   """
+  @max_line 64 * 1024 * 1024
+
+  def read(buffer, {:noeol, part}) when byte_size(buffer) + byte_size(part) > @max_line,
+    do: :invalid
+
   def read(buffer, {:noeol, part}), do: {:partial, buffer <> part}
 
   def read(buffer, {:eol, part}) do

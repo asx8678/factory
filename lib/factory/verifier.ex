@@ -40,6 +40,10 @@ defmodule Factory.Verifier do
            Kiro.ask(prompt(block, summary),
              workdir: dir,
              model: model,
+             # Commands as well as reading: a check may be a quick script, which "look"
+             # (`Kiro.Permission.looking?/2`) wouldn't allow. It runs where the agent
+             # that built the task already ran commands; files outside are refused
+             # (`Kiro.Ask`).
              allow: ["read", "search", "execute"],
              reply: :last,
              on_tool: Keyword.get(opts, :on_tool),

@@ -62,6 +62,42 @@ defmodule Factory.Redact do
 
     text
     |> paths_out(Keyword.get(opts, :paths, []))
+    |> secrets()
+    |> sub(~r/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/, "[email]")
+    |> users_given()
+    |> sub(
+      ~r{(?<![\w.:/~-])(?:/Users|/home)/[^/\s]+(?:/[^\s"'`<>()\[\]]*)?|[A-Za-z]:\\Users\\[^\s"'`<>]+},
+      "[path]"
+    )
+    |> sub(~r/(dev\.azure\.com\/)[^\s\/?#]+/i, "\\1[org]")
+    |> sub(tenant_hosts(), "[name].\\1")
+    |> sub(internal_hosts(), "[host]")
+    |> sub(~r/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i, "[id]")
+    |> sub(
+      ~r/(?<![\d.])(?!(?:127\.0\.0\.1|0\.0\.0\.0)(?![\d.]))(?:\d{1,3}\.){3}\d{1,3}(?![\d.])/,
+      "[ip]"
+    )
+    |> sub(~r/\b(?:[0-9a-f]{1,4}:){4,7}[0-9a-f]{1,4}\b/i, "[ip]")
+    # Shortened with `::` (`fd00::1`), hex on both sides, so `std::io` stays.
+    |> sub(
+      ~r/(?<![\w:])[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6}::[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6}(?![\w:])/i,
+      "[ip]"
+    )
+    |> sub(~r/\b[0-9a-f]{24,}\b/i, "[id]")
+    |> words_out(users, "[user]")
+    |> words_out(names, "[name]")
+  end
+
+  @doc """
+  The text with only its secrets taken out: keys, tokens, passwords, cookies, and a
+  user and password in an address. What identifies people and systems (paths, hosts,
+  IDs, commit hashes) stays: for text that leaves Factory on purpose, such as a pull
+  request's description (`Factory.Actions`), where those are the point.
+  """
+  def secrets(nil), do: nil
+
+  def secrets(text) when is_binary(text) do
+    text
     |> sub(~r/-----BEGIN [A-Z ]+-----.*?-----END [A-Z ]+-----/s, "[key]")
     |> sub(~r/\beyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}/, "[token]")
     # Keys and tokens known by how they start: AWS, GitHub, GitLab, Slack, OpenAI,
@@ -89,29 +125,6 @@ defmodule Factory.Redact do
     # A user and password in an address (`postgres://app:s3cret@db`), before the address
     # is taken for an email's.
     |> sub(~r{(\b[a-z][a-z0-9+.-]*://)[^/\s:@]*:[^@\s/]+@}i, "\\1[user]:[secret]@")
-    |> sub(~r/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/, "[email]")
-    |> users_given()
-    |> sub(
-      ~r{(?<![\w.:/~-])(?:/Users|/home)/[^/\s]+(?:/[^\s"'`<>()\[\]]*)?|[A-Za-z]:\\Users\\[^\s"'`<>]+},
-      "[path]"
-    )
-    |> sub(~r/(dev\.azure\.com\/)[^\s\/?#]+/i, "\\1[org]")
-    |> sub(tenant_hosts(), "[name].\\1")
-    |> sub(internal_hosts(), "[host]")
-    |> sub(~r/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i, "[id]")
-    |> sub(
-      ~r/(?<![\d.])(?!(?:127\.0\.0\.1|0\.0\.0\.0)(?![\d.]))(?:\d{1,3}\.){3}\d{1,3}(?![\d.])/,
-      "[ip]"
-    )
-    |> sub(~r/\b(?:[0-9a-f]{1,4}:){4,7}[0-9a-f]{1,4}\b/i, "[ip]")
-    # Shortened with `::` (`fd00::1`), hex on both sides, so `std::io` stays.
-    |> sub(
-      ~r/(?<![\w:])[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6}::[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6}(?![\w:])/i,
-      "[ip]"
-    )
-    |> sub(~r/\b[0-9a-f]{24,}\b/i, "[id]")
-    |> words_out(users, "[user]")
-    |> words_out(names, "[name]")
   end
 
   @doc """

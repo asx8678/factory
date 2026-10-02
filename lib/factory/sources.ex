@@ -272,7 +272,8 @@ defmodule Factory.Sources do
   end
 
   defp sources_dir do
-    Application.get_env(:factory, :sources_dir) || Path.expand("tmp/sources")
+    Application.get_env(:factory, :sources_dir) ||
+      Path.expand("../../tmp/sources", __DIR__)
   end
 
   @doc "The URL a repository source is cloned from."
@@ -479,9 +480,21 @@ defmodule Factory.Sources do
         "The repository or branch wasn't found. Check the names."
 
       true ->
-        String.slice(out, -600, 600)
+        out |> String.slice(-600, 600) |> without_credentials()
     end
   end
+
+  # An address as an agent or the page may see it: without a user and password in it
+  # (`https://me:ghp_…@host/repo`), which would otherwise go into prompts and errors.
+  defp shown_url(url) do
+    case URI.parse(url) do
+      %URI{userinfo: info} = uri when is_binary(info) -> URI.to_string(%{uri | userinfo: nil})
+      _ -> url
+    end
+  end
+
+  defp without_credentials(text),
+    do: Regex.replace(~r{(\w+://)[^/\s@]+@}, text, "\\1")
 
   # Context for Kiro
 
@@ -531,7 +544,7 @@ defmodule Factory.Sources do
     if s.synced_at do
       where =
         if kind == "git",
-          do: remote_url(s),
+          do: shown_url(remote_url(s)),
           else: "Azure DevOps #{s.config["org"]}/#{s.config["project"]}/#{s.config["repo"]}"
 
       branch = if b = Factory.Text.presence(s.config["branch"]), do: ", branch #{b}", else: ""

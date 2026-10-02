@@ -171,7 +171,8 @@ defmodule Factory.Kiro.Ask do
       credits: 0.0,
       prompted: method == "session/prompt",
       kinds: %{},
-      commands: %{}
+      commands: %{},
+      paths: %{}
     }
 
     await(conn, id, "", acc)
@@ -256,24 +257,37 @@ defmodule Factory.Kiro.Ask do
     # Kiro names the MCP server a tool comes from; its request has no kind then.
     server = get_in(p, ["_meta", "kiro", "mcpTool", "identity", "serverName"])
 
+    # The files it names: on the request, or (Kiro 2.26) on the tool call before it.
+    kind = Kiro.Permission.kind(p, acc.kinds)
+    paths = Kiro.Permission.paths(p, acc.paths)
+
+    # A file outside the folder (and its roots) is refused whatever the question may
+    # do, as in a session (`Factory.Kiro.Session`).
+    outside? =
+      kind in ~w(read search edit delete move) and
+        Enum.any?(paths, &(not Kiro.Permission.allowed_path?(&1, conn.workdir, conn.roots)))
+
     # What a chat would ask the person about first (`Kiro.Permission.decide/4`) is a no
     # here, with nobody to ask: a web page, a pull request's own code, a file outside the
     # folder.
     decision =
-      Kiro.Permission.decide(
-        Kiro.Permission.kind(p, acc.kinds),
-        Kiro.Permission.command(p, acc.commands),
-        Kiro.Permission.paths_of(p["toolCall"]),
-        %{
-          allowed: conn.allow,
-          looks: "look" in conn.allow,
-          reads_only: "execute" not in conn.allow,
-          web: false,
-          mcp: server != nil and server in conn.mcp,
-          folder: conn.workdir,
-          roots: conn.roots
-        }
-      )
+      if outside?,
+        do: :reject,
+        else:
+          Kiro.Permission.decide(
+            kind,
+            Kiro.Permission.command(p, acc.commands),
+            paths,
+            %{
+              allowed: conn.allow,
+              looks: "look" in conn.allow,
+              reads_only: "execute" not in conn.allow,
+              web: false,
+              mcp: server != nil and server in conn.mcp,
+              folder: conn.workdir,
+              roots: conn.roots
+            }
+          )
 
     wanted = if decision == :allow, do: "allow", else: "reject"
 
@@ -376,7 +390,14 @@ defmodule Factory.Kiro.Ask do
           acc.commands
       end
 
-    {:cont, %{acc | last: "", tooled: true, kinds: kinds, commands: commands}}
+    # And the files it names, which the request may leave out.
+    paths =
+      case {update["toolCallId"], Kiro.Permission.paths_of(update)} do
+        {id, [_ | _] = named} when is_binary(id) -> Map.put(acc.paths, id, named)
+        _ -> acc.paths
+      end
+
+    {:cont, %{acc | last: "", tooled: true, kinds: kinds, commands: commands, paths: paths}}
   end
 
   defp handle(conn, %{"method" => "_kiro/mcp/status", "params" => params}, _id, acc),

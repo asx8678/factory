@@ -818,7 +818,9 @@ defmodule Factory.Engine do
 
   defp do_step(run, _steps, %{kind: "action", agent: card} = step) do
     set_activity(card, "running", "Running for “#{run.title}”")
-    ctx = Actions.context(run) |> Map.put("summary", summary(run, step))
+    # What the agents wrote goes out (a pull request, a message): without any secret
+    # one of them read and repeated.
+    ctx = Actions.context(run) |> Map.put("summary", Factory.Redact.secrets(summary(run, step)))
 
     result =
       case Actions.missing(card) do

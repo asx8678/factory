@@ -46,6 +46,9 @@ config :factory, :kiro,
   # How long a new session waits for Factory's tools to load before its first message.
   mcp_ready_timeout: :timer.seconds(10)
 
+# Where repository sources are cloned: in Factory's own tmp/, wherever it's started from.
+config :factory, :sources_dir, Path.expand("../tmp/sources", __DIR__)
+
 # Deterministic context management (Factory.Context). A Kiro session compacts before its
 # next message once its context is this full (Kiro's own summarizer starts at 80%); the
 # latest messages stay word for word within keep_recent_tokens. A run step's prompt is

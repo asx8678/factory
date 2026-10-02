@@ -332,6 +332,8 @@ defmodule Factory.PlanTools do
 
   defp suggest(_spec_id, _ref, name, _args), do: {:error, "There's no tool #{name}."}
 
+  @replaced "This plan was replaced by a newer request or the run has started. Stop and end your turn."
+
   defp call_plan(token, name, args) do
     with {:ok, grant} <- verify(token),
          true <- Enum.any?(@tools, &(&1.name == name)) || {:error, "There's no tool #{name}."} do
@@ -340,8 +342,7 @@ defmodule Factory.PlanTools do
           if run.status == "draft" and run.planner_generation == grant.generation do
             refusal(grant, name) || apply_tool(name, args, run)
           else
-            {:error,
-             "This plan was replaced by a newer request or the run has started. Stop and end your turn."}
+            {:error, @replaced}
           end
         end)
 
@@ -393,23 +394,10 @@ defmodule Factory.PlanTools do
 
     check =
       Runs.with_locked_run(run_id, fn run ->
-        planner = Factory.Chat.planner_for(run)
-
-        cond do
-          run.status == "cancelled" ->
-            {:error, "This run was cancelled. End your turn."}
-
-          planner == nil or planner.id != agent.id ->
-            {:error, "Only the run's planner asks about its plan."}
-
-          planning != nil and
-              (run.status != "draft" or run.planner_generation != planning.generation) ->
-            {:error,
-             "This plan was replaced by a newer request or the run has started. Stop and end your turn."}
-
-          true ->
-            {:ok, :asking}
-        end
+        turn_refusal(run, agent, planning, fn _ ->
+          "Only the run's planner asks about its plan."
+        end) ||
+          {:ok, :asking}
       end)
 
     case {questions, check} do
@@ -424,26 +412,15 @@ defmodule Factory.PlanTools do
     with true <- Enum.any?(@tools, &(&1.name == name)) || {:error, "There's no tool #{name}."} do
       result =
         Runs.with_locked_run(run_id, fn run ->
-          planner = Factory.Chat.planner_for(run)
+          not_planner =
+            &"Only #{(&1 && &1.name) || "the workflow's planner"} changes this run's plan."
 
           cond do
-            run.status == "cancelled" ->
-              {:error, "This run was cancelled. End your turn."}
-
-            planner == nil or planner.id != agent.id ->
-              {:error,
-               "Only #{(planner && planner.name) || "the workflow's planner"} changes this run's plan."}
-
-            planning != nil and
-                (run.status != "draft" or run.planner_generation != planning.generation) ->
-              {:error,
-               "This plan was replaced by a newer request or the run has started. Stop and end your turn."}
+            refusal = turn_refusal(run, agent, planning, not_planner) ->
+              refusal
 
             planning != nil ->
               apply_tool(name, args, run)
-
-            name == "ask_user" ->
-              {:ok, {:read, "Ask them in your reply; the person answers in the chat."}}
 
             name == "create_plan" and run.status != "draft" ->
               {:error,
@@ -476,6 +453,28 @@ defmodule Factory.PlanTools do
 
   def call_in_turn(_run_id, _agent, _name, _args, _planning),
     do: {:error, "The arguments must be an object."}
+
+  # Why a planner's call in a turn can't go on, or nil: the run was cancelled, the agent
+  # isn't the run's planner (`not_planner` says so, given the planner), or, while it
+  # plans, the plan moved on.
+  defp turn_refusal(run, agent, planning, not_planner) do
+    planner = Factory.Chat.planner_for(run)
+
+    cond do
+      run.status == "cancelled" ->
+        {:error, "This run was cancelled. End your turn."}
+
+      planner == nil or planner.id != agent.id ->
+        {:error, not_planner.(planner)}
+
+      planning != nil and
+          (run.status != "draft" or run.planner_generation != planning.generation) ->
+        {:error, @replaced}
+
+      true ->
+        nil
+    end
+  end
 
   # The questions as an MCP elicitation form: one field each, a choice when it has options.
   defp elicitation(questions) do
@@ -617,8 +616,12 @@ defmodule Factory.PlanTools do
   # While the run is planned, tasks approved on the Spec page are closed to the planner
   # as they are to the chat's own edits (`Factory.Specs.edit_plan_task/4`). Once the run
   # has started, its plan grows as before (`call_in_turn/5`).
+  # The spec read again under its row lock: the run's lock (held here) doesn't keep out
+  # the Spec page or another run's planner, which may edit the same spec.
   defp apply_tool(name, args, run) when name in @writing_tools do
     with_spec(run, fn spec ->
+      spec = Specs.get_spec_for_update(spec.id) || spec
+
       if run.status == "draft" and SpecDoc.approved?(spec, "tasks"),
         do:
           {:error,

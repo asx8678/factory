@@ -66,8 +66,12 @@ defmodule Factory.Runs do
     )
   end
 
-  @doc "Runs with their usage totals, fetched together rather than once per run."
-  def list_runs_with_usage do
+  @doc """
+  Runs with their usage totals, fetched together rather than once per run: the
+  `limit` most recently changed (500), as the runs page reloads them while any run
+  works.
+  """
+  def list_runs_with_usage(limit \\ 500) do
     totals =
       from e in Factory.Usage.Event,
         group_by: e.run_id,
@@ -88,6 +92,7 @@ defmodule Factory.Runs do
         left_join: t in subquery(totals),
         on: t.run_id == r.id,
         order_by: [desc: r.updated_at, desc: r.id],
+        limit: ^limit,
         preload: [tasks: ^tasks, spec_doc: ^spec],
         select:
           {struct(r, [:id, :kind, :title, :status, :spec_id, :inserted_at, :updated_at]),
@@ -312,6 +317,25 @@ defmodule Factory.Runs do
 
   def list_messages(run_id) do
     Repo.all(from m in Message, where: m.run_id == ^run_id, order_by: m.id)
+  end
+
+  @doc """
+  Some of a run's messages, without loading them all: `:role` and `:author` pick them,
+  `:newest_first` turns the order round, and `:limit` takes at most that many.
+  """
+  def list_messages(run_id, opts) do
+    query = from m in Message, where: m.run_id == ^run_id
+
+    query =
+      Enum.reduce(opts, query, fn
+        {:role, role}, q -> where(q, [m], m.role == ^role)
+        {:author, author}, q -> where(q, [m], m.author == ^author)
+        {:limit, n}, q -> limit(q, ^n)
+        _, q -> q
+      end)
+
+    order = if opts[:newest_first], do: [desc: :id], else: [asc: :id]
+    Repo.all(order_by(query, ^order))
   end
 
   @doc """

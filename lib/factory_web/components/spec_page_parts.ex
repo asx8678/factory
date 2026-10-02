@@ -495,13 +495,13 @@ defmodule FactoryWeb.SpecPageParts do
           Saved
         </span>
         <span :if={@undo} class="text-xs text-base-content/55">
-          Filled from {@undo.name}.
+          {@undo[:note] || "Filled from #{@undo.name}."}
           <button
             id="undo-upload"
             phx-click="undo"
             class="underline underline-offset-2 hover:text-base-content"
           >
-            Undo
+            {@undo[:action] || "Undo"}
           </button>
         </span>
 

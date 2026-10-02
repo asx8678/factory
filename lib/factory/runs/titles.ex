@@ -55,7 +55,8 @@ defmodule Factory.Runs.Titles do
 
   defp about(%Run{kind: nil} = run) do
     run.id
-    |> Runs.list_messages()
+    # The person's first messages; a few more than needed, for those left out below.
+    |> Runs.list_messages(role: "user", limit: @chat_messages * 4)
     # What the person wrote: not commands, nor review requests that earlier versions posted.
     |> Enum.filter(
       &(&1.role == "user" and not String.starts_with?(&1.body, "/") and

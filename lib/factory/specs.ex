@@ -74,6 +74,13 @@ defmodule Factory.Specs do
   def get_spec(id), do: SpecDoc |> Repo.get(id) |> preload()
 
   @doc """
+  The spec as it is now, its row locked until the transaction ends: for an edit that
+  reads the spec, then writes it whole (the planner's tools), so another edit can't
+  land between the two and be lost. Inside a transaction only.
+  """
+  def get_spec_for_update(id), do: id |> lock_spec() |> preload()
+
+  @doc """
   A run's own spec: its plan (overview, requirements, design, tasks). Everything that
   plans a run writes here, whether in the chat or on the Spec page. Until the run
   starts, its tasks and the text its agents read follow the spec (`update_spec/2`).
@@ -321,35 +328,46 @@ defmodule Factory.Specs do
       files == [] ->
         {:error, :empty}
 
-      spec.review["status"] == "running" ->
-        {:error, :running}
-
       true ->
-        {:ok, spec} = set_review(spec, %{"status" => "running"})
-        model = Factory.Kiro.planning_model()
-
-        Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
-          review =
-            Factory.Background.guard("Reviewing spec #{spec.id}", fn ->
-              with {:ok, reply} <-
-                     Factory.Kiro.ask(Review.prompt(files),
-                       model: model,
-                       usage: %{source: "review", spec_id: spec.id}
-                     ),
-                   {:ok, review} <- Review.parse(reply) do
-                Map.merge(review, %{"status" => "done", "hash" => hash(spec)})
-              end
-            end)
-            |> case do
-              {:error, reason} -> %{"status" => "error", "error" => reason}
-              review -> review
+        # Marked running under the spec's lock: two clicks at once (two tabs) start one
+        # review, not two.
+        start =
+          Runs.transact(fn ->
+            case lock_spec(spec.id) do
+              nil -> {:error, :not_found}
+              %{review: %{"status" => "running"}} -> {:error, :running}
+              locked -> set_review(locked, %{"status" => "running"})
             end
+          end)
 
-          if spec = get_spec(spec.id), do: set_review(spec, review)
-        end)
-
-        {:ok, spec}
+        with {:ok, spec} <- start, do: start_review(spec, files)
     end
+  end
+
+  defp start_review(spec, files) do
+    model = Factory.Kiro.planning_model()
+
+    Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
+      review =
+        Factory.Background.guard("Reviewing spec #{spec.id}", fn ->
+          with {:ok, reply} <-
+                 Factory.Kiro.ask(Review.prompt(files),
+                   model: model,
+                   usage: %{source: "review", spec_id: spec.id}
+                 ),
+               {:ok, review} <- Review.parse(reply) do
+            Map.merge(review, %{"status" => "done", "hash" => hash(spec)})
+          end
+        end)
+        |> case do
+          {:error, reason} -> %{"status" => "error", "error" => reason}
+          review -> review
+        end
+
+      if spec = get_spec(spec.id), do: set_review(spec, review)
+    end)
+
+    {:ok, spec}
   end
 
   @doc """

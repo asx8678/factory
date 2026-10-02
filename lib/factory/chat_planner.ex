@@ -71,6 +71,31 @@ defmodule Factory.ChatPlanner do
     end
   end
 
+  # What the planner is given of the person's messages: the latest whole (up to a size
+  # each), earlier ones cut short, as a long chat (pasted logs, many answers) would
+  # otherwise grow every replan's prompt past what the model can take.
+  @recent_requests 8
+  @recent_bytes 48_000
+  @older_bytes 2_000
+  @file_bytes 96_000
+
+  defp bounded_requests(requests) do
+    older = max(length(requests) - @recent_requests, 0)
+
+    requests
+    |> Enum.with_index()
+    |> Enum.map(fn {text, i} ->
+      max = if i < older, do: @older_bytes, else: @recent_bytes
+      Factory.Context.Bounds.clip(text, max, " … [cut short]")
+    end)
+  end
+
+  defp bounded_files(files),
+    do:
+      Enum.map(files, fn {name, text} ->
+        {name, Factory.Context.Bounds.clip(text, @file_bytes, "\n… [the rest is left out]")}
+      end)
+
   # Under the run's lock: the run's spec (made now if it has none), the prompt, and
   # the run with what was asked so far as its description.
   defp prepare(run, planner, mode, findings) do
@@ -119,8 +144,8 @@ defmodule Factory.ChatPlanner do
 
         prompt_args = [
           planner.name,
-          requests,
-          base ++ files,
+          bounded_requests(requests),
+          bounded_files(base ++ files),
           current,
           action,
           job,

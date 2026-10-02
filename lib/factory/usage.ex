@@ -272,8 +272,10 @@ defmodule Factory.Usage do
         :other -> where(query, [e], is_nil(e.run_id) and is_nil(e.spec_id))
       end
 
+    # The latest 1000: a run's whole history can run to many thousands.
     query
     |> order_by(desc: :inserted_at, desc: :id)
+    |> limit(1000)
     |> with_local_time()
     |> preload(:agent)
     |> Repo.all()

@@ -158,7 +158,8 @@ defmodule Factory.Context do
   equal share of what remains, so short parts stay whole and only the big ones are
   shortened. Returns
   `%{text:, parts:, bytes:, tokens:, sha256:, omitted_bytes:}`, where `parts` are the
-  fitted parts in order (`text` is them joined).
+  fitted parts in order (`text` is them joined). The limit holds whatever the parts:
+  should the strings kept whole be past it on their own, `text` is cut at it.
   """
   def fit(parts, max_bytes \\ nil) do
     max_bytes = max_bytes || config(:run_prompt_bytes)
@@ -184,7 +185,9 @@ defmodule Factory.Context do
           {part.head <> body <> part.tail, omitted + more}
       end)
 
-    text = Enum.join(texts, "\n\n")
+    joined = Enum.join(texts, "\n\n")
+    text = Bounds.clip(joined, max_bytes, "\n… [cut at the prompt's limit]")
+    omitted = omitted + max(byte_size(joined) - byte_size(text), 0)
 
     %{
       text: text,

@@ -184,8 +184,7 @@ defmodule Factory.Chat do
 
   defp last_reply(run, author) do
     run.id
-    |> Runs.list_messages()
-    |> Enum.reverse()
+    |> Runs.list_messages(author: author, newest_first: true, limit: 50)
     |> Enum.find_value(fn m ->
       m.author == author and not Map.has_key?(m.meta || %{}, "elicitation") and m.body
     end)
@@ -213,15 +212,11 @@ defmodule Factory.Chat do
       names = Factory.Evidence.save(run, files)
 
       # The user names they show, learned once for what the agents that search the web
-      # are given (`Factory.Engine`), rather than from the files for each prompt.
-      users = Factory.Redact.users_in(Enum.map(files, &elem(&1, 1)))
+      # are given (`Factory.Engine`), rather than from the files for each prompt. In the
+      # background: reading 100 MB of logs takes seconds the chat shouldn't wait, and
+      # until it's done the engine learns them from the files' starts itself.
+      learn_users(run.id, Enum.map(files, &elem(&1, 1)))
       run = Runs.get_run(run.id)
-
-      {:ok, run} =
-        Runs.update_run(run, %{
-          settings:
-            Map.update(run.settings || %{}, "evidence_users", users, &Enum.uniq(&1 ++ users))
-        })
 
       say(
         run,
@@ -232,6 +227,19 @@ defmodule Factory.Chat do
     else
       into_spec.(run, files)
     end
+  end
+
+  defp learn_users(run_id, texts) do
+    Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
+      users = Factory.Redact.users_in(texts)
+
+      Runs.with_locked_run(run_id, fn run ->
+        Runs.update_run(run, %{
+          settings:
+            Map.update(run.settings || %{}, "evidence_users", users, &Enum.uniq(&1 ++ users))
+        })
+      end)
+    end)
   end
 
   defp attach(run, files) do
@@ -500,8 +508,7 @@ defmodule Factory.Chat do
                   do: %{status: "queued", progress: %{}},
                   else: %{status: "queued", progress: progress}
 
-              {:ok, run} = Runs.update_run(run, attrs)
-              {:ok, {run, steps}}
+              with {:ok, run} <- Runs.update_run(run, attrs), do: {:ok, {run, steps}}
             end
         end
       end)
@@ -524,8 +531,11 @@ defmodule Factory.Chat do
 
         Engine.start(run)
 
-      {:error, reason} ->
+      {:error, reason} when is_binary(reason) ->
         say(run, reason)
+
+      {:error, _} ->
+        say(run, "Factory couldn't start the run. Try again.")
     end
   end
 

@@ -331,8 +331,10 @@ defmodule FactoryWeb.ChatLive do
   defp save_setting(%{assigns: %{run: nil}} = socket, _key, _value), do: socket
 
   defp save_setting(%{assigns: %{run: run}} = socket, key, value) do
-    {:ok, run} = Runs.update_run(run, %{settings: Map.put(run.settings, key, value)})
-    assign(socket, run: run)
+    case Runs.update_run(run, %{settings: Map.put(run.settings, key, value)}) do
+      {:ok, run} -> assign(socket, run: run)
+      {:error, _} -> put_flash(socket, :error, "Factory couldn't save that setting. Try again.")
+    end
   end
 
   # Follow only the open run's messages. What was open for the last run doesn't come

@@ -292,7 +292,9 @@ defmodule Factory.Kiro.Session do
       denied: [],
       credits: nil,
       # tools Kiro used, in order: %{call_id:, tool:, title:, paths:, outcome:}
-      tools: []
+      tools: [],
+      # the tool calls Kiro asked permission for (`session/request_permission`)
+      asked: MapSet.new()
     ]
   end
 
@@ -805,6 +807,7 @@ defmodule Factory.Kiro.Session do
         else: %{}
 
     kind = Kiro.Permission.kind(params, known)
+    state = note_asked(state, get_in(params, ["toolCall", "toolCallId"]))
     turn = state.turn
     paths = if turn, do: paths(params, turn), else: []
     command = turn && Kiro.Permission.command(params, commands(turn))
@@ -1166,6 +1169,8 @@ defmodule Factory.Kiro.Session do
   defp track_tool(%{turn: nil} = state, _call), do: state
 
   defp track_tool(state, call) do
+    warn_unasked(state.turn, call)
+
     update_turn(state, fn turn ->
       id = call["toolCallId"]
       known = id && Enum.find_index(turn.tools, &(&1.call_id == id))
@@ -1195,6 +1200,28 @@ defmodule Factory.Kiro.Session do
       %{turn | tools: tools}
     end)
   end
+
+  defp note_asked(%{turn: %Turn{} = turn} = state, id) when is_binary(id),
+    do: %{state | turn: %{turn | asked: MapSet.put(turn.asked, id)}}
+
+  defp note_asked(state, _id), do: state
+
+  # Factory's rules only hold while Kiro asks before it edits or runs a command. Kiro's
+  # own settings can trust a tool (an agent profile of the person's), and then it never
+  # asks: what it did anyway is logged, so it doesn't pass unseen.
+  defp warn_unasked(%Turn{} = turn, %{"status" => "completed", "toolCallId" => id} = call)
+       when is_binary(id) do
+    kind = call["kind"] || Enum.find_value(turn.tools, &(&1.call_id == id && &1.tool))
+
+    if kind in ~w(edit delete move execute) and not MapSet.member?(turn.asked, id) do
+      Logger.warning(
+        "Kiro ran #{call["title"] || kind} for #{turn.agent.name} without asking Factory " <>
+          "first: Kiro's own settings may trust that tool, which skips Factory's rules."
+      )
+    end
+  end
+
+  defp warn_unasked(_turn, _call), do: :ok
 
   # The paths a tool call names, or nil when it names none (so an update without any
   # keeps those an earlier one gave).
@@ -1692,11 +1719,16 @@ defmodule Factory.Kiro.Session do
   @stream_every 100
 
   defp schedule_stream(%{turn: %Turn{stream: true, flush: nil} = turn} = state) do
-    timer = Process.send_after(self(), {:flush_stream, turn.request_id}, @stream_every)
+    timer = Process.send_after(self(), {:flush_stream, turn.request_id}, stream_every(turn))
     %{state | turn: %{turn | flush: timer}}
   end
 
   defp schedule_stream(state), do: state
+
+  # Each send carries the whole reply so far, so a long one is sent less often: what
+  # goes out over a reply then grows about as the reply does, not as its square.
+  defp stream_every(%Turn{text: text}),
+    do: @stream_every * max(1, div(byte_size(text), 16_384))
 
   # Sends the text so far if a send is due.
   defp flush_stream(%{turn: %Turn{flush: nil}} = state), do: state

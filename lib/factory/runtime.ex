@@ -28,8 +28,25 @@ defmodule Factory.Runtime do
   @doc "The runtime in use: `:kiro`, or `:pi` when it's chosen and still there."
   def current do
     case :persistent_term.get(@key, %{}) do
-      %{"runtime" => "pi"} -> if available?(:pi), do: :pi, else: :kiro
+      %{"runtime" => "pi"} -> if pi_there?(), do: :pi, else: :kiro
       _ -> :kiro
+    end
+  end
+
+  # Whether pi is still installed, looked up at most every 30 seconds: `current/0` is
+  # asked on every page drawn, and looking costs a search of the PATH.
+  @detected {__MODULE__, :pi_there}
+  defp pi_there? do
+    now = System.monotonic_time(:second)
+
+    case :persistent_term.get(@detected, nil) do
+      {at, there?} when now - at < 30 ->
+        there?
+
+      _ ->
+        there? = available?(:pi)
+        :persistent_term.put(@detected, {now, there?})
+        there?
     end
   end
 
@@ -47,6 +64,8 @@ defmodule Factory.Runtime do
   when it isn't installed.
   """
   def choose(runtime) when runtime in [:kiro, :pi] do
+    :persistent_term.erase(@detected)
+
     if available?(runtime) do
       put("runtime", to_string(runtime))
       Factory.Kiro.stop_all()

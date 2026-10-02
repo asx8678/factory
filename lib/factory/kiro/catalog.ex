@@ -56,14 +56,15 @@ defmodule Factory.Kiro.Catalog do
     case probe() do
       {:ok, options} ->
         catalog =
-          %{
-            "models" => options["model"] || [],
-            "modes" => options["mode"] || [],
-            "checked_at" => DateTime.utc_now(:second) |> DateTime.to_iso8601()
-          }
-          |> Map.merge(Map.take(get(), ["limit", "limited_at"]))
+          update(fn current ->
+            %{
+              "models" => options["model"] || [],
+              "modes" => options["mode"] || [],
+              "checked_at" => DateTime.utc_now(:second) |> DateTime.to_iso8601()
+            }
+            |> Map.merge(Map.take(current, ["limit", "limited_at"]))
+          end)
 
-        save(catalog)
         {:ok, catalog}
 
       {:error, reason} ->
@@ -78,8 +79,8 @@ defmodule Factory.Kiro.Catalog do
   a session that found Kiro signed out. Pages show it until a check works again.
   """
   def note_failure(reason) do
-    save(
-      Map.merge(get(), %{
+    update(
+      &Map.merge(&1, %{
         "error" => reason,
         "failed_at" => DateTime.utc_now(:second) |> DateTime.to_iso8601()
       })
@@ -88,8 +89,8 @@ defmodule Factory.Kiro.Catalog do
 
   @doc "Remembers that Kiro refused a prompt for its usage limit: pages say so until it answers."
   def note_limit(reason) do
-    save(
-      Map.merge(get(), %{
+    update(
+      &Map.merge(&1, %{
         "limit" => reason,
         "limited_at" => DateTime.utc_now(:second) |> DateTime.to_iso8601()
       })
@@ -98,7 +99,7 @@ defmodule Factory.Kiro.Catalog do
 
   @doc "Forgets the usage limit once Kiro has answered a prompt."
   def clear_limit do
-    if limited?(), do: save(Map.drop(get(), ["limit", "limited_at"]))
+    if limited?(), do: update(&Map.drop(&1, ["limit", "limited_at"]))
     :ok
   end
 
@@ -125,6 +126,18 @@ defmodule Factory.Kiro.Catalog do
   @doc "Checks in the background, e.g. at startup."
   def check_later do
     Task.Supervisor.start_child(Factory.TaskSupervisor, fn -> check() end)
+  end
+
+  # Read, changed and written one at a time: sessions, one-off questions and the check
+  # note things at once, and one's write mustn't undo another's (a usage limit just
+  # noted, say). Written only when it changed: each write is felt by every process.
+  defp update(fun) do
+    :global.trans({{__MODULE__, :catalog}, self()}, fn ->
+      current = get()
+      catalog = fun.(current)
+      if catalog != current, do: save(catalog)
+      catalog
+    end)
   end
 
   defp save(catalog) do
