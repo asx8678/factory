@@ -20,6 +20,13 @@ defmodule FactoryWeb.Router do
     plug :accepts, ["json"]
   end
 
+  # Factory's own names only, as for the pages: a page elsewhere pointing its name at
+  # 127.0.0.1 could otherwise call the tools from the browser. Kiro and pi call
+  # 127.0.0.1 (`Factory.PlanTools.url/0`).
+  pipeline :mcp do
+    plug FactoryWeb.Plugs.HostCheck
+  end
+
   scope "/", FactoryWeb do
     pipe_through :browser
 
@@ -38,7 +45,11 @@ defmodule FactoryWeb.Router do
   end
 
   # Kiro sessions call Factory's tools here (FactoryWeb.MCP); calls carry their own token.
-  forward "/mcp", FactoryWeb.MCP
+  scope "/" do
+    pipe_through :mcp
+
+    forward "/mcp", FactoryWeb.MCP
+  end
 
   # Other scopes may use custom stacks.
   # scope "/api", FactoryWeb do

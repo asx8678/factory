@@ -539,10 +539,12 @@ defmodule Factory.PlanTools do
   defp apply_in_turn(name, args, %{status: "draft"} = run), do: apply_tool(name, args, run)
 
   defp apply_in_turn(name, args, run) do
-    with {:ok, {:changed, text}} <- apply_tool(name, args, run),
+    with {:ok, spec} <- Specs.ensure_for_run(run),
+         before = MapSet.new(Specs.tasks(spec), & &1.title),
+         {:ok, {:changed, text}} <- apply_tool(name, args, run),
          {:ok, spec} <- Specs.ensure_for_run(run),
-         {:ok, run} <-
-           Runs.attach_spec(run, Specs.files(spec), Specs.tasks(spec), keep_status: true) do
+         {files, tasks} = run_share(run, spec, before),
+         {:ok, run} <- Runs.attach_spec(run, files, tasks, keep_status: true) do
       open = Enum.count(run.tasks, &(&1.status != "done"))
 
       next =
@@ -555,6 +557,37 @@ defmodule Factory.PlanTools do
       {:error, text} when is_binary(text) -> {:error, text}
       {:error, _} -> {:error, "Factory couldn't save that change. End your turn."}
       other -> other
+    end
+  end
+
+  # The spec's files and tasks the run follows: all of them for the run the spec was
+  # written for. One started with only some of them (a queue, `Specs.start_run/1`)
+  # keeps those, and gains the ones this change added (titles the spec didn't have
+  # `before`), not every task the spec holds, done in another run or never queued.
+  defp run_share(run, spec, before) do
+    home = Specs.home_run(spec)
+
+    if home == nil or home.id == run.id do
+      {Specs.files(spec), Specs.tasks(spec)}
+    else
+      own = MapSet.new(run.tasks, & &1.title)
+      {preamble, blocks} = Spec.blocks(spec.tasks)
+
+      kept =
+        Enum.filter(blocks, fn block ->
+          title = block.title |> String.trim() |> String.slice(0, 250)
+          MapSet.member?(own, title) or not MapSet.member?(before, title)
+        end)
+
+      tasks_md = Spec.render_blocks(preamble, kept)
+
+      files =
+        Enum.map(Specs.files(spec), fn
+          {"tasks.md", _} -> {"tasks.md", tasks_md}
+          file -> file
+        end)
+
+      {files, Spec.parse_tasks(tasks_md)}
     end
   end
 

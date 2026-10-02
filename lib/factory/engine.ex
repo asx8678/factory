@@ -241,6 +241,7 @@ defmodule Factory.Engine do
             progress =
               %{"done" => [], "outputs" => %{}}
               |> Map.merge(run.progress || %{})
+              |> credits_from_now(run)
               |> allow_more_credits(run)
 
             {:ok, run} =
@@ -340,8 +341,8 @@ defmodule Factory.Engine do
          else: (_ -> nil)
   end
 
-  # Paused between steps, like a person's pause: what it has done stays.
-  defp pause_for_credits(run, step, {used, allowed}) do
+  # Paused between steps or tasks, like a person's pause: what it has done stays.
+  defp pause_for_credits(run, step, {used, allowed}, before \\ nil) do
     Runs.with_locked_run(run.id, fn run ->
       if run.status == "running" do
         progress = Map.put(run.progress, "credit_pause", true)
@@ -351,7 +352,7 @@ defmodule Factory.Engine do
           run,
           "factory",
           "This run has used #{credits(used)} credits, past its limit of #{credits(allowed)}, " <>
-            "so it's paused before #{step.name}. Continue lets it use " <>
+            "so it's paused before #{before || step.name}. Continue lets it use " <>
             "#{credits(credit_limit())} more; the limit is in Settings → Runs.",
           actions: ["continue"]
         )
@@ -374,6 +375,21 @@ defmodule Factory.Engine do
   end
 
   defp allow_more_credits(progress, _run), do: progress
+
+  # A run that starts from the start counts its credits from then: what planning it in
+  # the chat used, or its earlier go, isn't held against its limit. One that goes on
+  # (its progress has what it has done) keeps what it was allowed.
+  defp credits_from_now(progress, run) do
+    limit = credit_limit()
+
+    if limit > 0 and not Map.has_key?(run.progress || %{}, "done") and
+         not Map.has_key?(progress, "credits_allowed") do
+      used = Factory.Usage.totals({:run, run.id}).credits
+      Map.put(progress, "credits_allowed", used + limit)
+    else
+      progress
+    end
+  end
 
   defp credits(n), do: :erlang.float_to_binary(n / 1, decimals: 1)
 
@@ -866,28 +882,36 @@ defmodule Factory.Engine do
       |> Enum.reduce_while({[], nil}, fn {{task, block}, n}, {outs, _sent} ->
         run = Runs.get_run(run.id)
 
-        if run.status != "running" do
-          {:halt, :stopped}
-        else
-          model = task_model(run, step, block)
+        # Paused, cancelled, or past its credit limit between tasks, as between steps: a
+        # step with many tasks could otherwise use far more than the limit.
+        cond do
+          run.status != "running" ->
+            {:halt, :stopped}
 
-          activity =
-            if count == 1,
-              do: "Building task #{number(task)} of “#{run.title}”",
-              else: "Building task #{number(task)} (#{n} of #{count}) of “#{run.title}”"
+          spent = over_credits(run) ->
+            pause_for_credits(run, step, spent, "#{step.name}'s task #{number(task)}")
+            {:halt, :stopped}
 
-          set_activity(step.agent, "running", activity)
-          prompt = fit_prompt(run, steps, step, {task, block})
+          true ->
+            model = task_model(run, step, block)
 
-          case Kiro.run_step(
-                 step.agent,
-                 run.id,
-                 prompt.ask,
-                 step_opts(run, step, prompt, model, activity, true)
-               ) do
-            {:ok, reply} -> {:cont, {[reply | outs], sent(prompt)}}
-            {:error, reason} -> {:halt, {:error, reason}}
-          end
+            activity =
+              if count == 1,
+                do: "Building task #{number(task)} of “#{run.title}”",
+                else: "Building task #{number(task)} (#{n} of #{count}) of “#{run.title}”"
+
+            set_activity(step.agent, "running", activity)
+            prompt = fit_prompt(run, steps, step, {task, block})
+
+            case Kiro.run_step(
+                   step.agent,
+                   run.id,
+                   prompt.ask,
+                   step_opts(run, step, prompt, model, activity, true)
+                 ) do
+              {:ok, reply} -> {:cont, {[reply | outs], sent(prompt)}}
+              {:error, reason} -> {:halt, {:error, reason}}
+            end
         end
       end)
 

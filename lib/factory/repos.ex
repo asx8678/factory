@@ -123,8 +123,14 @@ defmodule Factory.Repos do
     end
   end
 
-  defp found(url, owner, repo, pr),
-    do: {:ok, %{url: url, owner: owner, repo: repo, pr: pr, label: "#{owner}/#{repo}"}}
+  # An owner or name of `.` or `..` would put the clone somewhere else than `root/0`
+  # (`git@host:../x` in the folder above it), where a pull request's code is no
+  # longer known for somebody else's (`label/1`).
+  defp found(url, owner, repo, pr) do
+    if Enum.any?(String.split("#{owner}/#{repo}", "/"), &(&1 in ["", ".", ".."])),
+      do: {:error, "That link's owner or name isn't one a repository can have."},
+      else: {:ok, %{url: url, owner: owner, repo: repo, pr: pr, label: "#{owner}/#{repo}"}}
+  end
 
   @doc """
   Clones the repository a link points to into `root/0`, or fetches it again when it's
@@ -264,8 +270,14 @@ defmodule Factory.Repos do
     end
   end
 
-  # A folder name from an owner or repository name.
-  defp safe(name), do: String.replace(name, ~r/[^\w.-]/, "-")
+  # A folder name from an owner or repository name: never `.` or `..`, which would lead
+  # out of `root/0`.
+  defp safe(name) do
+    case String.replace(name, ~r/[^\w.-]/, "-") do
+      dots when dots in [".", ".."] -> "_"
+      name -> name
+    end
+  end
 
   # git with what's left of the deadline: one still going then is stopped, with ssh.
   defp git(dir, args, deadline) do

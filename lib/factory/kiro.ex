@@ -158,8 +158,12 @@ defmodule Factory.Kiro do
     queued =
       locked(key, fn ->
         with {:ok, pid} <- ensure_session(key, dir),
-             {:ok, _job} <- safe(fn -> Session.prompt(pid, agent, run_id, text, opts) end),
-             do: {:ok, pid}
+             {:ok, job_ref} <- safe(fn -> Session.prompt(pid, agent, run_id, text, opts) end) do
+          # Cancelled while this was on its way: `cancel_run/1` came before it was there
+          # to find, so it's withdrawn here, and the turn ends at once.
+          if Factory.Runs.cancelled?(run_id), do: safe(fn -> Session.cancel(pid, job_ref) end)
+          {:ok, pid}
+        end
       end)
 
     case queued do

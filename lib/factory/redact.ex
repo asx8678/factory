@@ -64,12 +64,31 @@ defmodule Factory.Redact do
     |> paths_out(Keyword.get(opts, :paths, []))
     |> sub(~r/-----BEGIN [A-Z ]+-----.*?-----END [A-Z ]+-----/s, "[key]")
     |> sub(~r/\beyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}/, "[token]")
-    |> sub(~r/\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/=-]{8,}/i, "\\1 [token]")
+    # Keys and tokens known by how they start: AWS, GitHub, GitLab, Slack, OpenAI,
+    # Anthropic. A Slack webhook's address is its secret.
+    |> sub(~r/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/, "[key]")
     |> sub(
-      ~r/\b((?:password|passwd|pwd|secret|client[_-]?secret|token|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|sig|signature)\s*[=:]\s*)(?!(?:yes|no|true|false|null|none)\b)[^\s;,&"'<>)]+/i,
+      ~r/\b(?:gh[pousr]_|github_pat_|glpat-|xox[abeprs]-|sk-ant-|sk-proj-)[A-Za-z0-9_-]{10,}|\bsk-[A-Za-z0-9]{32,}\b/,
+      "[token]"
+    )
+    |> sub(~r{(hooks\.slack\.com/(?:services|workflows)/)[\w/-]+}i, "\\1[secret]")
+    |> sub(~r/\b(Bearer|Basic)\s+[A-Za-z0-9._~+\/=-]{8,}/i, "\\1 [token]")
+    # Whatever scheme a header gives (`Authorization: token …`), and a cookie's values.
+    |> sub(
+      ~r/\b((?:proxy-)?authorization["']?\s*[:=]\s*["']?)(?!(?:Bearer|Basic) \[token\])[^\s"'][^\r\n"']*/i,
+      "\\1[token]"
+    )
+    |> sub(~r/\b((?:set-)?cookie["']?\s*[:=]\s*["']?)[^\r\n"']+/i, "\\1[secret]")
+    # A key's name may carry a prefix (`DB_PASSWORD`, `GITHUB_TOKEN`, `x-api-key`), and
+    # be quoted, as in JSON (`"password": "…"`).
+    |> sub(
+      ~r/(?<![A-Za-z0-9])((?:[A-Za-z0-9]+[_-])*(?:password|passwd|pwd|secret|client[_-]?secret|token|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|private[_-]?key|key[_-]?base|sig|signature)["']?\s*[=:]\s*["']?)(?!(?:yes|no|true|false|null|none)\b)[^\s;,&"'<>)]+/i,
       "\\1[secret]"
     )
     |> sub(~r/((?:\s-u|--user)[=\s]+["']?[^\s:"']+:)[^\s"'<>]+/, "\\1[secret]")
+    # A user and password in an address (`postgres://app:s3cret@db`), before the address
+    # is taken for an email's.
+    |> sub(~r{(\b[a-z][a-z0-9+.-]*://)[^/\s:@]*:[^@\s/]+@}i, "\\1[user]:[secret]@")
     |> sub(~r/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/, "[email]")
     |> users_given()
     |> sub(
@@ -85,6 +104,11 @@ defmodule Factory.Redact do
       "[ip]"
     )
     |> sub(~r/\b(?:[0-9a-f]{1,4}:){4,7}[0-9a-f]{1,4}\b/i, "[ip]")
+    # Shortened with `::` (`fd00::1`), hex on both sides, so `std::io` stays.
+    |> sub(
+      ~r/(?<![\w:])[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6}::[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6}(?![\w:])/i,
+      "[ip]"
+    )
     |> sub(~r/\b[0-9a-f]{24,}\b/i, "[id]")
     |> words_out(users, "[user]")
     |> words_out(names, "[name]")

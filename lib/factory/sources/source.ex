@@ -65,10 +65,23 @@ defmodule Factory.Sources.Source do
     changeset
     |> get_field(:kind)
     |> config_errors(config, content)
+    |> Kernel.++(branch_errors(config))
     |> Enum.reduce(changeset, fn {key, msg}, cs ->
       add_error(cs, :config, msg, field: key)
     end)
   end
+
+  # A branch is given to git as it is: one starting with `-` would be taken for an
+  # option (`--upload-pack=…` runs a program).
+  defp branch_errors(%{"branch" => branch}) when is_binary(branch) do
+    branch = String.trim(branch)
+
+    if branch == "" or Regex.match?(~r{^[\w][\w./-]*$}, branch),
+      do: [],
+      else: [{"branch", "must be a branch's name, like main or release/1.2"}]
+  end
+
+  defp branch_errors(_config), do: []
 
   defp config_errors("azure_devops", config, _),
     do: for(key <- ~w(org project repo), blank?(config[key]), do: {key, "is required"})

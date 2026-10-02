@@ -363,9 +363,23 @@ defmodule Factory.Chat do
     say(run, "This run is already #{s}.")
   end
 
+  # Under the row lock, as it may have finished meanwhile. Then the agent at work stops
+  # too: its turn would otherwise go on changing files until it ends, and the run, no
+  # longer running, isn't paused by its failing (`Factory.Engine`).
   defp run_command(run, "cancel", _) do
-    {:ok, run} = Runs.update_run(run, %{status: "cancelled"})
-    say(run, "Cancelled.")
+    {:ok, run} =
+      Runs.with_locked_run(run.id, fn run ->
+        if run.status in ["done", "cancelled"],
+          do: {:ok, run},
+          else: Runs.update_run(run, %{status: "cancelled"})
+      end)
+
+    if run.status == "cancelled" do
+      Kiro.cancel_run(run.id)
+      say(run, "Cancelled.")
+    else
+      say(run, "This run is already #{run.status}.")
+    end
   end
 
   defp run_command(run, "rename", ""),

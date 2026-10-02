@@ -398,7 +398,7 @@ defmodule Factory.Sources do
       steps =
         if File.dir?(Path.join(dir, ".git")) do
           [
-            ["-C", dir, "fetch", "--depth", "1", "origin", branch || "HEAD"],
+            ["-C", dir, "fetch", "--depth", "1", "--", "origin", branch || "HEAD"],
             ["-C", dir, "reset", "--hard", "FETCH_HEAD"]
           ]
         else
@@ -407,7 +407,7 @@ defmodule Factory.Sources do
 
           [
             ["clone", "--depth", "1"] ++
-              if(branch, do: ["--branch", branch], else: []) ++ [remote_url(source), dir]
+              if(branch, do: ["--branch", branch], else: []) ++ ["--", remote_url(source), dir]
           ]
         end
 

@@ -104,6 +104,10 @@ defmodule Factory.Runs do
 
   def get_run(id), do: Run |> Repo.get(id) |> Repo.preload(:tasks)
 
+  @doc "Whether run `id` was cancelled."
+  def cancelled?(id),
+    do: Repo.exists?(from r in Run, where: r.id == ^id and r.status == "cancelled")
+
   @doc """
   Reads the latest run under a row lock and applies a transactional callback
   (`transact/1`: what it broadcasts goes out once the transaction has committed).

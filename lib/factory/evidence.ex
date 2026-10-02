@@ -97,7 +97,7 @@ defmodule Factory.Evidence do
       base = Path.rootname(name)
 
       Stream.iterate(2, &(&1 + 1))
-      |> Enum.map(&"#{base}-#{&1}#{ext}")
+      |> Stream.map(&"#{base}-#{&1}#{ext}")
       |> Enum.find(&(not File.exists?(Path.join(folder, &1))))
     else
       name

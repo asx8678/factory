@@ -354,6 +354,8 @@ defmodule Factory.Actions do
       Map.new(action["config"] || %{}, fn
         {"command", v} when type == "command" -> {"command", to_string(v || "")}
         {"body", v} when type == "api_request" -> {"body", render_body(v, ctx)}
+        # Header by header: a summary with line breaks in it can't add headers.
+        {"headers", v} when type == "api_request" -> {"headers", api_headers(v, ctx)}
         {k, v} -> {k, render(v, ctx)}
       end)
 
@@ -494,7 +496,7 @@ defmodule Factory.Actions do
 
     with {:ok, auth} <- api_auth(Factory.Text.presence(c["token_env"]), mode),
          :ok <- check_url(c["url"]) do
-      headers = api_headers(c["headers"]) ++ auth
+      headers = (c["headers"] || []) ++ auth
 
       body =
         case {method, c["body"]} do
@@ -581,12 +583,14 @@ defmodule Factory.Actions do
     with {:ok, token} <- env(var, mode), do: {:ok, [{"authorization", "Bearer #{token}"}]}
   end
 
-  # "Name: value" per line.
-  defp api_headers(text) do
+  # "Name: value" per line, each value filled in after the lines are split, on one line.
+  defp api_headers(text, ctx) do
     for line <- String.split(to_string(text || ""), ~r/\R/u, trim: true),
         [name, value] <- [String.split(line, ":", parts: 2)],
         String.trim(name) != "",
-        do: {String.downcase(String.trim(name)), String.trim(value)}
+        do:
+          {String.downcase(String.trim(name)),
+           value |> render(ctx) |> String.replace(~r/[\r\n]+/, " ") |> String.trim()}
   end
 
   # The body template as JSON with its placeholders filled in inside the strings, or as
@@ -704,7 +708,9 @@ defmodule Factory.Actions do
         data -> [json: data]
       end
 
-    opts = [method: method, url: url, headers: headers, retry: false] ++ payload
+    # Not redirected: the address was checked (`check_url/1`), the one it redirects to
+    # (a machine on this network) wasn't.
+    opts = [method: method, url: url, headers: headers, retry: false, redirect: false] ++ payload
     opts = Keyword.merge(opts, Application.get_env(:factory, :actions_req_options, []))
 
     case Req.request(opts) do
