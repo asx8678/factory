@@ -35,8 +35,9 @@ defmodule Factory.Engine do
   step it stopped at. A failed step pauses the run; `/resume` tries it again.
   """
   require Logger
-  alias Factory.{Actions, Agents, Kiro, Runs, Sources, Workflows}
+  alias Factory.{Actions, Agents, Kiro, Runs, Workflows}
   alias Factory.Agents.Agent
+  alias Factory.Engine.{Credits, Prompt}
   alias Factory.Runs.Run
 
   @doc "Runs a queued run in the background. Does nothing when the engine is switched off (tests)."
@@ -80,12 +81,12 @@ defmodule Factory.Engine do
   The run's steps in the order they run: its workflow's canvas cards,
   `[%{id:, kind:, name:, does:, after: [ids], loops: [ids], notes:, agent:}]`.
   `after` are the steps it waits for; `loops` the earlier steps it can send the work
-  back to (an arrow pointing back, see `canvas_steps/1`).
+  back to (an arrow pointing back, see `Factory.Engine.Graph`).
   """
   def steps(%Run{} = run) do
     case Workflows.for_run(run) do
       nil -> []
-      workflow -> canvas_steps(workflow.id)
+      workflow -> Factory.Engine.Graph.steps(workflow.id)
     end
   end
 
@@ -97,7 +98,7 @@ defmodule Factory.Engine do
          "This run's workflow no longer exists. Choose an existing workflow for a new run."}
 
       workflow ->
-        case canvas_steps(workflow.id) do
+        case Factory.Engine.Graph.steps(workflow.id) do
           [] ->
             {:error, "The workflow has no steps yet. Add agents under Workflows, then try again."}
 
@@ -108,125 +109,7 @@ defmodule Factory.Engine do
   end
 
   @doc "A workflow's steps in the order they'd run, as `steps/1` gives them for a run on it."
-  def workflow_steps(workflow_id), do: canvas_steps(workflow_id)
-
-  # An arrow that closes a loop (it points to a card that leads to its own start, like
-  # Reviewer → Coder) doesn't make the earlier card wait: it's a way to send the work
-  # back. The other arrows are hand-offs and decide the order.
-  defp canvas_steps(workflow_id) do
-    all = Agents.list_agents(workflow_id)
-    all_ids = MapSet.new(all, & &1.id)
-
-    links =
-      Workflows.links(workflow_id)
-      |> Enum.filter(&(&1.source_id in all_ids and &1.target_id in all_ids))
-
-    cards =
-      all |> Enum.reject(&loose_action?(&1, all, links)) |> Enum.sort_by(&{&1.y, &1.x, &1.id})
-
-    back = back_links(cards, links)
-
-    {loops, handoffs} =
-      Enum.split_with(links, &MapSet.member?(back, {&1.source_id, &1.target_id}))
-
-    preds = Enum.group_by(handoffs, & &1.target_id, & &1.source_id)
-    ordered = topological(cards, preds)
-    order = Enum.map(ordered, &"agent-#{&1.id}")
-
-    ordered
-    |> Enum.map(fn card ->
-      %{
-        id: "agent-#{card.id}",
-        kind: card.kind,
-        name: if(card.kind == "action", do: Actions.label(card), else: card.name),
-        does: card.role || "",
-        after: Enum.map(Map.get(preds, card.id, []), &"agent-#{&1}"),
-        # The earlier steps this one can send the work back to, first in run order first.
-        loops:
-          for(l <- loops, l.source_id == card.id, do: "agent-#{l.target_id}")
-          |> Enum.sort_by(&Enum.find_index(order, fn id -> id == &1 end)),
-        # What each arrow into this card says on its hand-off, by the step it comes from,
-        # and what an arrow back from this card says about sending the work back.
-        notes:
-          for(
-            l <- handoffs,
-            l.target_id == card.id,
-            String.trim(l.prompt || "") != "",
-            into: %{},
-            do: {"agent-#{l.source_id}", l.prompt}
-          ),
-        back_notes:
-          for(
-            l <- loops,
-            l.source_id == card.id,
-            String.trim(l.prompt || "") != "",
-            into: %{},
-            do: {"agent-#{l.target_id}", l.prompt}
-          ),
-        agent: card
-      }
-    end)
-  end
-
-  # An action card with no arrow at all, in a workflow with agents, hasn't been put in
-  # the flow yet (the palette drops it unconnected): it doesn't run. Otherwise a
-  # "Commit & push" left on the canvas would push. A workflow of only actions runs them.
-  defp loose_action?(%{kind: "action", id: id}, all, links) do
-    Enum.any?(all, &(&1.kind != "action")) and
-      not Enum.any?(links, &(&1.source_id == id or &1.target_id == id))
-  end
-
-  defp loose_action?(_card, _all, _links), do: false
-
-  # Arrows that close a loop: depth first from the cards nothing points to, in reading
-  # order, an arrow to a card on the current path goes back.
-  defp back_links(cards, links) do
-    rank = cards |> Enum.with_index() |> Map.new(fn {c, i} -> {c.id, i} end)
-
-    children =
-      links
-      |> Enum.group_by(& &1.source_id, & &1.target_id)
-      |> Map.new(fn {id, targets} -> {id, Enum.sort_by(targets, &rank[&1])} end)
-
-    pointed_to = MapSet.new(links, & &1.target_id)
-    starts = Enum.reject(cards, &MapSet.member?(pointed_to, &1.id)) ++ cards
-
-    {back, _seen} =
-      Enum.reduce(starts, {MapSet.new(), MapSet.new()}, fn card, acc ->
-        visit(card.id, children, MapSet.new(), acc)
-      end)
-
-    back
-  end
-
-  defp visit(id, children, path, {back, seen}) do
-    if MapSet.member?(seen, id) do
-      {back, seen}
-    else
-      path = MapSet.put(path, id)
-
-      Enum.reduce(Map.get(children, id, []), {back, MapSet.put(seen, id)}, fn child,
-                                                                              {back, seen} ->
-        if MapSet.member?(path, child),
-          do: {MapSet.put(back, {id, child}), seen},
-          else: visit(child, children, path, {back, seen})
-      end)
-    end
-  end
-
-  # Kahn's algorithm, taking the first ready card in reading order each time. The
-  # arrows it follows have no loops (`back_links/2` took those out).
-  defp topological(cards, preds), do: topological(cards, preds, MapSet.new(), [])
-
-  defp topological([], _preds, _done, acc), do: Enum.reverse(acc)
-
-  defp topological(cards, preds, done, acc) do
-    ready =
-      Enum.find(cards, fn c -> Enum.all?(Map.get(preds, c.id, []), &MapSet.member?(done, &1)) end)
-
-    next = ready || hd(cards)
-    topological(List.delete(cards, next), preds, MapSet.put(done, next.id), [next | acc])
-  end
+  def workflow_steps(workflow_id), do: Factory.Engine.Graph.steps(workflow_id)
 
   @doc "Runs the run's remaining steps, in the calling process."
   def run(run_id) when is_binary(run_id), do: run(String.to_integer(run_id))
@@ -267,8 +150,8 @@ defmodule Factory.Engine do
             progress =
               %{"done" => [], "outputs" => %{}}
               |> Map.merge(run.progress || %{})
-              |> credits_from_now(run)
-              |> allow_more_credits(run)
+              |> Credits.from_now(run)
+              |> Credits.allow_more(run)
 
             {:ok, run} =
               Runs.update_run(run, %{status: "running", progress: Map.delete(progress, "error")})
@@ -331,93 +214,19 @@ defmodule Factory.Engine do
       why = skip_reason(run, step) ->
         skip(run, steps, step, rest, why)
 
-      spent = step.kind != "action" && over_credits(run) ->
-        pause_for_credits(run, step, spent)
+      spent = step.kind != "action" && Credits.over(run) ->
+        Credits.pause(run, step, spent)
 
       true ->
         run_step(run, steps, step, rest)
     end
   end
 
-  @doc """
-  How many credits a run may use before it pauses to ask whether to go on: the limit in
-  Settings (`"run_credit_limit"` in `Factory.Prefs`), else `config :factory,
-  :run_credit_limit` (10). 0 means no limit.
-  """
-  def credit_limit do
-    case Factory.Prefs.get("run_credit_limit") do
-      n when is_number(n) and n >= 0 -> n
-      _ -> Application.get_env(:factory, :run_credit_limit, 10)
-    end
-  end
+  @doc "How many credits a run may use before it pauses (`Credits.limit/0`)."
+  defdelegate credit_limit, to: Factory.Engine.Credits, as: :limit
 
-  @doc "How many credits the run may use before it pauses next, or nil with no limit."
-  def credit_allowance(%Run{} = run) do
-    case credit_limit() do
-      limit when limit > 0 -> (run.progress || %{})["credits_allowed"] || limit
-      _ -> nil
-    end
-  end
-
-  # What the run has used and may use, once it has used that much.
-  defp over_credits(run) do
-    with allowed when allowed != nil <- credit_allowance(run),
-         %{credits: used} when used >= allowed <- Factory.Usage.totals({:run, run.id}),
-         do: {used, allowed},
-         else: (_ -> nil)
-  end
-
-  # Paused between steps or tasks, like a person's pause: what it has done stays.
-  defp pause_for_credits(run, step, {used, allowed}, before \\ nil) do
-    Runs.with_locked_run(run.id, fn run ->
-      if run.status == "running" do
-        progress = Map.put(run.progress, "credit_pause", true)
-        {:ok, run} = Runs.update_run(run, %{status: "paused", progress: progress})
-
-        Runs.post(
-          run,
-          "factory",
-          "This run has used #{credits(used)} credits, past its limit of #{credits(allowed)}, " <>
-            "so it's paused before #{before || step.name}. Continue lets it use " <>
-            "#{credits(credit_limit())} more; the limit is in Settings → Runs.",
-          actions: ["continue"]
-        )
-      end
-
-      {:ok, run}
-    end)
-
-    nil
-  end
-
-  # A run that paused at its credit limit may use as much again when it goes on, however
-  # it was resumed.
-  defp allow_more_credits(%{"credit_pause" => true} = progress, run) do
-    used = Factory.Usage.totals({:run, run.id}).credits
-
-    progress
-    |> Map.delete("credit_pause")
-    |> Map.put("credits_allowed", used + credit_limit())
-  end
-
-  defp allow_more_credits(progress, _run), do: progress
-
-  # A run that starts from the start counts its credits from then: what planning it in
-  # the chat used, or its earlier go, isn't held against its limit. One that goes on
-  # (its progress has what it has done) keeps what it was allowed.
-  defp credits_from_now(progress, run) do
-    limit = credit_limit()
-
-    if limit > 0 and not Map.has_key?(run.progress || %{}, "done") and
-         not Map.has_key?(progress, "credits_allowed") do
-      used = Factory.Usage.totals({:run, run.id}).credits
-      Map.put(progress, "credits_allowed", used + limit)
-    else
-      progress
-    end
-  end
-
-  defp credits(n), do: :erlang.float_to_binary(n / 1, decimals: 1)
+  @doc "How many credits the run may use before it pauses next (`Credits.allowance/1`)."
+  defdelegate credit_allowance(run), to: Factory.Engine.Credits, as: :allowance
 
   # In troubleshooting, a step with nothing to do is skipped rather than run only to say
   # so: the Code Investigator with no repository, and the Evidence Analyst in a quick
@@ -426,7 +235,7 @@ defmodule Factory.Engine do
   defp skip_reason(run, %{agent: %{}} = step) do
     if incident?(run) do
       cond do
-        step.name == "Code Investigator" and project_dir(run) == nil ->
+        step.name == "Code Investigator" and Prompt.project_dir(run) == nil ->
           "there's no repository to search"
 
         step.name == "Evidence Analyst" and quick_check?(run) and Factory.Evidence.list(run) == [] ->
@@ -605,7 +414,7 @@ defmodule Factory.Engine do
 
     todo =
       if Application.get_env(:factory, :verify_tasks, true) and step.kind != "action" and
-           marks_tasks?(run, step),
+           Prompt.marks_tasks?(run, step),
          do:
            Enum.filter(
              run.tasks,
@@ -706,8 +515,8 @@ defmodule Factory.Engine do
     head =
       if r.passed,
         do:
-          "Task #{number(task)} verified by #{name}: #{passed} of #{length(r.checks)} checks passed.",
-        else: "Task #{number(task)} failed verification by #{name}: #{r.fix}"
+          "Task #{Prompt.number(task)} verified by #{name}: #{passed} of #{length(r.checks)} checks passed.",
+        else: "Task #{Prompt.number(task)} failed verification by #{name}: #{r.fix}"
 
     lines =
       for c <- r.checks do
@@ -722,7 +531,7 @@ defmodule Factory.Engine do
     Runs.post(
       run,
       "factory",
-      "#{name} couldn't verify task #{number(task)}, so it stays done unchecked: #{reason}",
+      "#{name} couldn't verify task #{Prompt.number(task)}, so it stays done unchecked: #{reason}",
       meta: meta(step)
     )
   end
@@ -732,7 +541,7 @@ defmodule Factory.Engine do
     max_rounds = max_rounds()
     run = Runs.reopen_tasks(run, Enum.map(failed, fn {task, _} -> task.id end))
     Runs.tasks_changed(run)
-    which = Enum.map_join(failed, ", ", fn {task, _} -> number(task) end)
+    which = Enum.map_join(failed, ", ", fn {task, _} -> Prompt.number(task) end)
 
     if rounds < max_rounds do
       fix =
@@ -743,7 +552,7 @@ defmodule Factory.Engine do
             end
 
           Enum.join(
-            ["Task #{number(task)}, #{task.title}: #{r.fix}" | misses],
+            ["Task #{Prompt.number(task)}, #{task.title}: #{r.fix}" | misses],
             "\n"
           )
         end)
@@ -780,10 +589,6 @@ defmodule Factory.Engine do
       {:ok, run}
     end
   end
-
-  # A task's number as the spec gives it, else its place in the list.
-  defp number(%{ref: ref}) when is_binary(ref), do: ref
-  defp number(task), do: "#{task.position}"
 
   @doc """
   "what to fix" when a reply's last line is "Send back: what to fix", else nil. "Send
@@ -866,7 +671,7 @@ defmodule Factory.Engine do
   # the model the plan names for it. Otherwise (no plan, nothing left for it, a pass
   # sent back once everything is built) the whole step in one pass.
   defp do_step(run, steps, step) do
-    case marks_tasks?(run, step) && own_tasks(run, steps, step) do
+    case Prompt.marks_tasks?(run, step) && own_tasks(run, steps, step) do
       [_ | _] = tasks -> build_each(run, steps, step, tasks)
       _ -> one_pass(run, steps, step)
     end
@@ -875,12 +680,15 @@ defmodule Factory.Engine do
   defp one_pass(run, steps, step) do
     set_activity(step.agent, "running", "Working on “#{run.title}”")
     Runs.post(run, "factory", "#{step.name} is on it#{handed_by(steps, step)}.", meta: meta(step))
-    prompt = fit_prompt(run, steps, step)
+    prompt = Prompt.fit(run, steps, step)
 
     # On the agent's own Kiro session, which posts the reply to the chat and keeps the
     # conversation for a later pass. The prompt carries its sources and instructions.
     activity = "Working on “#{run.title}”"
-    opts = step_opts(run, step, prompt, model(run, step), activity, marks_tasks?(run, step))
+
+    opts =
+      step_opts(run, step, prompt, model(run, step), activity, Prompt.marks_tasks?(run, step))
+
     result = Kiro.run_step(step.agent, run.id, prompt.ask, opts)
 
     case result do
@@ -899,7 +707,7 @@ defmodule Factory.Engine do
   # is left for verification to catch; the run goes on to the next.
   defp build_each(run, steps, step, tasks) do
     count = length(tasks)
-    names = Enum.map_join(tasks, ", ", fn {task, _} -> number(task) end)
+    names = Enum.map_join(tasks, ", ", fn {task, _} -> Prompt.number(task) end)
 
     Runs.post(
       run,
@@ -920,8 +728,8 @@ defmodule Factory.Engine do
           run.status != "running" ->
             {:halt, :stopped}
 
-          spent = over_credits(run) ->
-            pause_for_credits(run, step, spent, "#{step.name}'s task #{number(task)}")
+          spent = Credits.over(run) ->
+            Credits.pause(run, step, spent, "#{step.name}'s task #{Prompt.number(task)}")
             {:halt, :stopped}
 
           true ->
@@ -929,11 +737,11 @@ defmodule Factory.Engine do
 
             activity =
               if count == 1,
-                do: "Building task #{number(task)} of “#{run.title}”",
-                else: "Building task #{number(task)} (#{n} of #{count}) of “#{run.title}”"
+                do: "Building task #{Prompt.number(task)} of “#{run.title}”",
+                else: "Building task #{Prompt.number(task)} (#{n} of #{count}) of “#{run.title}”"
 
             set_activity(step.agent, "running", activity)
-            prompt = fit_prompt(run, steps, step, {task, block})
+            prompt = Prompt.fit(run, steps, step, {task, block})
 
             case Kiro.run_step(
                    step.agent,
@@ -1020,249 +828,8 @@ defmodule Factory.Engine do
     }
   end
 
-  # Agents that change the project mark the run's tasks done as they finish them
-  # (`Factory.RunTools`); ones that only read and check don't. A step with an arrow
-  # back also has the verdict tool.
-  defp marks_tasks?(run, step), do: run.tasks != [] and not Agent.read_only?(step)
-
   @doc "What an agent step is asked to do. Public for tests."
-  def prompt(run, steps, step), do: fit_prompt(run, steps, step).text
-
-  # The prompt's parts in order, fitted to the budget. Text the run or its agents wrote
-  # (job, spec, hand-offs, sources) can be shortened; Factory's own lines can't.
-  defp fit_prompt(run, steps, step, focus \\ nil) do
-    notes = Map.get(step, :notes, %{})
-    kind = (workflow = Workflows.for_run(run)) && Workflows.kind(workflow)
-
-    # An agent that searches the web gets everything with what identifies anyone taken
-    # out (`Factory.Redact`), whatever the agents before it wrote.
-    clean =
-      if step.agent && Agent.web?(step.agent) do
-        redact = redaction(run)
-        &Factory.Redact.text(&1, redact)
-      else
-        & &1
-      end
-
-    # Each arrow in: what the agent before handed over, then what the arrow says.
-    handoffs =
-      Enum.flat_map(step.after, fn id ->
-        from = Enum.find(steps, &(&1.id == id))
-        text = clean.(run.progress["outputs"][id])
-        note = clean.(notes[id])
-
-        [
-          text && tag(~s(<handoff from="#{from.name}">), text, "</handoff>", 64 * 1024),
-          note &&
-            tag(
-              ~s(<handoff-instructions from="#{from.name}">),
-              note,
-              "</handoff-instructions>",
-              8 * 1024
-            )
-        ]
-        |> Enum.filter(& &1)
-      end)
-
-    own = String.trim((step.agent && step.agent.prompt) || "")
-    feedback = get_in(run.progress, ["feedback", step.id])
-
-    # The brief: who the agent is, the job, the rules, the spec, its sources and
-    # instructions. The same for every pass of this step, so a session that has it
-    # already isn't sent it again (`Factory.Kiro.Session`).
-    brief =
-      [
-        "You are #{step.name}, one agent in a team that works through a job step by step. " <>
-          "Your part: #{blank(step.does, "do what the job needs")}.",
-        job(run, step, kind),
-        kind == "incident" && clean.(Factory.Runs.Troubleshooting.mode_line(project_dir(run))),
-        # Where the attached files are, for the agents that may read them.
-        kind == "incident" && !Agent.web?(step.agent || %{}) && Factory.Evidence.describe(run),
-        # The commands an agent that only reads may run, so it doesn't spend turns on
-        # ones that are refused.
-        Agent.read_only?(step) && Factory.Specs.Planner.looking_rule(),
-        run |> base_specs() |> List.wrap() |> Enum.map(&clean_part(&1, clean)),
-        run.spec && tag("<spec>", clean.(run.spec), "</spec>", 96 * 1024),
-        clean_part(sources(step), clean),
-        own != "" && %{head: "Your instructions:\n", body: own, tail: "", max: 16 * 1024}
-      ]
-      |> List.flatten()
-      |> Enum.reject(&(&1 in [nil, false, ""]))
-
-    # What this pass is: what's done, what was handed over, feedback, and how to finish.
-    ask =
-      [
-        clean_part(task_status(run), clean),
-        handoffs != [] && ["What the agents before you handed over:" | handoffs],
-        feedback &&
-          [
-            "This is another pass: #{feedback["from"]} sent the work back. Fix what they say.",
-            tag(
-              ~s(<feedback from="#{feedback["from"]}">),
-              clean.(feedback["text"]),
-              "</feedback>",
-              16 * 1024
-            )
-          ],
-        focus && focus_text(focus),
-        if(Agent.read_only?(step),
-          do: "Don't change any files: read, check and report.",
-          else: "Make the changes in the project folder."
-        ) <>
-          " When you're done, reply with a short summary of what you did and what the next agent needs to know.",
-        marks_tasks?(run, step) && complete_rule(focus),
-        send_back_rule(steps, step)
-      ]
-      |> List.flatten()
-      |> Enum.reject(&(&1 in [nil, false, ""]))
-
-    fitted = Factory.Context.fit(brief ++ ask)
-    {brief_parts, ask_parts} = Enum.split(fitted.parts, length(brief))
-
-    Map.merge(fitted, %{
-      brief: Enum.join(brief_parts, "\n\n"),
-      ask: Enum.join(ask_parts, "\n\n")
-    })
-  end
-
-  # The job as the person wrote it. A troubleshooting run's is mostly the errors and
-  # logs they pasted, so it gets as much room as a spec. An agent that searches the web
-  # isn't shown it (`Agent.web?/1`): what it looks up comes from the hand-overs, where
-  # the signatures have nothing that identifies anyone, so it can't send the person's
-  # material anywhere, whatever that material says.
-  defp job(run, step, kind) do
-    if step.agent && Agent.web?(step.agent),
-      do:
-        "<job>Not shown to agents that search the web. Work from the hand-over and the " <>
-          "case file: what to look up is there.</job>",
-      else: tag("<job>", run.description || run.title, "</job>", job_room(kind))
-  end
-
-  defp clean_part(%{body: body} = part, clean), do: %{part | body: clean.(body)}
-  defp clean_part(text, clean) when is_binary(text), do: clean.(text)
-  defp clean_part(nil, _clean), do: nil
-
-  # What an agent that searches the web never sees, besides what `Factory.Redact` finds
-  # itself: the names listed in Settings, the user names anything in the run shows (the
-  # attached files too, learned as they came: `Factory.Chat`), and the run's folders.
-  defp redaction(run) do
-    texts = [run.description, run.spec] ++ Map.values(run.progress["outputs"] || %{})
-
-    # A run whose files came before Factory learned from them as they came.
-    attached =
-      (run.settings || %{})["evidence_users"] ||
-        Factory.Redact.users_in(Factory.Evidence.heads(run))
-
-    [
-      names: Factory.Redact.saved_names(),
-      users: Enum.uniq(Factory.Redact.users_in(texts) ++ attached),
-      paths: [project_dir(run), Factory.Evidence.root(), Factory.Kiro.config(:workspace)]
-    ]
-  end
-
-  defp job_room("incident"), do: 96 * 1024
-  defp job_room(_kind), do: 16 * 1024
-
-  defp project_dir(run) do
-    case String.trim(run.settings["project_dir"] || "") do
-      "" -> nil
-      dir -> dir
-    end
-  end
-
-  # One task to build this turn, as the spec writes it.
-  defp focus_text({task, block}) do
-    lines = Map.get(block, :lines) || ["#{number(task)}. #{task.title}"]
-
-    tag(
-      ~s(<this-task number="#{number(task)}">),
-      "Build task #{number(task)} only, this turn: the other tasks are for later turns " <>
-        "or other agents. Follow its approach and meet its checks.\n\n" <> Enum.join(lines, "\n"),
-      "</this-task>",
-      16 * 1024
-    )
-  end
-
-  defp complete_rule(nil),
-    do:
-      "As you finish each task in the spec, built and checked, mark it done with the " <>
-        "factory tool complete_tasks, giving its number. get_tasks shows which are done."
-
-  defp complete_rule({task, _block}),
-    do:
-      "When task #{number(task)} is built and its checks pass, mark it done with the " <>
-        "factory tool complete_tasks, giving its number."
-
-  # When some tasks are done already (a run run again for tasks added later), which
-  # ones: the agents work on the rest.
-  defp task_status(%Run{tasks: tasks}) do
-    if Enum.any?(tasks, &(&1.status == "done")) and Enum.any?(tasks, &(&1.status != "done")) do
-      tag(
-        "<task-status>",
-        Factory.RunTools.describe(tasks) <>
-          "\nWork on the open ones; the done ones are built already.",
-        "</task-status>",
-        8 * 1024
-      )
-    end
-  end
-
-  # A step with an arrow back decides whether the work goes round again.
-  defp send_back_rule(steps, %{loops: [target | _]} = step) do
-    to = Enum.find(steps, &(&1.id == target))
-    note = step.back_notes[target]
-
-    [
-      "Then give your verdict with the factory tool verdict: approved if the work is " <>
-        "good, or send_back with what to fix to have #{to.name} do another pass. If you " <>
-        "don't have that tool, end your reply with one line instead: `Approved`, or " <>
-        "`Send back: <what to fix>`.",
-      note &&
-        tag(
-          ~s(<send-back-instructions to="#{to.name}">),
-          note,
-          "</send-back-instructions>",
-          8 * 1024
-        )
-    ]
-  end
-
-  defp send_back_rule(_steps, _step), do: nil
-
-  defp tag(open, text, close, max),
-    do: %{head: open <> "\n", body: String.trim(text), tail: "\n" <> close, max: max}
-
-  # The data sources attached to the agent: the list inside <data-sources> can be shortened.
-  defp sources(%{agent: nil}), do: nil
-
-  defp sources(step) do
-    case Sources.context_for_agent(step.agent) do
-      "" ->
-        nil
-
-      text ->
-        case Regex.run(~r/\A(<data-sources>\n)(.*)(\n<\/data-sources>)\z/s, text) do
-          [_, head, body, tail] -> %{head: head, body: body, tail: tail, max: 32 * 1024}
-          nil -> %{head: "", body: text, tail: "", max: 32 * 1024}
-        end
-    end
-  end
-
-  # The base specs the run includes: rules every agent follows.
-  defp base_specs(run) do
-    case Factory.Specs.base_files_for_run(run) do
-      [] ->
-        nil
-
-      files ->
-        [
-          "Rules to follow in everything you do:"
-          | Enum.map(files, fn {name, text} ->
-              tag(~s(<base-spec name="#{name}">), text, "</base-spec>", 32 * 1024)
-            end)
-        ]
-    end
-  end
+  def prompt(run, steps, step), do: Prompt.fit(run, steps, step).text
 
   # {{summary}} for an action: what the cards before it handed over, else the latest step's.
   defp summary(run, step) do
@@ -1346,7 +913,9 @@ defmodule Factory.Engine do
   defp tasks_note([], _steps), do: ""
 
   defp tasks_note(tasks, steps) do
-    if Enum.any?(steps, &marks_tasks?(%{tasks: tasks}, &1)), do: tasks_note(tasks), else: ""
+    if Enum.any?(steps, &Prompt.marks_tasks?(%{tasks: tasks}, &1)),
+      do: tasks_note(tasks),
+      else: ""
   end
 
   defp tasks_note(tasks) do
@@ -1464,6 +1033,4 @@ defmodule Factory.Engine do
 
     {:ok, :recovered}
   end
-
-  defp blank(s, default), do: if(String.trim(s || "") == "", do: default, else: s)
 end

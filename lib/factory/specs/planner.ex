@@ -1169,7 +1169,9 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
 
   defp decode(reply) do
     case PromptText.json_object(reply) do
-      {:ok, data} -> {:ok, data}
+      {:ok, data} ->
+        {:ok, data}
+
       :error ->
         Logger.warning("Kiro's reply had no JSON object: " <> String.slice(reply || "", 0, 300))
         {:error, "Kiro's reply wasn't something Factory could read."}

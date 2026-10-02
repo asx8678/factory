@@ -134,9 +134,20 @@ defmodule Factory.Kiro do
   twice over plus a minute (it may first finish another message). A step given up on
   is withdrawn from the session (`Session.withdraw/2`), so Kiro doesn't go on with it;
   the same happens if the calling process ends.
+
+  An agent at work for another run, in another project folder, is waited for: the
+  step goes once it's free, checked every few seconds, for as long as this run still
+  runs, up to the prompt timeout (`on_busy: :return` answers `{:error, :busy}` at once
+  instead).
   """
-  def run_step(agent, run_id, text, opts \\ []) do
-    dir = workdir(Factory.Runs.get_run(run_id))
+  def run_step(agent, run_id, text, opts \\ []), do: run_step(agent, run_id, text, opts, 0)
+
+  @busy_check 3_000
+
+  defp run_step(agent, run_id, text, given, waited) do
+    run = Factory.Runs.get_run(run_id)
+    dir = workdir(run)
+    opts = given
     key = session_key(agent)
     ref = make_ref()
     # `on_busy: :return` gives `{:error, :busy}` for a session busy in another folder.
@@ -183,12 +194,33 @@ defmodule Factory.Kiro do
         {:error, :busy}
 
       {:error, :busy} ->
-        {:error,
-         "#{agent.name}'s Kiro session is working in another project folder. " <>
-           "Try again when it's idle."}
+        if waited < config(:prompt_timeout) and still_running?(run_id) do
+          if waited == 0,
+            do:
+              Factory.Runs.post(
+                run,
+                "factory",
+                "#{agent.name} is at work for another run in another folder: this step " <>
+                  "goes when it's free."
+              )
+
+          Process.sleep(@busy_check)
+          run_step(agent, run_id, text, given, waited + @busy_check)
+        else
+          {:error,
+           "#{agent.name}'s Kiro session is working in another project folder. " <>
+             "Try again when it's idle."}
+        end
 
       {:error, reason} ->
         {:error, "Couldn't start Kiro for #{agent.name}: #{reason_text(reason)}"}
+    end
+  end
+
+  defp still_running?(run_id) do
+    case Factory.Runs.get_run(run_id) do
+      %{status: "running"} -> true
+      _ -> false
     end
   end
 

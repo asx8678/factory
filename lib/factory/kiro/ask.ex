@@ -261,33 +261,19 @@ defmodule Factory.Kiro.Ask do
     kind = Kiro.Permission.kind(p, acc.kinds)
     paths = Kiro.Permission.paths(p, acc.paths)
 
-    # A file outside the folder (and its roots) is refused whatever the question may
-    # do, as in a session (`Factory.Kiro.Session`).
-    outside? =
-      kind in ~w(read search edit delete move) and
-        Enum.any?(paths, &(not Kiro.Permission.allowed_path?(&1, conn.workdir, conn.roots)))
-
     # What a chat would ask the person about first (`Kiro.Permission.decide/4`) is a no
     # here, with nobody to ask: a web page, a pull request's own code, a file outside the
-    # folder.
-    decision =
-      if outside?,
-        do: :reject,
-        else:
-          Kiro.Permission.decide(
-            kind,
-            Kiro.Permission.command(p, acc.commands),
-            paths,
-            %{
-              allowed: conn.allow,
-              looks: "look" in conn.allow,
-              reads_only: "execute" not in conn.allow,
-              web: false,
-              mcp: server != nil and server in conn.mcp,
-              folder: conn.workdir,
-              roots: conn.roots
-            }
-          )
+    # folder. As in a session, by the same rules (`Kiro.Judge`).
+    {decision, _outside} =
+      Kiro.Judge.judge(kind, Kiro.Permission.command(p, acc.commands), paths, %{
+        allowed: conn.allow,
+        looks: "look" in conn.allow,
+        reads_only: "execute" not in conn.allow,
+        web: false,
+        mcp: server != nil and server in conn.mcp,
+        folder: conn.workdir,
+        roots: conn.roots
+      })
 
     wanted = if decision == :allow, do: "allow", else: "reject"
 

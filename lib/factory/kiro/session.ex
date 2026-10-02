@@ -41,9 +41,6 @@ defmodule Factory.Kiro.Session do
   alias Factory.Agents.Agent
   alias Factory.Kiro.RPC
 
-  # Tool kinds that name files, kept to the project and its sources (`request_permission`).
-  @file_kinds ~w(read search edit delete move)
-
   @doc "`key` is `:shared` or an agent id; `workdir` is the folder Kiro works in."
   def start_link({key, workdir}),
     do: GenServer.start_link(__MODULE__, {key, workdir}, name: via(key, workdir))
@@ -1058,8 +1055,6 @@ defmodule Factory.Kiro.Session do
     deny(state, params["toolCall"])
   end
 
-  # A tool that was refused: the turn notes it (with `why`, when there's more to say
-  # than its title), and the chat shows it as denied.
   # Whether the turn's agent may use a tool of `kind` (with its `command`, or the
   # `paths` it names): `{decision, outside}`, the decision `:allow`, `:reject`,
   # `:outside` (with the paths outside the project) or `{:ask, reason}`.
@@ -1074,37 +1069,30 @@ defmodule Factory.Kiro.Session do
       if(turn && not Agent.web?(agent), do: [Factory.Evidence.dir(turn.run_id)], else: []) ++
         roots(state)
 
-    # Files are read, searched and changed in those folders only: a path elsewhere
-    # (`/etc/passwd`, `~/.ssh`, `../..`) is refused whatever the agent may otherwise do.
-    # An agent that only reads and checks asks the person first to read or search there.
-    outside =
-      if kind in @file_kinds and turn != nil,
-        do: Enum.reject(paths, &Kiro.Permission.allowed_path?(&1, state.workdir, roots)),
-        else: []
-
-    asks? = turn != nil and kind in ["read", "search"] and Agent.read_only?(agent)
-
-    # A planner while it plans, and an agent that only reads and checks (a reviewer, a
-    # researcher), may run commands that only look; some of what it does goes to the
-    # person first (`Kiro.Permission.decide/4`).
-    decision =
-      if outside != [] and not asks? do
-        :outside
-      else
-        Kiro.Permission.decide(kind, command, paths, %{
-          allowed: allowed,
-          looks: turn != nil and (turn.planning != nil or Agent.read_only?(agent)),
-          reads_only: turn != nil and Agent.read_only?(agent),
-          web: turn != nil and Agent.web?(agent),
-          mcp: mcp?,
-          folder: state.workdir,
-          roots: roots
-        })
-      end
-
-    {decision, outside}
+    # Kept to those folders (`Kiro.Judge`); an agent that only reads and checks asks the
+    # person first to read or search elsewhere. A planner while it plans, and an agent
+    # that only reads and checks (a reviewer, a researcher), may run commands that only
+    # look; some of what it does goes to the person first (`Kiro.Permission.decide/4`).
+    Kiro.Judge.judge(
+      kind,
+      command,
+      paths,
+      %{
+        allowed: allowed,
+        looks: turn != nil and (turn.planning != nil or Agent.read_only?(agent)),
+        reads_only: turn != nil and Agent.read_only?(agent),
+        web: turn != nil and Agent.web?(agent),
+        mcp: mcp?,
+        folder: state.workdir,
+        roots: roots
+      },
+      check_paths: turn != nil,
+      ask_outside: turn != nil and Agent.read_only?(agent)
+    )
   end
 
+  # A tool that was refused: the turn notes it (with `why`, when there's more to say
+  # than its title), and the chat shows it as denied.
   defp deny(state, call, why \\ nil) do
     title = (call || %{})["title"] || "a tool"
     noted = if why, do: "#{title}: #{why}", else: title
