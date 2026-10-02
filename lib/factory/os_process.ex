@@ -9,8 +9,11 @@ defmodule Factory.OsProcess do
   Runs `executable` with `args` and waits at most `:timeout` ms (default 10 minutes):
   `{:ok, output, exit_status}`, `{:error, :timeout}` or `{:error, reason}`, where
   `reason` says in words why it couldn't start (no such program or folder). stderr goes
-  into the output. Options: `:cd`, `:env` (`{name, value}` strings) and `:timeout`.
-  A bare executable name is looked up on the PATH.
+  into the output, its last 16 MB at most. Options: `:cd`, `:env` (`{name, value}`
+  strings) and `:timeout`. A bare executable name is looked up on the PATH.
+
+  The deadline holds even when the caller is gone: the program is stopped then too,
+  rather than left running with nobody waiting for it.
   """
   def run(executable, args, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, 600_000)
@@ -34,9 +37,12 @@ defmodule Factory.OsProcess do
     end
   end
 
+  @max_output 16 * 1024 * 1024
+
   defp spawn_and_wait(path, args, opts, timeout) do
     caller = self()
     ref = make_ref()
+    deadline = System.monotonic_time(:millisecond) + timeout
 
     port_opts =
       [
@@ -53,10 +59,12 @@ defmodule Factory.OsProcess do
 
     task =
       Task.Supervisor.async_nolink(Factory.TaskSupervisor, fn ->
+        watch = Process.monitor(caller)
+
         case open(path, port_opts) do
           {:ok, port} ->
             send(caller, {ref, port})
-            collect(port, [])
+            collect(port, {[], 0}, deadline, watch)
 
           {:error, reason} ->
             send(caller, {ref, {:error, reason}})
@@ -70,9 +78,13 @@ defmodule Factory.OsProcess do
         {:error, reason}
 
       {^ref, port} ->
-        case Task.yield(task, timeout) do
+        # A little longer than the deadline: the task stops the program at it.
+        case Task.yield(task, timeout + 1_000) do
           {:ok, {output, status}} ->
             {:ok, output, status}
+
+          {:ok, :timeout} ->
+            {:error, :timeout}
 
           {:exit, reason} ->
             {:error, reason}
@@ -99,14 +111,34 @@ defmodule Factory.OsProcess do
     e in ErlangError -> {:error, "#{Path.basename(path)} couldn't start: #{inspect(e.original)}"}
   end
 
-  defp collect(port, output) do
+  # The output until the program exits; the program and what it started are stopped at
+  # the deadline, or when the caller is gone. Past `@max_output`, only the end is kept.
+  defp collect(port, {output, size}, deadline, watch) do
     receive do
       {^port, {:data, data}} ->
-        collect(port, [data | output])
+        collect(port, keep_end([data | output], size + byte_size(data)), deadline, watch)
 
       {^port, {:exit_status, status}} ->
-        {output |> Enum.reverse() |> IO.iodata_to_binary(), status}
+        all = output |> Enum.reverse() |> IO.iodata_to_binary()
+
+        {if(size > @max_output, do: binary_part(all, size - @max_output, @max_output), else: all),
+         status}
+
+      {:DOWN, ^watch, :process, _pid, _reason} ->
+        kill_tree(port)
+        :caller_gone
+    after
+      max(deadline - System.monotonic_time(:millisecond), 0) ->
+        kill_tree(port)
+        :timeout
     end
+  end
+
+  defp keep_end(output, size) when size <= 2 * @max_output, do: {output, size}
+
+  defp keep_end(output, size) do
+    all = output |> Enum.reverse() |> IO.iodata_to_binary()
+    {[binary_part(all, size - @max_output, @max_output)], @max_output}
   end
 
   @doc """

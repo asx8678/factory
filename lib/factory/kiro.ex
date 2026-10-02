@@ -106,18 +106,6 @@ defmodule Factory.Kiro do
     end)
   end
 
-  @doc """
-  Withdraws a message `prompt/3` or `run_step/4` queued for the agent (its `ref`): see
-  `Factory.Kiro.Session.cancel/2`. `{:error, :gone}` when it has ended, or the session
-  with it.
-  """
-  def cancel(agent, ref) do
-    case whereis(session_key(agent)) do
-      nil -> {:error, :gone}
-      pid -> safe(fn -> Session.cancel(pid, ref) end, {:error, :gone})
-    end
-  end
-
   @doc "Cancels the chat `run_id`'s messages, queued or in progress, in every session."
   def cancel_run(run_id) do
     for pid <- sessions(), do: safe(fn -> Session.cancel_run(pid, run_id) end)
@@ -420,6 +408,10 @@ defmodule Factory.Kiro do
     log = Path.join(log_dir, "#{base}-#{stamp()}#{Path.extname(log_name)}")
     # Room for the one about to be written.
     prune_logs(base, max(log_keep() - 1, 0))
+    # Readable by this user only: it holds the session's token among the headers. Made
+    # first, as the shell's redirect keeps the mode of a file that's there.
+    File.write(log, "")
+    File.chmod(log, 0o600)
 
     # The CLI in use, unless the caller names one (the Kiro catalog is always Kiro's).
     runtime = opts[:runtime] || Factory.Runtime.current()
@@ -465,13 +457,15 @@ defmodule Factory.Kiro do
 
   def prune_logs(base, keep) when is_binary(base) and is_integer(keep) do
     dir = config(:log_dir)
-    dated = ~r/^#{Regex.escape(base)}-\d{8}-\d{6}\.log$/
+    # Dated (`agent-7-20260930-141500-12.log`), or from before logs were (`agent-7.log`,
+    # the oldest of all).
+    named = ~r/^#{Regex.escape(base)}(?:-\d{8}-\d{6}(?:-\d+)?)?\.log$/
 
     case File.ls(dir) do
       {:ok, names} ->
         names
-        |> Enum.filter(&Regex.match?(dated, &1))
-        |> Enum.sort()
+        |> Enum.filter(&Regex.match?(named, &1))
+        |> Enum.sort_by(&{Regex.match?(~r/-\d{8}-\d{6}/, &1), &1})
         |> Enum.drop(-max(keep, 0))
         |> Enum.each(&File.rm(Path.join(dir, &1)))
 
@@ -487,7 +481,12 @@ defmodule Factory.Kiro do
   # How many logs to keep per agent; `:log_keep` in `config :factory, :kiro`, else 5.
   defp log_keep, do: Application.fetch_env!(:factory, :kiro) |> Keyword.get(:log_keep, 5)
 
-  defp stamp, do: Calendar.strftime(DateTime.utc_now(), "%Y%m%d-%H%M%S")
+  # The time to the second, and a number of its own: two started in the same second
+  # mustn't share a log.
+  defp stamp,
+    do:
+      Calendar.strftime(DateTime.utc_now(), "%Y%m%d-%H%M%S") <>
+        "-#{System.unique_integer([:positive, :monotonic])}"
 
   defp blank_to_nil(nil), do: nil
   defp blank_to_nil(s), do: if(String.trim(s) == "", do: nil, else: String.trim(s))

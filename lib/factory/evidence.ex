@@ -24,10 +24,14 @@ defmodule Factory.Evidence do
   def save(run, files) do
     folder = dir(run)
     File.mkdir_p!(folder)
+    # Someone's logs: this user's only.
+    File.chmod(folder, 0o700)
 
     for {name, content} <- files do
       name = unique(folder, safe(name))
-      File.write!(Path.join(folder, name), content)
+      path = Path.join(folder, name)
+      File.write!(path, content)
+      File.chmod(path, 0o600)
       name
     end
   end
@@ -71,6 +75,35 @@ defmodule Factory.Evidence do
 
   @doc "Removes the run's files."
   def delete(run), do: File.rm_rf(dir(run))
+
+  @doc """
+  Removes the files of runs that ended (done or cancelled) or are gone, untouched for
+  `days` (default 30): pasted logs aren't kept for ever. Run once at start
+  (`Factory.Boot`). Returns how many runs' files went.
+  """
+  def sweep(days \\ 30) do
+    cutoff = System.os_time(:second) - days * 86_400
+
+    with {:ok, names} <- File.ls(root()) do
+      names
+      |> Enum.flat_map(fn name ->
+        with "run-" <> id <- name,
+             {id, ""} <- Integer.parse(id),
+             {:ok, %File.Stat{mtime: mtime}} <- File.stat(dir(id), time: :posix),
+             true <- mtime < cutoff,
+             run = Factory.Runs.get_run(id),
+             true <- run == nil or run.status in ["done", "cancelled"] do
+          delete(id)
+          [id]
+        else
+          _ -> []
+        end
+      end)
+      |> length()
+    else
+      _ -> 0
+    end
+  end
 
   @doc "A byte count in words: 812 B, 14 KB, 2.3 MB."
   def size(bytes) when bytes < 1024, do: "#{bytes} B"

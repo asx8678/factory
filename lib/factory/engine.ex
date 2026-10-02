@@ -42,10 +42,34 @@ defmodule Factory.Engine do
   @doc "Runs a queued run in the background. Does nothing when the engine is switched off (tests)."
   def start(%Run{id: id}) do
     if Application.get_env(:factory, :run_engine, true) do
-      Task.Supervisor.start_child(Factory.TaskSupervisor, fn -> run(id) end)
+      case Task.Supervisor.start_child(Factory.TaskSupervisor, fn -> run(id) end) do
+        {:ok, _pid} -> :ok
+        # Left queued, /resume would refuse it: it's paused, to be resumed.
+        {:error, reason} -> fail_to_start(id, reason)
+      end
     end
 
     :ok
+  end
+
+  defp fail_to_start(id, reason) do
+    Runs.with_locked_run(id, fn run ->
+      if run.status == "queued" do
+        {:ok, run} =
+          Runs.update_run(run, %{
+            status: "paused",
+            progress: Map.put(run.progress || %{}, "error", "couldn't start")
+          })
+
+        Runs.post(
+          run,
+          "factory",
+          "The run couldn't start (#{inspect(reason)}). Type /resume to try again."
+        )
+      end
+
+      {:ok, run}
+    end)
   end
 
   @doc "Whether a worker still owns this run, including while its current step finishes."
@@ -209,6 +233,8 @@ defmodule Factory.Engine do
 
   def run(run_id) do
     key = {__MODULE__, run_id}
+    # Everything this worker logs says which run it was.
+    Logger.metadata(run_id: run_id)
 
     case Registry.register(Factory.Kiro.Registry, key, nil) do
       {:ok, _} ->
@@ -759,14 +785,18 @@ defmodule Factory.Engine do
   defp number(%{ref: ref}) when is_binary(ref), do: ref
   defp number(task), do: "#{task.position}"
 
-  @doc ~s{"what to fix" when a reply's last line is "Send back: what to fix", else nil.}
+  @doc """
+  "what to fix" when a reply's last line is "Send back: what to fix", else nil. "Send
+  back" must be the words on their own (not "Send backup…"), and "Send back: none" isn't
+  a send-back.
+  """
   def verdict(output) do
     last =
       output |> String.split("\n") |> Enum.reverse() |> Enum.find("", &(String.trim(&1) != ""))
 
-    case Regex.run(~r/^\W*send back\W*(.*?)\W*$/i, String.trim(last)) do
+    case Regex.run(~r/^\W*send back(?:\s*[:\-—–]\s*|\W*$)(.*?)\W*$/iu, String.trim(last)) do
       [_, ""] -> String.trim(output)
-      [_, fix] -> fix
+      [_, fix] -> if Regex.match?(~r/^(none|nothing|n\/?a)$/i, fix), do: nil, else: fix
       nil -> nil
     end
   end
@@ -944,7 +974,9 @@ defmodule Factory.Engine do
     for task <- Enum.sort_by(run.tasks, & &1.position),
         task.status != "done",
         block = Factory.Verifier.spec_task(run, task),
-        owner = block[:agent] && String.downcase(block.agent),
+        # A generator, not `owner = …`: a nil owner (a task given to nobody) would
+        # filter the task out.
+        owner <- [block[:agent] && String.downcase(block.agent)],
         owner == me or (first? and (owner == nil or not MapSet.member?(names, owner))),
         do: {task, block}
   end
@@ -1407,8 +1439,15 @@ defmodule Factory.Engine do
     recovered
   end
 
-  # Under the row lock: a run that was resumed or cancelled meanwhile is left alone.
+  # Under the row lock: a run that was resumed or cancelled meanwhile is left alone, and
+  # so is one a worker owns already.
   defp recover_locked(%Run{status: status} = run) when status in ["running", "queued"] do
+    if running?(run.id), do: {:ok, :unchanged}, else: recover_now(run, status)
+  end
+
+  defp recover_locked(_run), do: {:ok, :unchanged}
+
+  defp recover_now(run, status) do
     reason = "Factory restarted while this run was #{status}"
     progress = Map.put(run.progress || %{}, "error", reason)
     {:ok, run} = Runs.update_run(run, %{status: "paused", progress: progress})
@@ -1423,8 +1462,6 @@ defmodule Factory.Engine do
 
     {:ok, :recovered}
   end
-
-  defp recover_locked(_run), do: {:ok, :unchanged}
 
   defp blank(s, default), do: if(String.trim(s || "") == "", do: default, else: s)
 end

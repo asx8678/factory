@@ -14,6 +14,7 @@ defmodule FactoryWeb.MCP do
   """
   @behaviour Plug
   import Plug.Conn
+  require Logger
   alias Factory.{PlanTools, RunTools}
 
   # Answered with the version the client asks for, else this one.
@@ -86,7 +87,10 @@ defmodule FactoryWeb.MCP do
   defp handle(conn, "tools/call", %{"name" => name} = params) when is_binary(name) do
     token = token(conn)
 
-    case tools(token).call(token, name, params["arguments"] || %{}) do
+    # A tool that raises answers as a failed tool, not with a 500 Kiro can't read.
+    call = fn -> tools(token).call(token, name, params["arguments"] || %{}) end
+
+    case Factory.Background.guard("Tool #{name}", call) do
       {:elicit, request, then} ->
         # Only a client that reads a stream can be asked; others get the fallback.
         if accepts_stream?(conn),
@@ -94,6 +98,7 @@ defmodule FactoryWeb.MCP do
           else: {:ok, tool_result(then.(%{"action" => "cancel"}))}
 
       result ->
+        log_refused(name, result)
         {:ok, tool_result(result)}
     end
   end
@@ -115,6 +120,13 @@ defmodule FactoryWeb.MCP do
   defp handle(_conn, method, _params), do: {:error, -32601, "#{method} isn't supported."}
 
   defp tools(token), do: if(RunTools.token?(token), do: RunTools, else: PlanTools)
+
+  # What an agent tried and was refused leaves a trace: a stale plan, a step that's over,
+  # a task it may not mark.
+  defp log_refused(name, {:error, text}),
+    do: Logger.info("Factory's tool #{name} refused: #{String.slice(text, 0, 300)}")
+
+  defp log_refused(_name, _result), do: :ok
 
   defp tool_result({:ok, text}), do: %{content: [%{type: "text", text: text}], isError: false}
   defp tool_result({:error, text}), do: %{content: [%{type: "text", text: text}], isError: true}

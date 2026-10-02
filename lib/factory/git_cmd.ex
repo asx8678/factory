@@ -1,29 +1,33 @@
 defmodule Factory.GitCmd do
   @moduledoc """
-  Runs git for `Factory.Repos` and `Factory.Scout`, in a repository's folder or
-  anywhere (`nil`, for `git clone`). Output and errors come back raw, with the
-  surrounding space trimmed, for each caller to explain in its own words.
+  Runs git for `Factory.Repos`, `Factory.Sources` and `Factory.Scout`, in a repository's
+  folder or anywhere (`nil`, for `git clone`), with a deadline (`Factory.OsProcess`):
+  git that overruns is stopped with ssh and anything else it started.
   """
+
+  # Never waits on a person: no password prompt, and ssh neither asks nor hangs on a
+  # host it doesn't know yet.
+  @env [
+    {"GIT_TERMINAL_PROMPT", "0"},
+    {"SSH_ASKPASS_REQUIRE", "never"},
+    {"GIT_SSH_COMMAND",
+     "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15"}
+  ]
 
   @doc """
   Runs `git args` in `dir` (with `git -C dir`, or from the current folder when `dir`
-  is nil): `{:ok, output}` when git exits 0, `{:error, output}` when it doesn't (stderr
-  is in the output), or `{:error, :not_installed}` when there's no git to run.
-
-  `env:` in `opts` is a list of `{name, value}` pairs for git's environment, such as
-  `GIT_SSH_COMMAND`.
+  is nil), as `Factory.OsProcess.run/3` answers: `{:ok, output, exit_status}`,
+  `{:error, :timeout}` or `{:error, reason}`. Options: `:env` (`{name, value}` pairs,
+  over git's own above), `:timeout` (ms, default 5 minutes) and `:executable`.
   """
   def run(dir, args, opts \\ []) do
     args = if dir, do: ["-C", dir | args], else: args
-    env = Keyword.get(opts, :env, [])
+    env = Enum.uniq_by(Keyword.get(opts, :env, []) ++ @env, &elem(&1, 0))
 
-    case System.cmd("git", args, stderr_to_stdout: true, env: env) do
-      {out, 0} -> {:ok, String.trim(out)}
-      {out, _} -> {:error, String.trim(out)}
-    end
-  rescue
-    # System.cmd raises ErlangError (:enoent) when there's no git on the PATH.
-    _ -> {:error, :not_installed}
+    Factory.OsProcess.run(Keyword.get(opts, :executable, "git"), args,
+      env: env,
+      timeout: Keyword.get(opts, :timeout, 300_000)
+    )
   end
 
   @doc """

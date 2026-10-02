@@ -12,9 +12,9 @@ defmodule Factory.PromptText do
     end)
   end
 
-  @doc "Text as given, trimmed; anything else is empty."
-  def text(s) when is_binary(s), do: String.trim(s)
-  def text(_), do: ""
+  # How many `{` that never close are looked past. Each is read to the end of the
+  # reply, so a reply of nothing but `{` would otherwise take seconds.
+  @unclosed 64
 
   @doc """
   The JSON object in a reply: `{:ok, map}` or `:error`. A ```json block comes first;
@@ -23,14 +23,16 @@ defmodule Factory.PromptText do
   """
   def json_object(reply) when is_binary(reply) do
     fenced = for [_, body] <- Regex.scan(~r/```(?:json)?[ \t]*\R(.*?)```/si, reply), do: body
-    Enum.find_value(fenced ++ [reply], :error, &first_object/1)
+    Enum.find_value(fenced ++ [reply], :error, &first_object(&1, @unclosed))
   end
 
   def json_object(_reply), do: :error
 
   # The first `{…}` from the left that decodes to a map. One that doesn't is skipped
   # whole, so an object nested in it isn't taken for the reply.
-  defp first_object(text) do
+  defp first_object(_text, 0), do: nil
+
+  defp first_object(text, tries) do
     case :binary.match(text, "{") do
       :nomatch ->
         nil
@@ -40,14 +42,14 @@ defmodule Factory.PromptText do
 
         case balanced(rest, 0, 0, false, false) do
           nil ->
-            first_object(binary_part(rest, 1, byte_size(rest) - 1))
+            first_object(binary_part(rest, 1, byte_size(rest) - 1), tries - 1)
 
           len ->
             candidate = binary_part(rest, 0, len)
 
             case JSON.decode(candidate) do
               {:ok, %{} = data} -> {:ok, data}
-              _ -> first_object(binary_part(rest, len, byte_size(rest) - len))
+              _ -> first_object(binary_part(rest, len, byte_size(rest) - len), tries)
             end
         end
     end

@@ -330,15 +330,19 @@ defmodule Factory.Specs do
 
         Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
           review =
-            with {:ok, reply} <-
-                   Factory.Kiro.ask(Review.prompt(files),
-                     model: model,
-                     usage: %{source: "review", spec_id: spec.id}
-                   ),
-                 {:ok, review} <- Review.parse(reply) do
-              Map.merge(review, %{"status" => "done", "hash" => hash(spec)})
-            else
+            Factory.Background.guard("Reviewing spec #{spec.id}", fn ->
+              with {:ok, reply} <-
+                     Factory.Kiro.ask(Review.prompt(files),
+                       model: model,
+                       usage: %{source: "review", spec_id: spec.id}
+                     ),
+                   {:ok, review} <- Review.parse(reply) do
+                Map.merge(review, %{"status" => "done", "hash" => hash(spec)})
+              end
+            end)
+            |> case do
               {:error, reason} -> %{"status" => "error", "error" => reason}
+              review -> review
             end
 
           if spec = get_spec(spec.id), do: set_review(spec, review)
@@ -389,20 +393,22 @@ defmodule Factory.Specs do
 
           Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
             result =
-              with {:ok, reply} <-
-                     Factory.Kiro.ask(prompt,
-                       workdir: dir,
-                       model: model,
-                       allow: ["read", "search", "look"],
-                       on_tool:
-                         &broadcast(
-                           "spec:#{spec.id}",
-                           {:plan_activity, Planner.describe_tool(&1, dir)}
-                         ),
-                       usage: %{source: "plan_run", spec_id: spec.id, run_id: run && run.id}
-                     ) do
-                Planner.parse_run_plan(reply, write)
-              end
+              Factory.Background.guard("Writing spec #{spec.id}", fn ->
+                with {:ok, reply} <-
+                       Factory.Kiro.ask(prompt,
+                         workdir: dir,
+                         model: model,
+                         allow: ["read", "search", "look"],
+                         on_tool:
+                           &broadcast(
+                             "spec:#{spec.id}",
+                             {:plan_activity, Planner.describe_tool(&1, dir)}
+                           ),
+                         usage: %{source: "plan_run", spec_id: spec.id, run_id: run && run.id}
+                       ) do
+                  Planner.parse_run_plan(reply, write)
+                end
+              end)
 
             wrote(spec.id, write, ref, result)
           end)
@@ -711,21 +717,25 @@ defmodule Factory.Specs do
 
     Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
       plan =
-        with {:ok, reply} <-
-               Factory.Kiro.ask(
-                 prompt,
-                 [
-                   workdir: dir,
-                   model: model,
-                   allow: ["read", "search", "look"],
-                   on_tool: on_tool,
-                   usage: %{source: source, spec_id: spec.id}
-                 ] ++ opts
-               ),
-             {:ok, result} <- parse.(reply) do
-          done.(result)
-        else
+        Factory.Background.guard("Planning spec #{spec.id}", fn ->
+          with {:ok, reply} <-
+                 Factory.Kiro.ask(
+                   prompt,
+                   [
+                     workdir: dir,
+                     model: model,
+                     allow: ["read", "search", "look"],
+                     on_tool: on_tool,
+                     usage: %{source: source, spec_id: spec.id}
+                   ] ++ opts
+                 ),
+               {:ok, result} <- parse.(reply) do
+            done.(result)
+          end
+        end)
+        |> case do
           {:error, reason} -> Map.merge(base, %{"status" => "error", "error" => reason})
+          plan -> plan
         end
 
       finish_plan(spec.id, ref, plan)
@@ -1053,16 +1063,18 @@ defmodule Factory.Specs do
 
         Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
           result =
-            with {:ok, reply} <-
-                   Factory.Kiro.ask(prompt,
-                     workdir: dir,
-                     model: model,
-                     allow: ["read", "search", "look"],
-                     on_tool: on_tool,
-                     usage: %{source: "improve_task", spec_id: spec.id}
-                   ) do
-              Planner.parse_improvement(reply)
-            end
+            Factory.Background.guard("Improving a task of spec #{spec.id}", fn ->
+              with {:ok, reply} <-
+                     Factory.Kiro.ask(prompt,
+                       workdir: dir,
+                       model: model,
+                       allow: ["read", "search", "look"],
+                       on_tool: on_tool,
+                       usage: %{source: "improve_task", spec_id: spec.id}
+                     ) do
+                Planner.parse_improvement(reply)
+              end
+            end)
 
           broadcast(topic, {:task_improved, task.title, result})
         end)
@@ -1092,16 +1104,18 @@ defmodule Factory.Specs do
 
     Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
       result =
-        with {:ok, reply} <-
-               Factory.Kiro.ask(prompt,
-                 workdir: dir,
-                 model: model,
-                 allow: ["read", "search", "look"],
-                 on_tool: on_tool,
-                 usage: %{source: "draft_task", spec_id: spec.id}
-               ) do
-          Planner.parse_improvement(reply)
-        end
+        Factory.Background.guard("Drafting a task of spec #{spec.id}", fn ->
+          with {:ok, reply} <-
+                 Factory.Kiro.ask(prompt,
+                   workdir: dir,
+                   model: model,
+                   allow: ["read", "search", "look"],
+                   on_tool: on_tool,
+                   usage: %{source: "draft_task", spec_id: spec.id}
+                 ) do
+            Planner.parse_improvement(reply)
+          end
+        end)
 
       broadcast(topic, {:task_drafted, ref, result})
     end)

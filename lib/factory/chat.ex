@@ -139,18 +139,21 @@ defmodule Factory.Chat do
     run = Runs.get_run(run.id)
     report = report(run)
     dir = String.trim(run.settings["project_dir"] || "")
+    # Made with its settings in one go: a chat without its workflow would plan nothing.
     bug = Workflows.standard("bug")
 
-    {:ok, fix} = Runs.create_run("Fix: " <> run.title)
-
     {:ok, fix} =
-      Runs.update_run(fix, %{
-        settings: %{
-          "workflow_id" => bug.id,
-          "base_spec_ids" => bug.base_spec_ids,
-          "project_dir" => if(dir == "", do: nil, else: dir)
-        }
-      })
+      Runs.transact(fn ->
+        with {:ok, fix} <- Runs.create_run("Fix: " <> run.title) do
+          Runs.update_run(fix, %{
+            settings: %{
+              "workflow_id" => bug.id,
+              "base_spec_ids" => bug.base_spec_ids,
+              "project_dir" => if(dir == "", do: nil, else: dir)
+            }
+          })
+        end
+      end)
 
     request = "Fix this, following the troubleshooting report below.\n\n" <> report
 
@@ -337,9 +340,18 @@ defmodule Factory.Chat do
     )
   end
 
+  # Under the row lock: the run may have finished since it was read.
   defp run_command(%Run{status: s} = run, "pause", _) when s in ["queued", "running"] do
-    {:ok, run} = Runs.update_run(run, %{status: "paused"})
-    say(run, "Paused. Type /resume to continue.")
+    {:ok, run} =
+      Runs.with_locked_run(run.id, fn run ->
+        if run.status in ["queued", "running"],
+          do: Runs.update_run(run, %{status: "paused"}),
+          else: {:ok, run}
+      end)
+
+    if run.status == "paused",
+      do: say(run, "Paused. Type /resume to continue."),
+      else: say(run, "Only a queued or running run can be paused. This one is #{run.status}.")
   end
 
   defp run_command(run, "pause", _),

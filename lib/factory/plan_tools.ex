@@ -536,6 +536,10 @@ defmodule Factory.PlanTools do
 
   # Before the start the spec change carries over to the run by itself
   # (`Factory.Specs.update_spec/2`); after it, the run's tasks follow here.
+  # Text on one line, at most `max` characters long.
+  defp one_line(text, max),
+    do: text |> Text.text() |> String.replace(~r/\s*\R\s*/u, " ") |> String.slice(0, max)
+
   defp apply_in_turn(name, args, %{status: "draft"} = run), do: apply_tool(name, args, run)
 
   defp apply_in_turn(name, args, run) do
@@ -705,12 +709,15 @@ defmodule Factory.PlanTools do
 
     case is_integer(number) && number >= 1 && Enum.at(blocks, number - 1) do
       block when is_map(block) ->
-        # Only what's given changes; the rest, maybe the person's edits, stays.
+        # Only what's given changes; the rest, maybe the person's edits, stays. Held to
+        # what a new task may hold (`Planner.task/1`), on one line where it's one.
         changes =
           %{
-            title: Text.text(args["title"]) != "" && Text.text(args["title"]),
-            objective: is_binary(args["objective"]) && Text.text(args["objective"]),
-            details: is_list(args["details"]) && Text.lines(args["details"]),
+            title: Text.text(args["title"]) != "" && one_line(args["title"], 200),
+            objective: is_binary(args["objective"]) && one_line(args["objective"], 500),
+            details:
+              is_list(args["details"]) &&
+                args["details"] |> Enum.filter(&is_binary/1) |> Text.lines() |> Enum.take(12),
             verify: is_list(args["verify"]) && Text.lines(args["verify"]) |> Enum.take(6),
             agent: is_binary(args["agent"]) && Text.text(args["agent"]),
             model: is_binary(args["model"]) && task_model(args["model"]),

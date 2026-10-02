@@ -10,6 +10,7 @@ defmodule Factory.Specs.Planner do
   The first turn's summary of the project is passed to the second, so Kiro doesn't
   start from nothing. Replies are JSON; the parsers keep only what they understand.
   """
+  require Logger
   alias Factory.{PromptText, Text}
 
   # The one shape a task has wherever Kiro writes one: suggestions, a run's plan, a chat
@@ -77,6 +78,8 @@ defmodule Factory.Specs.Planner do
           "requirements" =>
             t["requirements"]
             |> List.wrap()
+            # "1.2" or 1.2; anything else (an object) isn't a requirement's number.
+            |> Enum.filter(&(is_binary(&1) or is_number(&1)))
             |> Enum.map(&to_string/1)
             |> Text.lines()
             |> Enum.take(8)
@@ -1167,7 +1170,9 @@ approach, risks and how it will be tested (for a bug: the likely cause and the f
   defp decode(reply) do
     case PromptText.json_object(reply) do
       {:ok, data} -> {:ok, data}
-      :error -> {:error, "Kiro's reply wasn't something Factory could read."}
+      :error ->
+        Logger.warning("Kiro's reply had no JSON object: " <> String.slice(reply || "", 0, 300))
+        {:error, "Kiro's reply wasn't something Factory could read."}
     end
   end
 

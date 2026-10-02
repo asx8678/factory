@@ -447,7 +447,7 @@ defmodule Factory.Scout do
 
   # git's answer as it is: `repo/1` puts its errors in words.
   defp git(dir, args) do
-    case Factory.OsProcess.run("git", ["-C", dir | args], timeout: @git_timeout) do
+    case Factory.GitCmd.run(dir, args, timeout: @git_timeout) do
       {:ok, out, 0} -> {:ok, String.trim(out)}
       {:ok, out, _} -> {:error, String.trim(out)}
       {:error, :timeout} -> {:error, "git took too long."}

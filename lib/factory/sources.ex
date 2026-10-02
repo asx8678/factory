@@ -14,7 +14,7 @@ defmodule Factory.Sources do
   """
   import Ecto.Query, only: [from: 2]
   alias Factory.{Agents, Kiro, Repo}
-  alias Factory.Sources.{Git, Link, PageIndex, Source}
+  alias Factory.Sources.{Link, PageIndex, Source}
 
   @kinds [
     {"azure_devops", "Azure DevOps repository",
@@ -412,7 +412,11 @@ defmodule Factory.Sources do
         end
 
       Enum.reduce_while(steps, :ok, fn args, :ok ->
-        case Git.run(args, env, max(deadline - System.monotonic_time(:millisecond), 0)) do
+        case Factory.GitCmd.run(nil, args,
+               env: env,
+               timeout: max(deadline - System.monotonic_time(:millisecond), 0),
+               executable: Application.get_env(:factory, :sources_git_executable) || "git"
+             ) do
           {:ok, _, 0} ->
             {:cont, :ok}
 
@@ -437,12 +441,11 @@ defmodule Factory.Sources do
   # Never prompts for a password (it would hang). An Azure DevOps token goes in as an
   # HTTP header through git's environment config, so it isn't on the command line
   # or saved to disk.
+  # Besides what `Factory.GitCmd` sets for every git: a personal access token.
   defp git_env(%Source{kind: "azure_devops", config: c}) do
-    base = [{"GIT_TERMINAL_PROMPT", "0"}, {"SSH_ASKPASS_REQUIRE", "never"}]
-
     case Factory.Text.presence(c["pat_env"]) do
       nil ->
-        {:ok, base}
+        {:ok, []}
 
       var ->
         case System.get_env(var) do
@@ -454,18 +457,16 @@ defmodule Factory.Sources do
             header = "Authorization: Basic " <> Base.encode64(":" <> pat)
 
             {:ok,
-             base ++
-               [
-                 {"GIT_CONFIG_COUNT", "1"},
-                 {"GIT_CONFIG_KEY_0", "http.extraHeader"},
-                 {"GIT_CONFIG_VALUE_0", header}
-               ]}
+             [
+               {"GIT_CONFIG_COUNT", "1"},
+               {"GIT_CONFIG_KEY_0", "http.extraHeader"},
+               {"GIT_CONFIG_VALUE_0", header}
+             ]}
         end
     end
   end
 
-  defp git_env(_source),
-    do: {:ok, [{"GIT_TERMINAL_PROMPT", "0"}, {"SSH_ASKPASS_REQUIRE", "never"}]}
+  defp git_env(_source), do: {:ok, []}
 
   defp git_error(out) do
     out = String.trim(out)

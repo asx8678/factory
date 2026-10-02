@@ -281,18 +281,9 @@ defmodule Factory.Repos do
 
   # git with what's left of the deadline: one still going then is stopped, with ssh.
   defp git(dir, args, deadline) do
-    args = if dir, do: ["-C", dir | args], else: args
-
-    env = [
-      {"GIT_TERMINAL_PROMPT", "0"},
-      {"SSH_ASKPASS_REQUIRE", "never"},
-      {"GIT_SSH_COMMAND",
-       "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15"}
-    ]
-
     timeout = deadline - System.monotonic_time(:millisecond)
 
-    case Factory.OsProcess.run("git", args, env: env, timeout: timeout) do
+    case Factory.GitCmd.run(dir, args, timeout: timeout) do
       {:ok, out, 0} ->
         {:ok, String.trim(out)}
 

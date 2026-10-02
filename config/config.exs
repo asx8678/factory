@@ -70,7 +70,7 @@ config :tailwind,
 # Configure Elixir's Logger
 config :logger, :default_formatter,
   format: "$time $metadata[$level] $message\n",
-  metadata: [:request_id]
+  metadata: [:request_id, :run_id]
 
 # Phoenix encodes and decodes JSON with Elixir's own JSON module (Elixir 1.18+)
 config :phoenix, :json_library, JSON

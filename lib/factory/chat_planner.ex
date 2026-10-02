@@ -224,10 +224,12 @@ defmodule Factory.ChatPlanner do
       # On the planner's own Kiro session, which keeps the conversation between
       # messages; a one-off session when that one is busy in another folder.
       result =
-        case plan_in_session(run, planner, prompt, generation, mode) do
-          {:error, :busy} -> plan_once(run, planner, prompt, generation, dir, mode)
-          result -> result
-        end
+        Factory.Background.guard("Planning run #{run.id}", fn ->
+          case plan_in_session(run, planner, prompt, generation, mode) do
+            {:error, :busy} -> plan_once(run, planner, prompt, generation, dir, mode)
+            result -> result
+          end
+        end)
 
       result =
         case result do

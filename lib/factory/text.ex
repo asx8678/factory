@@ -33,26 +33,6 @@ defmodule Factory.Text do
         do: line
   end
 
-  @doc "The outermost `{...}` in a reply, which may be wrapped in a ```json fence or prose; nil without one."
-  def json_object(reply) when is_binary(reply) do
-    case Regex.run(~r/\{.*\}/s, reply) do
-      [json] -> json
-      _ -> nil
-    end
-  end
-
-  def json_object(_reply), do: nil
-
-  @doc "The JSON object in a reply (`json_object/1`), decoded: `{:ok, map}` or `:error`."
-  def decode_json(reply) do
-    with json when is_binary(json) <- json_object(reply),
-         {:ok, data} when is_map(data) <- JSON.decode(json) do
-      {:ok, data}
-    else
-      _ -> :error
-    end
-  end
-
   @doc "The first `# Heading` in the markdown, trimmed and at most 80 characters, or nil."
   def first_heading(markdown) when is_binary(markdown) do
     case Regex.run(~r/^#\s+(.+)$/m, markdown) do

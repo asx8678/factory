@@ -57,8 +57,8 @@ config :factory, FactoryWeb.Endpoint,
 # Enable dev routes for dashboard and mailbox
 config :factory, dev_routes: true
 
-# Do not include metadata nor timestamps in development logs
-config :logger, :default_formatter, format: "[$level] $message\n"
+# No timestamps in development logs; the run a line is about, when there is one.
+config :logger, :default_formatter, format: "[$level] $metadata$message\n", metadata: [:run_id]
 
 # Set a higher stacktrace during development. Avoid configuring such
 # in production as building large stacktraces may be expensive.
