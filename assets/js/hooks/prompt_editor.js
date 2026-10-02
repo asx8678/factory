@@ -31,6 +31,13 @@ export const PromptEditor = {
         },
       })
     }
+    // The server's text, when it changed under what was being typed (the Spec page's
+    // `set_text`): a focused box isn't refreshed by LiveView itself.
+    this.handleEvent("set_text", ({id, text}) => {
+      if (id !== this.el.id) return
+      this.el.value = text
+      this.resize()
+    })
     this.resize()
     if (this.el.dataset.autofocus !== undefined) {
       this.el.focus()
