@@ -187,7 +187,7 @@ defmodule FactoryWeb.ActionParts do
             type="button"
             phx-click="action_run"
             disabled={@missing != [] or @running}
-            data-confirm={"Run “#{@action.name}” now? It really does it (#{@type && String.downcase(@type.label)}), with sample values for {{run}} and the like."}
+            data-confirm={"Run “#{@action.name}” now? It really does it (#{@type && String.downcase(@type.label)}), with sample values for {{run}} and the like#{if @action.action["config"]["folder"] in [nil, ""], do: ", and with no folder of its own", else: " in #{@action.action["config"]["folder"]}"}."}
             class="btn btn-sm border-warning/50 bg-warning/15 hover:bg-warning/25"
           >
             <.icon name="hero-play-mini" class="size-4 text-warning" /> Run now

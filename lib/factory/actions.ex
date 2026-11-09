@@ -252,13 +252,23 @@ defmodule Factory.Actions do
       |> String.trim_trailing("]")
       |> String.trim_trailing(".")
 
-    case :inet.parse_strict_address(String.to_charlist(name)) do
+    # Not parse_strict: `127.1` and `2130706433` are this machine too.
+    case :inet.parse_address(String.to_charlist(name)) do
       {:ok, ip} ->
         not private_ip?(ip)
 
       {:error, _} ->
         name not in ["localhost", "localhost.localdomain"] and
-          not String.ends_with?(name, [".localhost", ".local", ".internal", ".home.arpa"])
+          not String.ends_with?(name, [".localhost", ".local", ".internal", ".home.arpa"]) and
+          not resolves_private?(name)
+    end
+  end
+
+  # A public-looking name may point here. One that doesn't resolve can't reach anything.
+  defp resolves_private?(name) do
+    case :inet.getaddrs(String.to_charlist(name), :inet, 2_000) do
+      {:ok, ips} -> Enum.any?(ips, &private_ip?/1)
+      {:error, _} -> false
     end
   end
 
@@ -330,6 +340,18 @@ defmodule Factory.Actions do
     end
   end
 
+  # What's right to run again: a push sends what's new, a command checks what's there now.
+  @repeatable ~w(git_push command)
+
+  @doc "Whether doing this action twice with the same content would do harm or be noise."
+  def once?(%Agent{action: %{"type" => type}}), do: type not in @repeatable
+  def once?(_action), do: true
+
+  @doc "What this action would send, in a form to compare with what it sent before."
+  def fingerprint(%Agent{action: action}, ctx) do
+    Factory.Context.sha256(:erlang.term_to_binary({action, ctx["summary"]}))
+  end
+
   @doc "Does the action: `{:ok, what happened}` or `{:error, reason}`."
   def run(%Agent{} = action, ctx \\ context()) do
     with {:ok, steps} <- steps(action, ctx, :run) do
@@ -370,19 +392,14 @@ defmodule Factory.Actions do
 
   defp build("git_push", c, ctx, _mode) do
     folder = folder(c, ctx)
-    remote = Factory.Text.presence(c["remote"]) || "origin"
-    branch = Factory.Text.presence(c["branch"])
 
-    {:ok,
-     if(branch,
-       do: [{:cmd, folder, ["checkout", "-B", branch], "Switch to branch #{branch}"}],
-       else: []
-     ) ++
-       [
-         {:cmd, folder, ["add", "-A"], "Stage every change"},
-         {:cmd, folder, ["commit", "-m", c["message"]], "Commit: #{c["message"]}"},
-         {:cmd, folder, ["push", "-u", remote, branch || "HEAD"], "Push to #{remote}"}
-       ]}
+    if Path.expand(folder) == Path.expand(Factory.Kiro.config(:workspace)) do
+      {:error,
+       "Commit & push needs a project: with no folder it would act on the repository around " <>
+         "Factory's scratch folder. Choose a project folder, or fill in Folder."}
+    else
+      git_push_steps(folder, c)
+    end
   end
 
   defp build("github_pr", c, _ctx, mode) do
@@ -647,6 +664,22 @@ defmodule Factory.Actions do
 
   # Doing it
 
+  defp git_push_steps(folder, c) do
+    remote = Factory.Text.presence(c["remote"]) || "origin"
+    branch = Factory.Text.presence(c["branch"])
+
+    {:ok,
+     if(branch,
+       do: [{:cmd, folder, ["checkout", "-B", branch], "Switch to branch #{branch}"}],
+       else: []
+     ) ++
+       [
+         {:cmd, folder, ["add", "-A"], "Stage every change"},
+         {:cmd, folder, ["commit", "-m", c["message"]], "Commit: #{c["message"]}"},
+         {:cmd, folder, ["push", "-u", remote, branch || "HEAD"], "Push to #{remote}"}
+       ]}
+  end
+
   @git_timeout 5 * 60_000
 
   # git never asks for anything (a password, a passphrase, whether to trust a host): it
@@ -732,7 +765,9 @@ defmodule Factory.Actions do
          end}
 
       {:ok, %{status: status, body: resp}} ->
-        {:error, "#{label} failed (HTTP #{status}): #{error_text(resp)}"}
+        if already_there?(status, resp),
+          do: {:ok, "#{label}: it's already there."},
+          else: {:error, "#{label} failed (HTTP #{status}): #{error_text(resp)}"}
 
       {:error, e} ->
         {:error, "#{label} failed: #{Exception.message(e)}"}
@@ -780,9 +815,20 @@ defmodule Factory.Actions do
   defp preview(body) when is_binary(body), do: String.slice(body, 0, 400)
   defp preview(body), do: body |> JSON.encode!() |> String.slice(0, 400)
 
+  # What the service says went wrong, in full where it's a list (GitHub's `errors`).
+  defp error_text(%{"message" => message, "errors" => errors}),
+    do: tail("#{message}: #{inspect(errors)}")
+
   defp error_text(%{"message" => m}), do: m
   defp error_text(body) when is_binary(body), do: tail(body)
   defp error_text(body), do: body |> inspect() |> tail()
+  # GitHub's 422 and Azure DevOps' TF401179 for a pull request that's open already: the
+  # branch was pushed again, and the pull request has the new work.
+  defp already_there?(status, body) when status in [400, 409, 422] do
+    inspect(body) =~ ~r/pull request already exists|already exists for|TF401179/i
+  end
+
+  defp already_there?(_status, _body), do: false
 
   defp tail(text), do: text |> to_string() |> String.trim() |> String.slice(-500, 500)
 end

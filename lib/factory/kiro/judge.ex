@@ -12,6 +12,7 @@ defmodule Factory.Kiro.Judge do
 
   # Tool kinds that name files.
   @file_kinds ~w(read search edit delete move)
+  @changing_kinds ~w(edit delete move)
 
   @doc """
   `{decision, outside}`: the decision `:allow`, `:reject`, `{:ask, reason}`, or
@@ -30,6 +31,12 @@ defmodule Factory.Kiro.Judge do
         else: []
 
     asks? = Keyword.get(opts, :ask_outside, false) and kind in ["read", "search"]
+
+    # A change that doesn't say where can't be kept to the folder. Kiro's say.
+    outside =
+      if kind in @changing_kinds and paths == [] and Keyword.get(opts, :check_paths, true),
+        do: ["(no path named)"],
+        else: outside
 
     if outside != [] and not asks?,
       do: {:outside, outside},

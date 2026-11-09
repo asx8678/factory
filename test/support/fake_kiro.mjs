@@ -2,12 +2,15 @@
 // Stands in for `kiro-cli acp` in tests: answers the ACP handshake and echoes prompts.
 // A prompt containing "write" first asks permission to write a file.
 import readline from "node:readline"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readFileSync, writeFileSync } from "node:fs"
+import { spawn } from "node:child_process"
 const out = (msg) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...msg }) + "\n")
 const update = (sessionId, update) => out({ method: "session/update", params: { sessionId, update } })
 // What a turn cost, reported like Kiro does before the turn ends.
 const cost = (sessionId, usage) => update(sessionId, { sessionUpdate: "session_info_update", _meta: { kiro: { promptTurnSummaries: [{ usage }] } } })
 let waiting = null
+// The prompt being held open (`[test:hold]`), for session/cancel.
+let held = null
 let sessions = 0
 const history = {}
 // The MCP servers each session was given (Factory's plan tools), by session id.
@@ -45,6 +48,12 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     out({ method: "_kiro/mcp/status", params: { sessionId: `sess_${process.pid}_${sessions}`, servers } })
   }
   if (m.method === "_kiro/session/compact") out({ id: m.id, result: { success: true } })
+  // Like Kiro 3.1: a cancelled turn says what it cost, then ends. "[test:stubborn]" doesn't.
+  if (m.method === "session/cancel" && held && !held.stubborn) {
+    cost(m.params.sessionId, 0.5)
+    out({ id: held.id, result: { stopReason: "cancelled" } })
+    held = null
+  }
   if (m.method === "session/set_config_option") {
     const { configId, value } = m.params
     if (value === "bad-model") out({ id: m.id, error: { code: -32602, message: "unknown model" } })
@@ -59,11 +68,126 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     // earlier message when Factory doesn't send them again (a run step's brief).
     const seen = (history[sessionId] = (history[sessionId] || "") + "\n" + text)
     // Hold a turn open while tests deliver timeout and late-response messages.
-    if (text.endsWith("[test:wait]") || text.includes("[test:hold]"))
+    if (text.endsWith("[test:wait]") || text.includes("[test:hold]")) {
+      held = { id: m.id, stubborn: text.includes("[test:stubborn]") }
       return update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "waiting" } })
+    }
+    // How a turn can go wrong, as Kiro 3.1 does it.
+    const stopped = seen.match(/\[test:stop=(\w+)\]/)
+    if (stopped && !text.includes("<task-verification>")) {
+      update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "The first half of the answer, cut off mid-sen" } })
+      cost(sessionId, 0.5)
+      return out({ id: m.id, result: { stopReason: stopped[1] } })
+    }
+    if (seen.includes("[test:rpc-error]")) {
+      update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Partly done." } })
+      return out({ id: m.id, error: { code: -32000, message: "You've reached your monthly usage limit." } })
+    }
+    if (seen.includes("[test:die]")) {
+      update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Partly done." } })
+      process.stderr.write("error: not logged in\n")
+      return setTimeout(() => process.exit(1), 50)
+    }
+    const say = (t) => update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: t } })
+    // A question to the person mid-turn, which the turn waits for.
+    if (seen.includes("[test:ask-person]") && !text.includes("<task-verification>")) {
+      waiting = (reply) => {
+        waiting = null
+        say(`answered: ${reply.result.action}`)
+        out({ id: m.id, result: { stopReason: "end_turn" } })
+      }
+      return out({ id: 900, method: "_kiro/mcp/elicitation", params: { sessionId, elicitation: { message: "Which one?", requestedSchema: { type: "object", properties: { a: { type: "string" } } } } } })
+    }
+    // Busy, saying something now and then, for longer than a silence may last.
+    if (seen.includes("[test:busy]")) {
+      let left = 8
+      const tick = setInterval(() => {
+        say("working ")
+        if (--left === 0) {
+          clearInterval(tick)
+          out({ id: m.id, result: { stopReason: "end_turn" } })
+        }
+      }, 60)
+      return
+    }
+    // A command still running when the CLI dies.
+    if (seen.includes("[test:spawn-die]")) {
+      say("Started the tests.")
+      spawn("sleep", ["31337"], { stdio: "ignore" })
+      return setTimeout(() => process.exit(3), 200)
+    }
+    // Fails with throttling the first time, then answers.
+    if (seen.includes("[test:throttle-once]") && !existsSync(".fake-throttled")) {
+      writeFileSync(".fake-throttled", "1")
+      return out({ id: m.id, error: { code: -32000, message: "ThrottlingException: too many requests" } })
+    }
+    if (seen.includes("[test:sub-agents]")) {
+      for (const n of [1, 2, 3, 4]) update(sessionId, { sessionUpdate: "tool_call", toolCallId: `sub_${n}`, kind: "other", title: "Sub-agent: context-gatherer", status: "pending" })
+      return
+    }
+    // A command as Kiro 3.1 reports it, failing, with what it said.
+    if (seen.includes("[test:tool-fail]")) {
+      update(sessionId, { sessionUpdate: "tool_call", toolCallId: "run_1", kind: "execute", title: "Run the tests", status: "pending", rawInput: { command: "mix test", cwd: process.cwd() } })
+      update(sessionId, { sessionUpdate: "tool_call_update", toolCallId: "run_1", status: "failed", content: [{ type: "content", content: { type: "text", text: "boom: 3 tests failed" } }] })
+      update(sessionId, { sessionUpdate: "tool_call", toolCallId: "run_2", kind: "execute", title: "List files", status: "pending", rawInput: { command: "ls", cwd: process.cwd() } })
+      update(sessionId, { sessionUpdate: "tool_call_update", toolCallId: "run_2", status: "completed" })
+      say("Done.")
+      return out({ id: m.id, result: { stopReason: "end_turn" } })
+    }
+    // A tool Kiro's settings trusted: it ran with nobody asked.
+    if (seen.includes("[test:unasked]")) {
+      update(sessionId, { sessionUpdate: "tool_call", toolCallId: "edit_1", kind: "edit", title: "Write File", status: "in_progress" })
+      update(sessionId, { sessionUpdate: "tool_call_update", toolCallId: "edit_1", status: "completed" })
+      say("Done.")
+      return out({ id: m.id, result: { stopReason: "end_turn" } })
+    }
+    // A permission request as Kiro 3.1 sends it: no kind, the command on the tool call before
+    // it, an option to always allow, and what it's about in `consent`.
+    if (seen.includes("[test:kiro-3.1]")) {
+      update(sessionId, { sessionUpdate: "tool_call", toolCallId: "run_31", kind: "execute", title: "Run Command", status: "pending", rawInput: { command: "touch x", cwd: process.cwd() } })
+      waiting = (reply) => {
+        waiting = null
+        say(`[chose ${reply.result.outcome.optionId}]`)
+        out({ id: m.id, result: { stopReason: "end_turn" } })
+      }
+      return out({ id: 900, method: "session/request_permission", params: { sessionId, toolCall: { toolCallId: "run_31", status: "pending", title: "touch x" }, options: [{ optionId: "accept", name: "Allow", kind: "allow_once" }, { optionId: "always-accept", name: "Always allow", kind: "allow_always" }, { optionId: "reject", name: "Deny", kind: "reject_once" }, { optionId: "always-reject", name: "Always deny", kind: "reject_always" }], _meta: { kiro: { toolId: "run_command", command: "touch x", consent: { capability: "shell", resource: "touch x", askType: "implicit", workspaceRoot: process.cwd() }, consentRound: 1 } } } })
+    }
+    // Marks the task this turn is about.
+    if (seen.includes("[test:complete-focus]") && (mcp[sessionId] || []).length > 0) {
+      const focus = text.match(/<this-task number="([^"]+)">/)
+      ;(async () => {
+        const result = await callTool(sessionId, "complete_tasks", { numbers: [focus ? focus[1] : "1"] })
+        say("Built it. [tools: " + (result.denied ? "denied" : result.content[0].text) + "]")
+        out({ id: m.id, result: { stopReason: "end_turn" } })
+      })()
+      return
+    }
+    if (seen.includes("[test:say-nothing]")) {
+      update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "I looked at the work." } })
+      return out({ id: m.id, result: { stopReason: "end_turn" } })
+    }
+    if (seen.includes("[test:always-send-back]") && text.includes("Send back: <what to fix>")) {
+      update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Checked.\nSend back: the tests still fail" } })
+      return out({ id: m.id, result: { stopReason: "end_turn" } })
+    }
+    if (seen.includes("[test:complete-all]") && (mcp[sessionId] || []).length > 0) {
+      ;(async () => {
+        const result = await callTool(sessionId, "complete_tasks", { numbers: [1, 2] })
+        update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Built them. [tools: " + (result.denied ? "denied" : result.content[0].text) + "]" } })
+        out({ id: m.id, result: { stopReason: "end_turn" } })
+      })()
+      return
+    }
     // Verifying a finished task: passes, unless the task says "[test:verify-fail]".
     if (text.includes("<task-verification>")) {
-      const passed = !text.includes("[test:verify-fail]")
+      if (!/The task: .*\[test:verify-no-tools\]/.test(text))
+        update(sessionId, { sessionUpdate: "tool_call", toolCallId: "verify_read", kind: "read", title: "Read File" })
+      let passed = !/The task: .*\[test:verify-fail\]/.test(text)
+      // Fails the first time it's asked, as a task does before its fix.
+      if (/The task: .*\[test:verify-fail-once\]/.test(text) && !existsSync(".fake-verify-failed")) {
+        writeFileSync(".fake-verify-failed", "1")
+        passed = false
+      }
       const reply = { passed, checks: [{ check: "It does what the task says", passed, evidence: "Read the code." }], fix: passed ? "" : "Make it do what the task says." }
       update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: JSON.stringify(reply) } })
       return out({ id: m.id, result: { stopReason: "end_turn" } })
@@ -216,11 +340,11 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       // or names only its own tool ("[test:tool-id]").
       if (text.includes("[test:kiro-2.26]")) {
         update(sessionId, { sessionUpdate: "tool_call", toolCallId: "call_w", kind: "edit", title: "Write File", status: "in_progress" })
-        return out({ id: 900, method: "session/request_permission", params: { sessionId, toolCall: { toolCallId: "call_w", status: "pending", title: "Write notes.md" }, options, _meta: { kiro: { toolId: "fs_write" } } } })
+        return out({ id: 900, method: "session/request_permission", params: { sessionId, toolCall: { toolCallId: "call_w", status: "pending", title: "Write notes.md", rawInput: { path: "notes.md" } }, options, _meta: { kiro: { toolId: "fs_write" } } } })
       }
       if (text.includes("[test:tool-id]"))
-        return out({ id: 900, method: "session/request_permission", params: { sessionId, toolCall: { title: "Write notes.md" }, options, _meta: { kiro: { toolId: "fs_write" } } } })
-      out({ id: 900, method: "session/request_permission", params: { sessionId, toolCall: { title: "Write notes.md", kind: "edit" }, options } })
+        return out({ id: 900, method: "session/request_permission", params: { sessionId, toolCall: { title: "Write notes.md", rawInput: { path: "notes.md" } }, options, _meta: { kiro: { toolId: "fs_write" } } } })
+      out({ id: 900, method: "session/request_permission", params: { sessionId, toolCall: { title: "Write notes.md", kind: "edit", rawInput: { path: "notes.md" } }, options } })
     } else finish()
   }
 })

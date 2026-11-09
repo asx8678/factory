@@ -66,6 +66,11 @@ defmodule Factory.Kiro.RPC do
     Enum.all?(names, &(Map.has_key?(servers, &1) and servers[&1] not in ["connecting", nil]))
   end
 
+  @doc "Whether Kiro's MCP server `name` failed to load, from the same notification."
+  def mcp_failed?(params, name) do
+    Enum.any?(List.wrap(params["servers"]), &(&1["name"] == name and &1["status"] == "failed"))
+  end
+
   @doc """
   Stops kiro-cli for good: it and everything it started (MCP servers, shells, their
   commands) are killed while it still runs, then the port is closed and what it sent
@@ -101,6 +106,7 @@ defmodule Factory.Kiro.RPC do
 
   defp terminate(os_pid) when is_integer(os_pid) do
     System.cmd("kill", ["-TERM", Integer.to_string(os_pid)], stderr_to_stdout: true)
+    Factory.OsProcess.kill_group(os_pid)
     :ok
   rescue
     _ -> :ok

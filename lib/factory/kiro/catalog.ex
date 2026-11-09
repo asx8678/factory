@@ -123,9 +123,26 @@ defmodule Factory.Kiro.Catalog do
     end)
   end
 
-  @doc "Checks in the background, e.g. at startup."
-  def check_later do
-    Task.Supervisor.start_child(Factory.TaskSupervisor, fn -> check() end)
+  @doc """
+  Checks in the background, e.g. at startup. A first start after an upgrade may not have
+  its models yet, so a failed check is tried again, a little later each time.
+  """
+  def check_later(waits \\ [10_000, 60_000, 300_000]) do
+    Task.Supervisor.start_child(Factory.TaskSupervisor, fn -> check_until(waits) end)
+  end
+
+  defp check_until(waits) do
+    case {check(), waits} do
+      {{:ok, _}, _} ->
+        :ok
+
+      {_error, []} ->
+        :ok
+
+      {_error, [wait | rest]} ->
+        Process.sleep(wait)
+        check_until(rest)
+    end
   end
 
   # Read, changed and written one at a time: sessions, one-off questions and the check
@@ -163,8 +180,14 @@ defmodule Factory.Kiro.Catalog do
       with {:ok, _} <- await(port, 1, log),
            :ok <- RPC.request(port, 2, "session/new", %{cwd: workdir, mcpServers: []}),
            {:ok, result} <- await(port, 2, log) do
+        configured = result["configOptions"]
+
+        # Kiro may answer before it has its list of models, and send it right after.
+        configured =
+          if has_models?(configured), do: configured, else: later_options(port, configured)
+
         options =
-          for %{"id" => id, "options" => opts} <- List.wrap(result["configOptions"]),
+          for %{"id" => id, "options" => opts} <- List.wrap(configured),
               id in ["model", "mode"],
               into: %{} do
             {id,
@@ -187,6 +210,32 @@ defmodule Factory.Kiro.Catalog do
       e -> {:error, Exception.message(e)}
     after
       RPC.close_port(port)
+    end
+  end
+
+  defp has_models?(options) do
+    Enum.any?(List.wrap(options), &match?(%{"id" => "model", "options" => [_ | _]}, &1))
+  end
+
+  # The `config_option_update` that follows, for up to ten seconds.
+  defp later_options(port, options, deadline \\ System.monotonic_time(:millisecond) + 10_000) do
+    receive do
+      {^port, {:data, data}} ->
+        case RPC.read("", data) do
+          {:message,
+           %{
+             "method" => "session/update",
+             "params" => %{
+               "update" => %{"sessionUpdate" => "config_option_update", "configOptions" => latest}
+             }
+           }} ->
+            if has_models?(latest), do: latest, else: later_options(port, latest, deadline)
+
+          _ ->
+            later_options(port, options, deadline)
+        end
+    after
+      max(deadline - System.monotonic_time(:millisecond), 0) -> options
     end
   end
 

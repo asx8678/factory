@@ -19,6 +19,7 @@ defmodule Factory.Context.Render do
 
   @sections [
     {:dialogue, "[Recent messages and replies]", 12288},
+    {:goal, "[Goal]", 1536},
     {:requests, "[Earlier messages]", 4096},
     {:files, "[Files]", 4608},
     {:outstanding, "[Failures]", 4608},
@@ -54,8 +55,7 @@ defmodule Factory.Context.Render do
       bounded_block(
         "---",
         [
-          "[compacted #{at || "(unknown time)"}; cumulative source entries #{first || "(start)"} → #{last || "(end)"}]",
-          "The full conversation is kept in Factory's chat history."
+          "[compacted #{at || "(unknown time)"}; cumulative source entries #{first || "(start)"} → #{last || "(end)"}]"
         ],
         @footer_bytes
       )

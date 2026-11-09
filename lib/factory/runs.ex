@@ -12,6 +12,17 @@ defmodule Factory.Runs do
 
   def unsubscribe(run_id), do: Phoenix.PubSub.unsubscribe(Factory.PubSub, "run:#{run_id}")
 
+  @doc "Closes the questions still open from before a restart: nothing is waiting for them."
+  def expire_open_questions do
+    Repo.all(from m in Message, where: fragment("?->'elicitation'->>'status' = 'open'", m.meta))
+    |> Enum.each(fn message ->
+      update_message_meta(message.id, &put_in(&1, ["elicitation", "status"], "expired"))
+    end)
+  end
+
+  @doc "The runs queued or running."
+  def list_active, do: Repo.all(from(r in Run, where: r.status in ["queued", "running"]))
+
   @doc "Subscribes to `{:active_runs_changed}`: a run was made, removed or changed status."
   def subscribe_active, do: Phoenix.PubSub.subscribe(Factory.PubSub, "runs:active")
 

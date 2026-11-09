@@ -28,6 +28,13 @@ defmodule Factory.Kiro do
   def planning_model, do: chosen("planning_model") || strongest()
 
   @doc """
+  The model for small planning jobs (reviewing a spec, drafting or improving one task): the
+  one chosen in Settings, else `quick/0`. The newest Opus costs twenty times as much on the
+  same prompt, for work this size.
+  """
+  def light_model, do: chosen("light_model") || quick()
+
+  @doc """
   The model that checks each finished task against its checks: the one chosen in
   Settings, else the newest Claude Haiku this Kiro offers, which is quick and cheap
   and isn't the model that built it.
@@ -83,6 +90,37 @@ defmodule Factory.Kiro do
   defp values(_), do: nil
 
   def config(key), do: Application.fetch_env!(:factory, :kiro) |> Keyword.fetch!(key)
+
+  defp config(key, default),
+    do: Application.fetch_env!(:factory, :kiro) |> Keyword.get(key, default)
+
+  @doc """
+  The longest one turn may take in all, however busy it stays:
+  `config :factory, :kiro, prompt_cap`, else six times `prompt_timeout`, which is how long
+  Kiro may stay silent.
+  """
+  def prompt_cap, do: config(:prompt_cap, 6 * config(:prompt_timeout))
+
+  @doc """
+  How long a question to the person stays open before the turn goes on without an answer:
+  `config :factory, :kiro, question_timeout`, else 14 minutes, under the 15 the tool itself
+  waits (`FactoryWeb.MCP`), so what it does with no answer is what happens.
+  """
+  def question_timeout, do: config(:question_timeout, :timer.minutes(14))
+
+  @doc "How long a cancelled turn gets to say what it cost before its process is stopped."
+  def cancel_wait, do: config(:cancel_wait, 5_000)
+
+  @doc """
+  Why a turn that ended with `stop_reason` didn't finish, or nil when it did. What it wrote
+  may be cut off, so it isn't an answer anyone should go on from.
+  """
+  def early_stop(reason) when reason in [nil, "end_turn"], do: nil
+  def early_stop("max_tokens"), do: "Kiro cut the reply off at the model's output limit."
+  def early_stop("max_turn_requests"), do: "Kiro stopped at its limit of tool calls for one turn."
+  def early_stop("refusal"), do: "The model refused to go on."
+  def early_stop("cancelled"), do: "Kiro cancelled the turn."
+  def early_stop(other), do: "Kiro stopped the turn early (#{other})."
 
   @doc "The session an agent talks in: `:shared`, or its own id."
   def session_key(%{session: "shared"}), do: :shared
@@ -168,7 +206,7 @@ defmodule Factory.Kiro do
     case queued do
       {:ok, pid} ->
         monitor = Process.monitor(pid)
-        wait = 2 * config(:prompt_timeout) + 60_000
+        wait = 2 * prompt_cap() + 60_000
 
         receive do
           {^ref, result} ->
@@ -262,6 +300,9 @@ defmodule Factory.Kiro do
 
       Factory.Runtime.current() == :kiro and not File.exists?(config(:cli)) ->
         {:error, "kiro-cli wasn't found at #{config(:cli)}."}
+
+      match?({:error, _}, Factory.Repos.safe_to_start(dir)) ->
+        {:error, elem(Factory.Repos.safe_to_start(dir), 1)}
 
       true ->
         start_child(key, dir)
@@ -367,9 +408,7 @@ defmodule Factory.Kiro do
   """
   def stop_reason(log, code) do
     lines =
-      log
-      |> log_tail()
-      |> String.split(~r/\R/)
+      ((log |> log_tail() |> String.split(~r/\R/)) ++ recent_kiro_log())
       |> Enum.map(&String.trim/1)
 
     error =
@@ -399,6 +438,23 @@ defmodule Factory.Kiro do
   nothing gets an answer until it resets.
   """
   def usage_limited?(reason), do: is_binary(reason) and reason =~ ~r/usage limit/i
+
+  # Kiro 3 keeps most of what it logs in its own folder, not on stderr. Only its last lines,
+  # and only what says it isn't signed in, count from there: it may be another session's.
+  defp recent_kiro_log do
+    with [newest | _] <-
+           Path.join(System.user_home!(), ".kiro/logs/*/kiro.log")
+           |> Path.wildcard()
+           |> Enum.sort(:desc),
+         {:ok, text} <- File.read(newest) do
+      text
+      |> String.split(~r/\R/)
+      |> Enum.take(-50)
+      |> Enum.filter(&(&1 =~ ~r/not logged in/i))
+    else
+      _ -> []
+    end
+  end
 
   # What kiro-cli wrote to its log, at most the last 64 KB of it.
   defp log_tail(log) do
@@ -448,8 +504,11 @@ defmodule Factory.Kiro do
     # The CLI in use, unless the caller names one (the Kiro catalog is always Kiro's).
     runtime = opts[:runtime] || Factory.Runtime.current()
     {cli, args, env} = Factory.Runtime.command(runtime, opts)
+    {cli, args} = Factory.Sandbox.wrap(cli, args, workdir, opts[:sandbox], opts[:roots] || [])
 
     # sh only redirects stderr to the log; exec replaces it with the CLI.
+    # The port starts it as the leader of its own process group, so nothing it starts
+    # outlives it (`OsProcess.kill_group/1`).
     port =
       Port.open({:spawn_executable, "/bin/sh"}, [
         :binary,
@@ -459,11 +518,50 @@ defmodule Factory.Kiro do
         {:env,
          [
            {~c"KIRO_LOG", ~c"#{log}"}
-         ] ++ ceiling(workdir) ++ for({name, value} <- env, do: {~c"#{name}", ~c"#{value}"})},
+         ] ++
+           scrubbed_env(runtime) ++
+           git_safety() ++
+           ceiling(workdir) ++ for({name, value} <- env, do: {~c"#{name}", ~c"#{value}"})},
         {:args, ["-c", ~s(exec "$0" "$@" 2>"$KIRO_LOG"), cli | args]}
       ])
 
     {port, Path.basename(log)}
+  end
+
+  # A port's `:env` only adds to what Factory has, and tokens for actions and data sources
+  # are in Factory's environment. Everything an agent runs inherits this, so it gets only
+  # what tools need to work (`config :factory, :agent_env` adds names). pi reads its
+  # providers' keys from the environment, so on pi those stay.
+  @agent_env ~w(PATH HOME USER LOGNAME SHELL LANG LANGUAGE TERM TMPDIR TZ PWD HOSTNAME
+                JAVA_HOME GOPATH GOROOT CARGO_HOME RUSTUP_HOME VIRTUAL_ENV CONDA_PREFIX
+                HEX_HOME MIX_HOME MIX_ARCHIVES HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy
+                https_proxy no_proxy SSL_CERT_FILE SSL_CERT_DIR NODE_EXTRA_CA_CERTS
+                ACP_CAPTURE_DIR)
+  @agent_env_prefixes ~w(LC_ XDG_ KIRO_ MISE_ ASDF_ NVM_ PYENV_ WSL)
+
+  defp scrubbed_env(runtime) do
+    extra = Application.get_env(:factory, :agent_env, [])
+
+    for {name, _value} <- System.get_env(),
+        name not in @agent_env,
+        name not in extra,
+        not String.starts_with?(name, @agent_env_prefixes),
+        not (runtime == :pi and
+               (String.starts_with?(name, "PI_") or String.ends_with?(name, "_API_KEY"))),
+        do: {String.to_charlist(name), false}
+  end
+
+  # git run by an agent obeys a config file in whatever folder it runs: a repository can
+  # carry a second one under an ordinary name, whose `core.fsmonitor` is a command. These
+  # outrank any config file.
+  defp git_safety do
+    [
+      {~c"GIT_CONFIG_COUNT", ~c"2"},
+      {~c"GIT_CONFIG_KEY_0", ~c"safe.bareRepository"},
+      {~c"GIT_CONFIG_VALUE_0", ~c"explicit"},
+      {~c"GIT_CONFIG_KEY_1", ~c"core.fsmonitor"},
+      {~c"GIT_CONFIG_VALUE_1", ~c"false"}
+    ]
   end
 
   # The default workspace is scratch space inside Factory's own folder: git there must

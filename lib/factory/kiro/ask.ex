@@ -23,6 +23,10 @@ defmodule Factory.Kiro.Ask do
     * `:on_tool` - called with each ACP `tool_call` update as Kiro starts using a tool
     * `:mcp_servers` - MCP servers the session gets, as ACP `session/new` takes them; Kiro
       may call the tools of these without asking (its MCP permission requests carry no kind)
+    * `:sandbox` - how the CLI is confined (`Factory.Sandbox`): `:read_only`, `:project` or
+      nil. Unless given, a question that may neither edit nor run commands is `:read_only`
+    * `:abort` - a function asked every second or two: true stops the question, as when
+      its run is cancelled
     * `:reply` - `:all` (default) for everything Kiro wrote, `:last` for only what it wrote
       after its last tool call (its closing message, without the narration in between),
       which may be empty, or `:first` for only what it wrote before its first tool call
@@ -44,6 +48,12 @@ defmodule Factory.Kiro.Ask do
           not File.exists?(Kiro.config(:cli)) ->
         {:error, "kiro-cli wasn't found at #{Kiro.config(:cli)}."}
 
+      match?({:error, _}, Factory.Repos.safe_to_start(workdir)) ->
+        Factory.Repos.safe_to_start(workdir)
+
+      reason = Factory.Engine.Credits.daily_stop() ->
+        {:error, reason}
+
       true ->
         converse(text, workdir, opts)
     end
@@ -58,10 +68,18 @@ defmodule Factory.Kiro.Ask do
       Kiro.open_port(workdir, "ask.log",
         runtime: runtime,
         mcp: List.first(opts[:mcp_servers] || []),
-        permit: Kiro.Permit.grant(opts[:allow] || [], workdir, opts[:roots] || [])
+        permit: Kiro.Permit.grant(opts[:allow] || [], workdir, opts[:roots] || []),
+        sandbox: Keyword.get_lazy(opts, :sandbox, fn -> default_sandbox(opts[:allow] || []) end),
+        roots: opts[:roots] || []
       )
 
-    deadline = System.monotonic_time(:millisecond) + Kiro.config(:prompt_timeout)
+    os_pid =
+      case Port.info(port, :os_pid) do
+        {:os_pid, pid} -> pid
+        _ -> nil
+      end
+
+    deadline = System.monotonic_time(:millisecond) + Kiro.prompt_cap()
 
     conn = %{
       port: port,
@@ -73,8 +91,10 @@ defmodule Factory.Kiro.Ask do
       # pi's extension has the tools before pi answers: nothing to wait for.
       mcp: if(runtime == :pi, do: [], else: Enum.map(opts[:mcp_servers] || [], & &1.name)),
       on_tool: opts[:on_tool] || fn _ -> :ok end,
+      abort: opts[:abort],
       # what pi's adapter says about itself once the session opens, left out of the reply
-      banner: nil
+      banner: nil,
+      session_id: nil
     }
 
     started = System.monotonic_time(:millisecond)
@@ -88,18 +108,25 @@ defmodule Factory.Kiro.Ask do
                call(conn, 2, "session/new", %{cwd: workdir, mcpServers: opts[:mcp_servers] || []}),
              :ok <- tools_loaded(conn, created),
              sid = session["sessionId"],
-             conn = %{conn | banner: get_in(session, ["_meta", "piAcp", "startupInfo"])},
+             conn = %{
+               conn
+               | banner: get_in(session, ["_meta", "piAcp", "startupInfo"]),
+                 session_id: sid
+             },
              # pi runs on the one model it was started with (`Factory.Runtime`).
              :ok <- if(runtime == :pi, do: :ok, else: set_model(conn, sid, session, model)) do
           call(conn, 4, "session/prompt", %{sessionId: sid, prompt: [%{type: "text", text: text}]})
         end
       after
         # kiro-cli and everything it started, so nothing it ran outlives the question.
-        RPC.close_port(port)
+        RPC.close_port(port, os_pid)
       end
 
     {reply, acc} =
       case result do
+        {:ok, %{"stopReason" => stop}, acc} when stop not in [nil, "end_turn"] ->
+          {{:error, Kiro.early_stop(stop)}, acc}
+
         {:ok, _, acc} ->
           cond do
             # A turn that ends on a tool call has nothing after it; the caller decides.
@@ -130,12 +157,20 @@ defmodule Factory.Kiro.Ask do
           input_tokens: Factory.Usage.estimate_tokens(text),
           output_tokens: Factory.Usage.estimate_tokens(acc.text),
           ms: System.monotonic_time(:millisecond) - started,
-          ok: match?({:ok, _}, reply)
+          ok: match?({:ok, _}, reply),
+          error: if(match?({:error, _}, reply), do: elem(reply, 1)),
+          credits_known: acc.credits > 0 or match?({:ok, _}, reply),
+          tool_calls: acc.tools,
+          prompt_sha: Factory.Context.sha256(text)
         })
       )
     end
 
     reply
+  end
+
+  defp default_sandbox(allow) do
+    if Enum.any?(allow, &(&1 in ~w(edit delete move execute))), do: nil, else: :read_only
   end
 
   defp set_model(conn, sid, session, model) do
@@ -170,6 +205,7 @@ defmodule Factory.Kiro.Ask do
       tooled: false,
       credits: 0.0,
       prompted: method == "session/prompt",
+      tools: 0,
       kinds: %{},
       commands: %{},
       paths: %{}
@@ -211,23 +247,32 @@ defmodule Factory.Kiro.Ask do
     end
   end
 
-  defp await(%{port: port} = conn, id, buffer, acc) do
-    timeout = max(conn.deadline - System.monotonic_time(:millisecond), 0)
+  defp await(conn, id, buffer, acc),
+    do: await(conn, id, buffer, acc, System.monotonic_time(:millisecond))
+
+  # `heard`: when Kiro last said anything. It may stay silent for `prompt_timeout`, and the
+  # question may take its cap in all.
+  defp await(%{port: port} = conn, id, buffer, acc, heard) do
+    now = System.monotonic_time(:millisecond)
+    silent_until = heard + Kiro.config(:prompt_timeout)
+    left = max(min(silent_until, conn.deadline) - now, 0)
 
     receive do
       {^port, {:data, data}} ->
+        heard = System.monotonic_time(:millisecond)
+
         case RPC.read(buffer, data) do
           {:partial, buffer} ->
-            await(conn, id, buffer, acc)
+            await(conn, id, buffer, acc, heard)
 
           {:message, msg} ->
             case handle(conn, msg, id, acc) do
-              {:cont, acc} -> await(conn, id, "", acc)
+              {:cont, acc} -> await(conn, id, "", acc, heard)
               done -> done
             end
 
           :invalid ->
-            await(conn, id, "", acc)
+            await(conn, id, "", acc, heard)
         end
 
       {^port, {:exit_status, code}} ->
@@ -236,9 +281,18 @@ defmodule Factory.Kiro.Ask do
         if Kiro.signed_out?(reason), do: Kiro.Catalog.note_failure(reason)
         {:error, reason, acc}
     after
-      timeout ->
-        {:error,
-         "Kiro didn't answer within #{div(Kiro.config(:prompt_timeout), 60_000)} minutes.", acc}
+      min(left, 1_500) ->
+        cond do
+          conn.abort && conn.abort.() ->
+            {:error, "Stopped: its run was cancelled.", acc}
+
+          System.monotonic_time(:millisecond) >= min(silent_until, conn.deadline) ->
+            {:error,
+             "Kiro said nothing for #{div(Kiro.config(:prompt_timeout), 60_000)} minutes.", acc}
+
+          true ->
+            await(conn, id, buffer, acc, heard)
+        end
     end
   end
 
@@ -261,6 +315,8 @@ defmodule Factory.Kiro.Ask do
     kind = Kiro.Permission.kind(p, acc.kinds)
     paths = Kiro.Permission.paths(p, acc.paths)
 
+    own = Kiro.Permission.kiro_session_dirs(conn.session_id)
+
     # What a chat would ask the person about first (`Kiro.Permission.decide/4`) is a no
     # here, with nobody to ask: a web page, a pull request's own code, a file outside the
     # folder. As in a session, by the same rules (`Kiro.Judge`).
@@ -272,7 +328,8 @@ defmodule Factory.Kiro.Ask do
         web: false,
         mcp: server != nil and server in conn.mcp,
         folder: conn.workdir,
-        roots: conn.roots
+        roots: conn.roots ++ own,
+        own: own
       })
 
     wanted = if decision == :allow, do: "allow", else: "reject"
@@ -383,7 +440,16 @@ defmodule Factory.Kiro.Ask do
         _ -> acc.paths
       end
 
-    {:cont, %{acc | last: "", tooled: true, kinds: kinds, commands: commands, paths: paths}}
+    {:cont,
+     %{
+       acc
+       | last: "",
+         tooled: true,
+         tools: acc.tools + 1,
+         kinds: kinds,
+         commands: commands,
+         paths: paths
+     }}
   end
 
   defp handle(conn, %{"method" => "_kiro/mcp/status", "params" => params}, _id, acc),

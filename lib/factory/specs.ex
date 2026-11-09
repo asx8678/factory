@@ -345,7 +345,7 @@ defmodule Factory.Specs do
   end
 
   defp start_review(spec, files) do
-    model = Factory.Kiro.planning_model()
+    model = Factory.Kiro.light_model()
 
     Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
       review =
@@ -1077,7 +1077,7 @@ defmodule Factory.Specs do
           broadcast(topic, {:task_activity, task.title, Planner.describe_tool(update, dir)})
         end
 
-        model = Factory.Kiro.planning_model()
+        model = Factory.Kiro.light_model()
 
         Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
           result =
@@ -1118,7 +1118,7 @@ defmodule Factory.Specs do
       broadcast(topic, {:draft_activity, ref, Planner.describe_tool(update, dir)})
     end
 
-    model = Factory.Kiro.planning_model()
+    model = Factory.Kiro.light_model()
 
     Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
       result =

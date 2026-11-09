@@ -6,7 +6,7 @@ defmodule Factory.ChatPlanner do
   another folder. The planner (on Kiro, read-only, in the chat's project folder) rethinks how
   it's best done from everything asked so far, the spec files attached and the plan so
   far. It writes the plan with Factory's tools as it goes (`Factory.PlanTools`): a
-  summary and approach, then the tasks a few at a time, or changes to the tasks already
+  summary and approach, then the tasks, or changes to the tasks already
   there, so edits the person made to them are kept. It can ask questions instead. Its
   closing message asks whether to implement the tasks (the "start" action).
 
@@ -150,12 +150,14 @@ defmodule Factory.ChatPlanner do
           action,
           job,
           agents,
-          mode_line || nil
+          with_card(mode_line || nil, planner)
         ]
 
         prompt = %{
           full: apply(Planner, :chat_prompt, prompt_args),
           parts: apply(Planner, :chat_prompt_parts, prompt_args),
+          # What the conversation's log keeps: what was asked, not the prompt around it.
+          request: Enum.join(requests, "\n\n"),
           doing: doing(mode, job, requests, run.title)
         }
 
@@ -245,14 +247,24 @@ defmodule Factory.ChatPlanner do
       )
     )
 
+    reason = Factory.Engine.Credits.chat_stop(run)
+
+    # A turn still going, perhaps waiting on a question this message answers, would hold
+    # this one up: its answer is about to be out of date anyway.
+    Kiro.cancel_run(run.id)
+
     Task.Supervisor.start_child(Factory.TaskSupervisor, fn ->
       # On the planner's own Kiro session, which keeps the conversation between
       # messages; a one-off session when that one is busy in another folder.
       result =
         Factory.Background.guard("Planning run #{run.id}", fn ->
-          case plan_in_session(run, planner, prompt, generation, mode) do
-            {:error, :busy} -> plan_once(run, planner, prompt, generation, dir, mode)
-            result -> result
+          if reason do
+            {:error, reason}
+          else
+            case plan_in_session(run, planner, prompt, generation, mode) do
+              {:error, :busy} -> plan_once(run, planner, prompt, generation, dir, mode)
+              result -> result
+            end
           end
         end)
 
@@ -269,6 +281,16 @@ defmodule Factory.ChatPlanner do
     :ok
   end
 
+  # A planner's standard prompt is what the chat's instructions already say; one someone
+  # edited is theirs, and it counts here too.
+  defp with_card(mode_line, %{prompt: prompt, default_prompt: default})
+       when is_binary(prompt) and is_binary(default) and prompt != default do
+    card = "Instructions from this planner's card:\n" <> String.trim(prompt)
+    if mode_line, do: mode_line <> "\n\n" <> card, else: card
+  end
+
+  defp with_card(mode_line, _planner), do: mode_line
+
   defp plan_in_session(run, planner, prompt, generation, mode) do
     {brief, ask} = prompt.parts
 
@@ -281,6 +303,7 @@ defmodule Factory.ChatPlanner do
       Kiro.run_step(planner, run.id, ask,
         brief: brief,
         source: "plan_chat",
+        log_text: prompt.request,
         context: :skip,
         reply: :last,
         post: false,

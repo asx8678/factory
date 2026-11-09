@@ -1006,8 +1006,26 @@ defmodule FactoryWeb.ChatLive do
     {:ok, run} =
       Runs.update_run(run, Map.put(named, :settings, Map.merge(run.settings || %{}, settings)))
 
-    push_patch(socket, to: ~p"/chat/#{run.id}")
+    socket
+    |> warn_local_settings(dir, source)
+    |> push_patch(to: ~p"/chat/#{run.id}")
   end
+
+  # A folder on this computer isn't changed, unlike a clone (`Factory.Repos`), so what its
+  # settings can do is said before an agent starts there.
+  defp warn_local_settings(socket, dir, "local") do
+    if Factory.Repos.settings_present?(dir),
+      do:
+        put_flash(
+          socket,
+          :error,
+          "This folder has .kiro or .pi settings, which can run commands as soon as an " <>
+            "agent starts there. Only go on if you trust it."
+        ),
+      else: socket
+  end
+
+  defp warn_local_settings(socket, _dir, _source), do: socket
 
   # The run's spec, where the plan lives (FactoryWeb.ChatLive.Plan): the plan changed,
   # or Kiro is working on one of its tasks.

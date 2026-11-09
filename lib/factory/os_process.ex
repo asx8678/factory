@@ -185,6 +185,20 @@ defmodule Factory.OsProcess do
         do: {child, started}
   end
 
+  @doc """
+  Kills what's left of the process group `os_pid` led. A CLI started through a port leads
+  its own group, so what it started can be found even after it died and they were left
+  to init, which `kill_tree/1` can't do.
+  """
+  def kill_group(os_pid) when is_integer(os_pid) and os_pid > 1 do
+    System.cmd("kill", ["-KILL", "--", "-#{os_pid}"], stderr_to_stdout: true)
+    :ok
+  rescue
+    ErlangError -> :ok
+  end
+
+  def kill_group(_os_pid), do: :ok
+
   @doc "Kills those of `known` (`descendants_with_start/1`) still running as they were."
   def kill_known([]), do: :ok
 

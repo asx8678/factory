@@ -85,9 +85,10 @@ defmodule FactoryWeb.SpecLiveTest do
     assert spec.name == "Search filters"
     assert spec.tasks == "- [ ] 1. Add the date filter"
 
-    # The review finishes in the background and the panel updates.
-    Specs.subscribe(spec.id)
-    assert_receive {:spec_updated, %{review: %{"status" => "done"}}}, 5_000
+    # The review finishes in the background and the panel updates. It may have finished
+    # already, so this looks rather than waits for the message.
+    assert eventually(fn -> Specs.get_spec(spec.id).review["status"] == "done" end)
+    _ = render(view)
     assert has_element?(view, "#review", "Needs work")
     assert has_element?(view, "#review", "Requirement 2 has no acceptance criteria.")
   end
@@ -437,5 +438,21 @@ defmodule FactoryWeb.SpecLiveTest do
     assert has_element?(view, "a[href='/chat/#{run.id}']", "Export")
     view |> element("#run-base-specs-#{rules.id}") |> render_click()
     assert Factory.Runs.get_run(run.id).settings["base_spec_ids"] == [rules.id]
+  end
+
+  defp eventually(check, tries \\ 100) do
+    cond do
+      check.() ->
+        true
+
+      tries == 0 ->
+        false
+
+      true ->
+        receive do
+        after
+          50 -> eventually(check, tries - 1)
+        end
+    end
   end
 end

@@ -20,9 +20,9 @@ defmodule Factory.ReviewVerdict do
   `{nil, body}` when it has none. The decision is the one written; a score without a
   decision line isn't a verdict.
 
-  Only the reply's first line counts, as the Reviewer is told to write it: a line
-  further down may be quoted from the pull request, and a card shouldn't say "Ready to
-  merge" because the pull request did.
+  Only the reply's first line counts, as the Reviewer is told to write it (with
+  `split/2`, its closing message's): a line further down may be quoted from the pull
+  request, and a card shouldn't say "Ready to merge" because the pull request did.
   """
   def split(body) when is_binary(body) do
     with true <- String.valid?(body),
@@ -47,6 +47,25 @@ defmodule Factory.ReviewVerdict do
   end
 
   def split(body), do: {nil, body}
+
+  @doc """
+  The same, for a reply whose closing message starts at byte `at` (what the agent said on
+  its way there comes first): the verdict is that message's first line.
+  """
+  def split(body, at)
+      when is_binary(body) and is_integer(at) and at > 0 and at < byte_size(body) do
+    closing = binary_part(body, at, byte_size(body) - at)
+
+    case String.valid?(closing) && split(closing) do
+      {%{} = verdict, rest} ->
+        {verdict, String.trim(binary_part(body, 0, at) <> rest)}
+
+      _ ->
+        split(body)
+    end
+  end
+
+  def split(body, _at), do: split(body)
 
   # The first line with something on it, and what comes after it. By characters too:
   # byte by byte, `\R` takes the last byte of `✅` for a line break.

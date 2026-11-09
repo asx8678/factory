@@ -1,7 +1,9 @@
 defmodule Factory.Usage.Event do
   @moduledoc """
-  One call to Kiro. Credits come from Kiro; tokens are estimated from the text sent
-  and received, because Kiro doesn't report token counts.
+  One call to Kiro. Credits come from Kiro; `input_tokens` and `output_tokens` are
+  estimated from Factory's own text, because Kiro doesn't report token counts: they leave
+  out what the model read with its tools. `context_tokens` is what Kiro says the context
+  held. `credits_known` is false when a turn was stopped before Kiro said what it cost.
   """
   use Ecto.Schema
 
@@ -16,6 +18,13 @@ defmodule Factory.Usage.Event do
     field :output_tokens, :integer, default: 0
     field :ms, :integer
     field :ok, :boolean, default: true
+    field :stop_reason, :string
+    field :tool_calls, :integer
+    field :session_ref, :string
+    field :error, :string
+    field :credits_known, :boolean, default: true
+    field :context_tokens, :integer
+    field :prompt_sha, :string
     field :inserted_at, :utc_datetime_usec, read_after_writes: true
     # When it happened in `Factory.Usage.timezone/0`; filled in by Usage's queries.
     field :local_at, :naive_datetime_usec, virtual: true

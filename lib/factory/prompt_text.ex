@@ -28,6 +28,38 @@ defmodule Factory.PromptText do
 
   def json_object(_reply), do: :error
 
+  @doc """
+  Every `{…}` in `text` that decodes to a map, left to right. One inside another that
+  decodes isn't listed; one inside an object that never closes is, so look at what they hold.
+  """
+  def json_objects(text) when is_binary(text), do: objects(text, 200, [])
+  def json_objects(_text), do: []
+
+  defp objects(_text, 0, acc), do: Enum.reverse(acc)
+
+  defp objects(text, tries, acc) do
+    case :binary.match(text, "{") do
+      :nomatch ->
+        Enum.reverse(acc)
+
+      {start, _} ->
+        rest = binary_part(text, start, byte_size(text) - start)
+
+        case balanced(rest, 0, 0, false, false) do
+          nil ->
+            objects(binary_part(rest, 1, byte_size(rest) - 1), tries - 1, acc)
+
+          len ->
+            after_it = binary_part(rest, len, byte_size(rest) - len)
+
+            case JSON.decode(binary_part(rest, 0, len)) do
+              {:ok, %{} = data} -> objects(after_it, tries - 1, [data | acc])
+              _ -> objects(after_it, tries - 1, acc)
+            end
+        end
+    end
+  end
+
   # The first `{…}` from the left that decodes to a map. One that doesn't is skipped
   # whole, so an object nested in it isn't taken for the reply.
   defp first_object(_text, 0), do: nil

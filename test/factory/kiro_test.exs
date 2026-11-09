@@ -415,8 +415,10 @@ defmodule Factory.KiroTest do
     old = :sys.get_state(pid)
     assert {:ok, _} = Kiro.prompt(agent, run.id, "second [test:wait]")
 
+    # Silent for longer than it may be.
+    :sys.replace_state(pid, &%{&1 | turn: %{&1.turn | last_seen: &1.turn.started - 100_000_000}})
     send(pid, {:request_timeout, old.turn.request_id})
-    assert_receive {:message, %{author: "Coder", body: "waiting"}}, 5_000
+    assert_receive {:message, %{author: "Coder", body: "waiting\n\n(Stopped" <> _}}, 5_000
     assert_receive {:agent_stream, %{text: "waiting"}}, 5_000
     current = :sys.get_state(pid)
     refute current.port == old.port
@@ -454,7 +456,7 @@ defmodule Factory.KiroTest do
     configure(:kiro, prompt_timeout: 200)
     assert {:ok, _} = Kiro.prompt(agent, run.id, "[test:wait]")
     assert {:ok, _} = Kiro.prompt(agent, run.id, "next")
-    assert_receive {:message, %{author: "Coder", body: "waiting"}}, 5_000
+    assert_receive {:message, %{author: "Coder", body: "waiting\n\n(Stopped" <> _}}, 5_000
     assert_receive {:message, %{author: "Coder", body: body}}, 5_000
     assert String.ends_with?(body, "\n\nnext")
     assert body =~ "Stopped after waiting"

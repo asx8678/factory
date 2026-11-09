@@ -5,7 +5,7 @@ defmodule Factory.Context.Projections do
 
     * `%{kind: :user, id:, who:, text:}` - a message to an agent (`who`)
     * `%{kind: :assistant, id:, who:, text:}` - the agent's reply
-    * `%{kind: :tool, id:, who:, tool:, title:, paths:, outcome:}` - a tool Kiro used;
+    * `%{kind: :tool, id:, who:, tool:, title:, paths:, outcome:, error:}` - a tool Kiro used;
       `tool` is the ACP kind (read, edit, search, execute…), `outcome` "ok", "failed",
       "denied" or "pending"
     * `%{kind: :error, id:, who:, text:}` - a turn that ended in an error
@@ -40,6 +40,7 @@ defmodule Factory.Context.Projections do
     %{
       sections: %{
         dialogue: dialogue,
+        goal: goal(events),
         requests: requests,
         files: files,
         outstanding: outstanding,
@@ -56,6 +57,20 @@ defmodule Factory.Context.Projections do
         transcript: transcript_omitted
       }
     }
+  end
+
+  # What the conversation set out to do: its first message, whole enough to act on.
+  defp goal(events) do
+    case Enum.find(events, &(&1.kind == :user)) do
+      %{text: text} = first ->
+        case text |> String.trim() |> String.slice(0, 1000) do
+          "" -> []
+          line -> ["#{line} [entry #{first.id}]"]
+        end
+
+      nil ->
+        []
+    end
   end
 
   # Earlier messages are evidence of what was asked, not the task as it stands now.
@@ -173,7 +188,8 @@ defmodule Factory.Context.Projections do
         [] -> "#{e.tool}: #{Bounds.truncate(e.title, 140)}"
       end
 
-    "#{subject}: #{e.outcome} (#{e.who})"
+    why = if e[:error], do: " — #{Bounds.truncate(Bounds.first_line(e[:error]), 200)}", else: ""
+    "#{subject}: #{e.outcome} (#{e.who})#{why}"
   end
 
   defp failure_line(%{kind: :error} = e),

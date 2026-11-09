@@ -11,11 +11,14 @@ push, open a pull request, update a ticket, or send a message.
 
 * Elixir 1.18+ and PostgreSQL (the dev config expects `postgres`/`postgres` on localhost)
 * Node.js, for the Svelte Flow canvas (`mix assets.setup` runs `npm install`)
-* `kiro-cli` 2.24 or later, signed in (`kiro-cli login`). Factory looks for it on your
+* `kiro-cli` 2.24 or later (checked on 3.1), signed in (`kiro-cli login`). Factory looks for it on your
   `PATH`, else at `~/.local/bin/kiro-cli`; see `config :factory, :kiro` in `config/config.exs`.
 * Optionally [pi](https://github.com/earendil-works/pi) with its ACP adapter
   (`npm install -g pi-acp`), to run the agents on when Kiro can't be used: see
   [Kiro or pi](#kiro-or-pi).
+* [bubblewrap](https://github.com/containers/bubblewrap) (`bwrap`), to confine the agents
+  that only read: see [What keeps your machine safe](#what-keeps-your-machine-safe).
+  Without it they run unconfined, and Settings says so.
 * `git`, to clone the repositories you review and read what there is to review in a
   project folder. GitHub's `gh`, signed in, is optional: with it the chat lists a
   repository's open pull requests.
@@ -69,9 +72,19 @@ Agents that only read ask you first, in the chat, before they fetch a web page, 
 outside the project, or run a pull request's own code.
 
 A run pauses once it has used 10 credits and asks whether to go on (Continue lets it use
-as many again); the header shows what it has used against that. Change the limit, or
-turn it off with 0, under Settings → Runs. If Kiro refuses for its monthly usage limit,
-every page says so until it answers again.
+as many again); the header shows what it has used against that. A day may use 200 credits
+in all, and planning in one chat 50. Change these, or turn them off with 0, under
+Settings → Runs. If Kiro refuses for its monthly usage limit, every page says so until it
+answers again.
+
+Each task is checked by another model as soon as it's built, against the checks its spec
+wrote. What still fails after its passes, a step still sending the work back, or a task
+nobody could verify, stops the run before any action card: nothing goes out until you say
+Continue, and the run's last message lists what's open.
+
+A question to you doesn't use up an agent's turn. A turn is stopped when Kiro has said
+nothing for 10 minutes, the clock standing still while it waits for you, or after an hour
+in all. An unanswered question closes after 14 minutes and the agent carries on without.
 
 ## Kiro or pi
 
@@ -93,8 +106,8 @@ chosen model's provider. What differs on pi:
   outside the project and its sources. What Kiro would ask you first (a web page, a
   file outside the project, a pull request's own code) is refused.
 * **Questions come when the turn ends**, not during it.
-* **No credits.** pi doesn't report them, so usage shows the calls and their time, and
-  a run's credit limit never stops it.
+* **No credits.** pi doesn't report them, so usage shows the calls and their time, and a
+  run's credit limit counts its turns at one credit a minute.
 
 ## Review a pull request
 
@@ -112,6 +125,30 @@ tells you whether GitHub accepts it); git runs without a terminal, so a key that
 passphrase typed in fails rather than waits. An SSH host Factory hasn't seen before is
 trusted on first contact and its key remembered.
 
+## What keeps your machine safe
+
+* **A clone can't configure the CLI.** Kiro obeys `.kiro/settings/mcp.json` in the folder it
+  starts in, running what it lists. Factory keeps `.kiro` and `.pi` out of a review clone's
+  working tree (they stay in its history, for the review to read) and won't start an agent
+  in a clone that has them. A folder on your computer isn't changed, so choosing one with
+  those settings for a review warns you first.
+* **Agents that only read are sandboxed.** They run under `bwrap`: the project can't be
+  changed, the home folder holds only toolchains and the CLI's own files (its sign-in and
+  sessions among them), and your SSH keys, cloud credentials, gh's token and other projects
+  aren't there, so `gh` is signed out for them. The verifier runs the same way with a
+  writable project, for the tests. The network stays on, as the CLI needs it. Turn it off
+  with `FACTORY_SANDBOX=off`.
+* **Commands are read as the shell reads them** (`Factory.Kiro.Shell`). Anything it can't be
+  sure of isn't allowed for an agent that only reads.
+* **Agents that build aren't sandboxed**, as they use whatever the project's toolchain needs.
+  They ask you before `rm -r`, `git push`, `git reset --hard`, `git clean`, `curl`, `wget`,
+  `ssh`, `scp`, `nc` and `sudo`, and before running a cloned repository's own code. Don't
+  point one at code you don't trust.
+* **Agents don't inherit your secrets.** Only what tools need reaches them (`PATH`, `HOME`,
+  locale and toolchain settings; `config :factory, :agent_env` adds names). `GITHUB_TOKEN`
+  and the like stay with Factory, for its action cards. An agent that must push needs its
+  own credentials, or an action card.
+
 ## Environment variables
 
 Factory never stores tokens. Actions and data sources name an environment variable and
@@ -124,6 +161,7 @@ read it when they run, so set these in the shell that starts Factory:
 | `SLACK_WEBHOOK_URL` | Slack or Teams message (default name) |
 | `TZ` | The time zone the Usage page counts days in (else the system zone) |
 | `FACTORY_ACTION_ENV_VARS` | The variables actions may name, comma-separated (`config :factory, :action_env_vars`). Unset, any plain upper-case name but Factory's own secrets (`SECRET_KEY_BASE`, `DATABASE_URL`, anything with SECRET, PRIVATE_KEY or PASSWORD in it) |
+| `FACTORY_SANDBOX` | `off` runs the agents that only read without `bwrap` |
 | `FACTORY_ALLOW_PRIVATE_ACTION_URLS` | `true` lets API requests and webhooks reach this machine or a private network; by default they call public addresses only |
 
 ## Running it for others
@@ -147,3 +185,11 @@ After pulling a change to `config :mime, :types` (Factory adds `.log`), run
 
 The tests talk to a fake `kiro-cli` (`test/support/fake_kiro.mjs`), so they don't need
 Kiro or credits. `docs/plan-tools.md` describes the planner's MCP tools and what's next.
+
+To tell whether a change to a prompt or a setting made things better, run the evals on the
+real CLI. They cost credits (about 4 for a pass on Haiku), so `mix test` skips them, and they
+append to `tmp/evals.jsonl`:
+
+```sh
+EVAL_KIRO_CLI=$HOME/.local/bin/kiro-cli mix test --include eval test/eval/eval_test.exs
+```

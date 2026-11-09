@@ -98,7 +98,8 @@ defmodule Factory.Redact do
 
   def secrets(text) when is_binary(text) do
     text
-    |> sub(~r/-----BEGIN [A-Z ]+-----.*?-----END [A-Z ]+-----/s, "[key]")
+    # A key cut short has no END, and is still a key.
+    |> sub(~r/-----BEGIN [A-Z ]+-----.*?(?:-----END [A-Z ]+-----|\z)/s, "[key]")
     |> sub(~r/\beyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}/, "[token]")
     # Keys and tokens known by how they start: AWS, GitHub, GitLab, Slack, OpenAI,
     # Anthropic. A Slack webhook's address is its secret.
@@ -117,8 +118,17 @@ defmodule Factory.Redact do
     |> sub(~r/\b((?:set-)?cookie["']?\s*[:=]\s*["']?)[^\r\n"']+/i, "\\1[secret]")
     # A key's name may carry a prefix (`DB_PASSWORD`, `GITHUB_TOKEN`, `x-api-key`), and
     # be quoted, as in JSON (`"password": "…"`).
+    # A quoted value goes whole, spaces and all.
     |> sub(
-      ~r/(?<![A-Za-z0-9])((?:[A-Za-z0-9]+[_-])*(?:password|passwd|pwd|secret|client[_-]?secret|token|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|private[_-]?key|key[_-]?base|sig|signature)["']?\s*[=:]\s*["']?)(?!(?:yes|no|true|false|null|none)\b)[^\s;,&"'<>)]+/i,
+      ~r/((?:password|passwd|pwd|passphrase|secret|credential|token|key)["']?\s*[=:]\s*)"[^"\r\n]*"/i,
+      ~S(\1"[secret]")
+    )
+    |> sub(
+      ~r/((?:password|passwd|pwd|passphrase|secret|credential|token|key)["']?\s*[=:]\s*)'[^'\r\n]*'/i,
+      ~S(\1'[secret]')
+    )
+    |> sub(
+      ~r/(?<![A-Za-z0-9])((?:[A-Za-z0-9]+[_-])*[A-Za-z0-9]*(?:password|passwd|pwd|passphrase|secret|secret[_-]?key|credential|credentials|client[_-]?secret|token|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|private[_-]?key|key[_-]?base|sig|signature)["']?\s*[=:]\s*["']?)(?!(?:yes|no|true|false|null|none)\b)(?!\[secret\])[^\s;,&"'<>)]+/i,
       "\\1[secret]"
     )
     |> sub(~r/((?:\s-u|--user)[=\s]+["']?[^\s:"']+:)[^\s"'<>]+/, "\\1[secret]")

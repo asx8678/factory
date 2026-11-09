@@ -27,12 +27,71 @@ defmodule Factory.Engine.Credits do
     end
   end
 
-  # What the run has used and may use, once it has used that much.
+  # What the run has used and may use, once it has used that much. pi reports no credits,
+  # so there a run is counted in the minutes its turns took, one credit a minute.
   def over(run) do
     with allowed when allowed != nil <- allowance(run),
-         %{credits: used} when used >= allowed <- Factory.Usage.totals({:run, run.id}),
+         used when used >= allowed <- used(run),
          do: {used, allowed},
          else: (_ -> nil)
+  end
+
+  defp used(run) do
+    if Factory.Runtime.current() == :pi do
+      Factory.Usage.minutes({:run, run.id})
+    else
+      Factory.Usage.totals({:run, run.id}).credits
+    end
+  end
+
+  @doc """
+  How many credits a day may use, whatever they're for: `"daily_credit_limit"` in
+  `Factory.Prefs`, else `config :factory, :daily_credit_limit` (200). 0 means no limit.
+  """
+  def daily_limit do
+    case Factory.Prefs.get("daily_credit_limit") do
+      n when is_number(n) and n >= 0 -> n
+      _ -> Application.get_env(:factory, :daily_credit_limit, 200)
+    end
+  end
+
+  @doc "Why no more turns may start today, or nil. Checked before every turn."
+  def daily_stop do
+    limit = daily_limit()
+
+    if limit > 0 do
+      used = Factory.Usage.totals(:today).credits
+
+      if used >= limit,
+        do:
+          "Today's limit of #{credits(limit)} credits is used up (#{credits(used)}). " <>
+            "It's under Settings → Runs."
+    end
+  end
+
+  @doc "How many credits planning in one chat may use (`chat_stop/1`). 0 means no limit."
+  def chat_limit do
+    case Factory.Prefs.get("chat_credit_limit") do
+      n when is_number(n) and n >= 0 -> n
+      _ -> Application.get_env(:factory, :chat_credit_limit, 50)
+    end
+  end
+
+  @doc """
+  Why planning in this chat should stop before another turn, or nil: `"chat_credit_limit"`
+  in `Factory.Prefs`, else `config :factory, :chat_credit_limit` (50). 0 means no limit.
+  """
+  def chat_stop(run) do
+    limit = chat_limit()
+
+    if limit > 0 do
+      used = Factory.Usage.totals({:run, run.id}).credits
+
+      if used >= limit,
+        do:
+          "This chat has used #{credits(used)} credits planning, past its limit of " <>
+            "#{credits(limit)}. It's under Settings → Runs."
+    end
   end
 
   # Paused between steps or tasks, like a person's pause: what it has done stays.

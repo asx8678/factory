@@ -8,7 +8,7 @@ defmodule Factory.Agents.Agent do
   # Agents that only look: they read and search the project, never change it. What they
   # read may be a stranger's pull request, so fetching a web page is asked about first:
   # an injected prompt could otherwise send what they read to any address.
-  @read_only ~w(planner researcher reviewer)
+  @read_only ~w(orchestrator planner researcher reviewer)
   @read_tools ~w(read search think)
   @all_tools ~w(read search think fetch edit delete move execute other)
 

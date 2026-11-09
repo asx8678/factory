@@ -53,7 +53,9 @@ defmodule Factory.Usage do
 
   @doc """
   Records one call to Kiro. `attrs` has `:source` and any of `:run_id`, `:spec_id`,
-  `:agent_id`, `:model`, `:credits`, `:input_tokens`, `:output_tokens`, `:ms`, `:ok`.
+  `:agent_id`, `:model`, `:credits`, `:input_tokens`, `:output_tokens`, `:ms`, `:ok`, and
+  what helps explain a failure: `:stop_reason`, `:tool_calls`, `:session_ref`, `:error`,
+  `:credits_known`, `:context_tokens`, `:prompt_sha`.
   Never fails the caller: a problem saving is logged and ignored.
   """
   def record(attrs) do
@@ -61,7 +63,8 @@ defmodule Factory.Usage do
 
     event =
       struct(Event, Map.take(attrs, ~w(run_id spec_id agent_id source model credits
-        input_tokens output_tokens ms ok)a))
+        input_tokens output_tokens ms ok stop_reason tool_calls session_ref error
+        credits_known context_tokens prompt_sha)a))
 
     event = %{event | source: event.source || "other", credits: (event.credits || 0) / 1}
 
@@ -143,6 +146,12 @@ defmodule Factory.Usage do
     })
     |> Repo.one()
     |> normalize()
+  end
+
+  @doc "The minutes of Kiro's or pi's time a scope used, as `totals/1` takes it."
+  def minutes(scope) do
+    ms = Event |> scoped(scope) |> select([e], coalesce(sum(e.ms), 0)) |> Repo.one()
+    ms |> Kernel.||(0) |> then(&(&1 / 60_000))
   end
 
   @doc """

@@ -13,6 +13,13 @@ defmodule Factory.Repos do
   makes it fail rather than wait. An SSH host it hasn't seen before is trusted on first
   contact (`StrictHostKeyChecking=accept-new`): its key is remembered, and a later
   change to it makes git refuse the connection.
+
+  A clone is somebody else's code, and a coding CLI obeys settings it finds in the folder
+  it starts in: Kiro starts the MCP servers `.kiro/settings/mcp.json` lists as soon as a
+  session opens. So those folders are kept out of the working tree with a sparse
+  checkout (`protect/1`): git's history still has them, so a review can read them with
+  `git show`, but nothing acts on them. `safe_to_start/1` refuses a session in a clone
+  that has them anyway.
   """
 
   @timeout 5 * 60_000
@@ -197,6 +204,7 @@ defmodule Factory.Repos do
     File.rm_rf!(partial)
 
     with {:ok, _} <- git(nil, ["clone", "--quiet", repo.url, partial], deadline),
+         {:ok, _} <- exclude_settings(partial, deadline),
          :ok <- move(partial, dir) do
       :ok
     else
@@ -215,6 +223,38 @@ defmodule Factory.Repos do
         {:error, "The clone couldn't be moved to #{to}: #{:file.format_error(reason)}"}
     end
   end
+
+  # Folders a repository could use to configure the CLI that runs in it.
+  @settings ~w(.kiro .pi)
+
+  defp exclude_settings(dir, deadline) do
+    patterns = ["/*" | Enum.map(@settings, &"!/#{&1}/")]
+    git(dir, ["sparse-checkout", "set", "--no-cone" | patterns], deadline)
+  end
+
+  @doc """
+  Whether a CLI may start in `dir`: `:ok`, or `{:error, reason}` for a review clone whose
+  working tree still holds settings the CLI would obey. A clone from before Factory kept
+  them out is put right here.
+  """
+  def safe_to_start(dir) do
+    cond do
+      label(dir) == nil or not settings_present?(dir) ->
+        :ok
+
+      match?({:ok, _}, exclude_settings(dir, System.monotonic_time(:millisecond) + 30_000)) and
+          not settings_present?(dir) ->
+        :ok
+
+      true ->
+        {:error,
+         "#{dir} has its own agent settings (.kiro or .pi), which could run commands as " <>
+           "soon as an agent starts there, so Factory won't start one."}
+    end
+  end
+
+  @doc "Whether a folder has settings a CLI started in it would obey."
+  def settings_present?(dir), do: Enum.any?(@settings, &File.exists?(Path.join(dir, &1)))
 
   # The same repository, whichever way its address was written.
   defp same?(a, b), do: normal(a) == normal(b)
@@ -242,6 +282,7 @@ defmodule Factory.Repos do
 
   defp refetch(repo, dir, deadline) do
     with {:ok, _} <- git(dir, ~w(fetch --all --prune --quiet), deadline),
+         {:ok, _} <- exclude_settings(dir, deadline),
          {:ok, pr_branch} <- fetch_pr(repo, dir, deadline) do
       {:ok, %{dir: dir, label: repo.label, fresh: false, pr_branch: pr_branch}}
     end

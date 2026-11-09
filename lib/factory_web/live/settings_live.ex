@@ -55,16 +55,30 @@ defmodule FactoryWeb.SettingsLive do
   defp catalog(socket) do
     planning = Factory.Prefs.get("planning_model")
     verifying = Factory.Prefs.get("verify_model")
+    light = Factory.Prefs.get("light_model")
 
     assign(socket,
       names_form:
         to_form(%{"names" => Enum.join(Factory.Redact.saved_names(), "\n")}, as: :redact),
       limit_form: limit_form(Factory.Engine.credit_limit()),
+      budget_form:
+        to_form(
+          %{
+            "daily" => FactoryWeb.Usage.credits(Factory.Engine.Credits.daily_limit()),
+            "chat" => FactoryWeb.Usage.credits(Factory.Engine.Credits.chat_limit())
+          },
+          as: :budget
+        ),
       models: Catalog.models() || [],
       modes: Catalog.modes() || [],
       checked_at: Catalog.checked_at(),
       check_error: Catalog.error(),
-      role_form: to_form(%{"planning" => planning || "", "verifying" => verifying || ""})
+      role_form:
+        to_form(%{
+          "planning" => planning || "",
+          "verifying" => verifying || "",
+          "light" => light || ""
+        })
     )
   end
 
@@ -74,7 +88,11 @@ defmodule FactoryWeb.SettingsLive do
 
   # Which model plans and which verifies; "" goes back to Factory's choice.
   def handle_event("role_models", params, socket) do
-    for {key, field} <- [{"planning_model", "planning"}, {"verify_model", "verifying"}],
+    for {key, field} <- [
+          {"planning_model", "planning"},
+          {"verify_model", "verifying"},
+          {"light_model", "light"}
+        ],
         Map.has_key?(params, field) do
       value = params[field]
       Factory.Prefs.put(key, if(value in Factory.Kiro.models(), do: value))
@@ -101,6 +119,18 @@ defmodule FactoryWeb.SettingsLive do
        :info,
        "Saved #{length(names)} #{if length(names) == 1, do: "name", else: "names"}."
      )}
+  end
+
+  # How many credits a day, and planning in one chat, may use; 0 is none.
+  def handle_event("budgets", %{"budget" => %{"daily" => daily, "chat" => chat}}, socket) do
+    with {d, ""} when d >= 0 <- Float.parse(String.trim(daily)),
+         {c, ""} when c >= 0 <- Float.parse(String.trim(chat)) do
+      Factory.Prefs.put("daily_credit_limit", d)
+      Factory.Prefs.put("chat_credit_limit", c)
+      {:noreply, socket |> catalog() |> put_flash(:info, "Saved the limits.")}
+    else
+      _ -> {:noreply, put_flash(socket, :error, "A limit is a number of credits, 0 or more.")}
+    end
   end
 
   # How many credits a run may use before it pauses to ask (Factory.Engine); 0 is none.
@@ -248,8 +278,26 @@ defmodule FactoryWeb.SettingsLive do
       {"Loop passes", "#{Factory.Engine.max_rounds()}",
        "How many times a reviewer may send work back per step."},
       {"Compact at", "#{Factory.Context.config(:compact_at)}% of the context",
-       "When a session's conversation is compacted before its next message."}
-    ]
+       "When a session's conversation is compacted before its next message."},
+      {"Sandbox", if(Factory.Sandbox.available?(), do: "On", else: "Off"),
+       if(Factory.Sandbox.available?(),
+         do: "Agents that only read run with an empty home folder and can't change the project.",
+         else: "Install bubblewrap (bwrap) to confine agents that only read."
+       )}
+    ] ++ old_prompts_fact()
+  end
+
+  defp old_prompts_fact do
+    case Factory.Workflows.old_prompts() do
+      [] ->
+        []
+
+      agents ->
+        [
+          {"Older prompts", Enum.map_join(agents, ", ", & &1.name),
+           "These run on prompts older than Factory's. Restore their workflow to update them."}
+        ]
+    end
   end
 
   def render(assigns) do
@@ -326,6 +374,28 @@ defmodule FactoryWeb.SettingsLive do
                     <span class="w-56 shrink-0 px-2 text-[13px] text-base-content/60">
                       Per agent, Auto unless set
                     </span>
+                  </div>
+                  <div class="flex items-center gap-4 px-3.5 py-3">
+                    <span class="min-w-0 flex-1">
+                      <span class="block text-sm font-medium">Small planning jobs</span>
+                      <span class="block text-xs text-base-content/55">
+                        Reviewing a spec, and drafting or improving one task. These don't need the strongest model.
+                      </span>
+                    </span>
+                    <.input
+                      field={@role_form[:light]}
+                      type="select"
+                      id="light-model"
+                      aria-label="Model for small planning jobs"
+                      options={
+                        model_options(
+                          @models,
+                          "Quick (#{Factory.Kiro.model_name(Factory.Kiro.quick())})"
+                        )
+                      }
+                      class="h-8 w-full rounded-md border border-base-300 bg-base-100 px-2 text-[13px] outline-none focus:border-base-content/30"
+                      wrapper_class="w-56 shrink-0"
+                    />
                   </div>
                   <div class="flex items-center gap-4 px-3.5 py-3">
                     <span class="min-w-0 flex-1">
@@ -505,6 +575,35 @@ defmodule FactoryWeb.SettingsLive do
                     <.input field={@limit_form[:credits]} type="number" min="0" step="0.5" />
                   </div>
                   <button id="credit-limit-save" class="btn btn-sm mt-1">Save</button>
+                </.form>
+              </section>
+              <section id="budgets" class="mt-8">
+                <h2 class="font-medium">Credits a day, and for planning</h2>
+                <p class="mt-0.5 text-sm text-base-content/55">
+                  A day's limit stops every new turn until tomorrow, whatever it's for. The chat's
+                  stops planning in that chat, which a run's limit doesn't count. 0 means no limit.
+                  Kiro's turns are counted in credits; pi reports none, so its runs are counted at
+                  one a minute.
+                </p>
+                <.form
+                  for={@budget_form}
+                  id="budgets-form"
+                  phx-submit="budgets"
+                  class="mt-3 flex items-start gap-2"
+                >
+                  <div class="w-32">
+                    <.input field={@budget_form[:daily]} type="number" min="0" step="1" label="A day" />
+                  </div>
+                  <div class="w-32">
+                    <.input
+                      field={@budget_form[:chat]}
+                      type="number"
+                      min="0"
+                      step="1"
+                      label="A chat's planning"
+                    />
+                  </div>
+                  <button id="budgets-save" class="btn btn-sm mt-7">Save</button>
                 </.form>
               </section>
             <% "web" -> %>

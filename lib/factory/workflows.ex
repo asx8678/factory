@@ -511,6 +511,21 @@ defmodule Factory.Workflows do
     length(updates)
   end
 
+  @doc """
+  Agents of standard workflows on a prompt older than Factory's that `update_prompts/0`
+  can't update: from before Factory remembered which prompt it gave them, so it can't tell
+  whether someone changed theirs. Restoring the workflow brings them up to date.
+  """
+  def old_prompts do
+    for w <- Repo.all(from w in Workflow, where: w.key in ^@standard),
+        latest = Map.new(Types.workflow(w.key), &{&1["name"], prompt(&1)}),
+        a <- Agents.list_agents(w.id),
+        latest[a.name] != nil,
+        is_nil(a.default_prompt),
+        a.prompt != latest[a.name],
+        do: a
+  end
+
   defp prompt(step),
     do: step["prompt"] || Factory.Agents.Kinds.template(step["kind"], step["name"])
 

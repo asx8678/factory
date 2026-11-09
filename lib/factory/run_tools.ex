@@ -58,7 +58,8 @@ defmodule Factory.RunTools do
       name: "verdict",
       description:
         "Says whether the work is good. \"approved\" lets the run go on; \"send_back\" " <>
-          "has it done again, with `fix` saying what to change. Call it once, at the end.",
+          "has it done again, with `fix` saying what to change. Call it once, just before " <>
+          "your hand-over.",
       inputSchema: %{
         type: "object",
         properties: %{
@@ -66,6 +67,31 @@ defmodule Factory.RunTools do
           fix: %{type: "string", description: "What to fix, for send_back."}
         },
         required: ["decision"]
+      }
+    },
+    %{
+      name: "report_checks",
+      description:
+        "For a step that only reads: says which of the run's tasks you checked, by number, " <>
+          "and which you couldn't (with why). The run's last message lists what wasn't done.",
+      inputSchema: %{
+        type: "object",
+        properties: %{
+          checks: %{
+            type: "array",
+            minItems: 1,
+            items: %{
+              type: "object",
+              properties: %{
+                number: %{type: ["integer", "string"]},
+                status: %{type: "string", enum: ["checked", "uncheckable"]},
+                note: %{type: "string", description: "Why not, for uncheckable."}
+              },
+              required: ["number", "status"]
+            }
+          }
+        },
+        required: ["checks"]
       }
     }
   ]
@@ -86,6 +112,7 @@ defmodule Factory.RunTools do
 
   defp allowed?(grant, name) when name in @task_tools, do: Map.get(grant, :tasks, true)
   defp allowed?(grant, "verdict"), do: Map.get(grant, :verdict, false)
+  defp allowed?(grant, "report_checks"), do: not Map.get(grant, :tasks, true)
 
   @doc """
   A token for one step of a run: calls with it act on run `run_id` while it's on
@@ -297,7 +324,24 @@ defmodule Factory.RunTools do
       step = run.progress["current"]
       progress = put_in(run.progress, [Access.key("verdicts", %{}), step], verdict)
       {:ok, run} = Runs.update_run(run, %{progress: progress})
-      {:ok, {:changed, run, "Noted. End your turn with a short summary."}}
+      {:ok, {:changed, run, "Noted. Now write your hand-over as your final message."}}
+    end
+  end
+
+  defp apply_tool("report_checks", args, run) do
+    reported =
+      for %{"number" => n, "status" => status} = c <- List.wrap(args["checks"]),
+          status in ~w(checked uncheckable),
+          n = number(n),
+          into: %{},
+          do: {n, %{"status" => status, "note" => Factory.Text.text(c["note"])}}
+
+    if reported == %{} do
+      {:error, "Give each check a number and a status: checked or uncheckable."}
+    else
+      progress = Map.update(run.progress, "checks", reported, &Map.merge(&1, reported))
+      {:ok, run} = Runs.update_run(run, %{progress: progress})
+      {:ok, {:changed, run, "Noted."}}
     end
   end
 

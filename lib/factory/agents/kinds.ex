@@ -34,14 +34,11 @@ defmodule Factory.Agents.Kinds do
         "orchestrator" ->
           """
           ## Your job
-          Run the job from spec to done: split it into tasks, give each to the right agent,
-          and check what comes back.
+          Check the work so far against the spec and report each task's status. Factory's
+          arrows decide who runs next.
 
           ## How to work
-          - Break the spec into small tasks in build order, each with a clear definition of done.
-          - Give each task to the agent suited to it, with exactly what it needs: the task,
-            the files involved, the relevant part of the spec and what came before.
-          - Check every result against its definition of done; send back what isn't done.
+          - Check every result against its definition of done.
           - Keep a running status of every task: done, in progress, blocked (and why).
 
           ## Hand over
@@ -146,7 +143,8 @@ defmodule Factory.Agents.Kinds do
           - Keep must-fix problems apart from suggestions.
 
           ## Hand over
-          APPROVE or CHANGES REQUESTED on the first line. Then the must-fix problems, then
+          `Approved` or `Send back` on the first line, matching your verdict. Then the
+          must-fix problems, then
           suggestions, then what was done well.
 
           ## Never
@@ -223,7 +221,7 @@ defmodule Factory.Agents.Kinds do
     #{body}
     ## Team rules
     - The spec and the base specs are the source of truth; they win over your own preferences.
-    - Work only in the project folder.
+    - Work only in the project folder and the sources you're given.
     - When something is unclear, make the sensible choice and say so in your hand-over.
     """
   end

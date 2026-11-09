@@ -482,6 +482,27 @@ defmodule Factory.Chat do
   defp run_command(run, name, _),
     do: say(run, "There's no /#{name} command. Type /help to see them.")
 
+  # Another active run in the folder this one would change: each would judge and commit
+  # the other's half-done work. Runs that only read get in nobody's way.
+  defp folder_busy(run) do
+    dir = Factory.Kiro.workdir(run)
+
+    if changes_project?(run) do
+      Runs.list_active()
+      |> Enum.find(&(&1.id != run.id and Factory.Kiro.workdir(&1) == dir))
+    end
+  end
+
+  defp changes_project?(run) do
+    case Engine.executable_steps(run) do
+      {:ok, steps} ->
+        Enum.any?(steps, &(&1.kind != "action" and not Factory.Agents.Agent.read_only?(&1)))
+
+      _ ->
+        false
+    end
+  end
+
   defp queue(run, expected_status) do
     result =
       Runs.with_locked_run(run.id, fn run ->
@@ -496,6 +517,11 @@ defmodule Factory.Chat do
             {:error,
              "The previous worker is still finishing its step. Try /resume once it stops."}
 
+          other = folder_busy(run) ->
+            {:error,
+             "“#{other.title}” is working in this folder, and this run would change it too. " <>
+               "Wait for it, or use another folder."}
+
           true ->
             with {:ok, steps} <- Engine.executable_steps(run) do
               # From the start: a new run, or one run again for tasks added after it.
@@ -505,7 +531,8 @@ defmodule Factory.Chat do
 
               attrs =
                 if expected_status in ["draft", "done"],
-                  do: %{status: "queued", progress: %{}},
+                  # What already went out stays known: it isn't sent twice.
+                  do: %{status: "queued", progress: Map.take(progress, ["actions_done"])},
                   else: %{status: "queued", progress: progress}
 
               with {:ok, run} <- Runs.update_run(run, attrs), do: {:ok, {run, steps}}

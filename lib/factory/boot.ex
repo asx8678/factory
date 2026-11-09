@@ -35,6 +35,9 @@ defmodule Factory.Boot do
       step(:prompts, &Factory.Workflows.update_prompts/0)
       step(:current_workflow, &Factory.Workflows.current/0)
       step(:evidence, fn -> Factory.Evidence.sweep() end)
+      # No turn survived to hear their answers.
+      step(:questions, &Factory.Runs.expire_open_questions/0)
+      step(:old_prompts, &warn_old_prompts/0)
     end
 
     # The models Kiro offers: the last list at once, then a fresh check, in the background.
@@ -44,6 +47,17 @@ defmodule Factory.Boot do
       do: step(:model_check, &Factory.Kiro.Catalog.check_later/0)
 
     :ignore
+  end
+
+  defp warn_old_prompts do
+    case Factory.Workflows.old_prompts() do
+      [] ->
+        :ok
+
+      agents ->
+        names = Enum.map_join(agents, ", ", & &1.name)
+        Logger.warning("Agents on an older prompt, which only Restore can update: #{names}")
+    end
   end
 
   defp step(name, fun) do

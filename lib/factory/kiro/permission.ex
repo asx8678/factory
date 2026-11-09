@@ -8,7 +8,12 @@ defmodule Factory.Kiro.Permission do
   `toolCallId`, and the request names Kiro's own tool (`_meta.kiro.toolId`, e.g.
   `fs_write`). `kind/2` looks in that order, so a request is judged by what the tool
   does whichever Kiro sent it.
+
+  Commands are read with `Factory.Kiro.Shell`, the way the shell reads them, never as
+  plain text. These rules decide what Factory allows; what keeps a stranger's repository
+  away from your files is `Factory.Sandbox`, for the agents that only read.
   """
+  alias Factory.Kiro.Shell
 
   # Kiro's own tools, by what they do, for requests that carry neither kind nor call id.
   # Kiro 2.26 names them read_file, run_command, web_fetch, and remote_web_search (its
@@ -16,6 +21,8 @@ defmodule Factory.Kiro.Permission do
   @tool_kinds %{
     "fs_read" => "read",
     "read_file" => "read",
+    "grep_search" => "search",
+    "list_directory" => "search",
     "run_command" => "execute",
     "remote_web_search" => "fetch",
     "remote_web_fetch" => "fetch",
@@ -38,9 +45,14 @@ defmodule Factory.Kiro.Permission do
   """
   def kind(params, known \\ %{}) do
     call = params["toolCall"] || %{}
+    kiro = get_in(params, ["_meta", "kiro"]) || %{}
+    tool = Map.get(@tool_kinds, kiro["toolId"])
 
-    call["kind"] || Map.get(known, call["toolCallId"]) ||
-      Map.get(@tool_kinds, get_in(params, ["_meta", "kiro", "toolId"]))
+    # Kiro may ask again for one call, for what the call needs next (a command told to run
+    # in another folder asks to list it): that round is judged by the tool it names.
+    later_round? = is_integer(kiro["consentRound"]) and kiro["consentRound"] > 1
+
+    call["kind"] || (later_round? && tool) || Map.get(known, call["toolCallId"]) || tool
   end
 
   @doc """
@@ -52,11 +64,12 @@ defmodule Factory.Kiro.Permission do
     command_of(call) || Map.get(known, call["toolCallId"])
   end
 
-  @doc "The command in a tool call's input, if it has one."
+  @doc "The command in a tool call's input, or the address a fetch names, if it has one."
   def command_of(call) do
     case call["rawInput"] do
       %{"command" => c} when is_binary(c) -> c
       %{"cmd" => c} when is_binary(c) -> c
+      %{"url" => u} when is_binary(u) -> u
       _ -> nil
     end
   end
@@ -109,6 +122,12 @@ defmodule Factory.Kiro.Permission do
     "git" => {~w(--ext-diff --open-files-in-pager), "O"}
   }
 
+  # Commands where a file named like an option does harm when a bare `*` expands to it.
+  @option_sensitive Map.keys(@unsafe) ++ ~w(sed uniq diff)
+
+  # A command that can do real damage, in plain text: a building agent still asks first.
+  @dangerous ~r/(?:^|[\s;&|(])(?:rm\s+(?:-\S+\s+)*-\S*[rR]\S*|sudo|curl|wget|ssh|scp|nc|git\s+(?:push|clean|reset\s+--hard))(?:\s|$)/
+
   # Tools that answer `<tool> version` with their own; elsewhere it may run the
   # project's code (`make version`).
   @versions ~w(go cargo docker kubectl helm terraform)
@@ -138,10 +157,11 @@ defmodule Factory.Kiro.Permission do
   looks. Never looking: redirecting into a file, substitution (`$(…)`, backticks),
   settings before a command (`GIT_PAGER=… git log`, which can make it run a program), a
   program named by its path (`./cat`), and the options that write a file or run a
-  program (`sort -o`, `find -fprint`, `rg --pre`, `git grep -O`, `--ext-diff`). `uniq`
-  looks only with at most one file name (a second is written), and `sed` only when it
-  prints lines (`sed -n '5,9p' file`) or changes what it prints (`sed 's/a/b/g'`).
-  Comments (`# why`) don't count.
+  program, spelled in full, shortened or quoted (`sort -o`, `sort --outp=x`, `find
+  "-delete"`, `rg --pre`, `git grep -O`, `--ext-diff`). `uniq` looks only with at most one
+  file name (a second is written), and `sed` only when it prints lines (`sed -n '5,9p'
+  file`) or changes what it prints (`sed 's/a/b/g'`). Comments (`# why`) don't count.
+  Anything `Factory.Kiro.Shell` can't read for certain isn't looking.
 
   `workdir` is the folder the command runs in. In a repository cloned for review
   (under `Factory.Repos.root/0`) the tests and checks are somebody else's code, so they
@@ -152,68 +172,58 @@ defmodule Factory.Kiro.Permission do
   def looking?(nil, _workdir), do: false
 
   def looking?(command, workdir) when is_binary(command) do
-    # Only a whole redirect to stdout, stderr or nowhere goes: `>&1/../x` writes the file
-    # `1/../x`, so it must leave its `>` behind to be refused.
-    text =
-      command
-      |> without_comments()
-      |> String.replace(~r/(?<=^|\s)[\d&]?>\s*(?:&[12]|\/dev\/null)(?=\s|$|[;&|])/, "")
-
-    parts = parts(text)
     tests? = not in_review_clone?(workdir)
 
-    not String.contains?(text, [">", "`", "$(", "<("]) and
-      parts != [] and Enum.all?(parts, &looking_part?(&1, tests?))
+    case Shell.parse(command) do
+      {:ok, [_ | _] = commands} -> Enum.all?(commands, &looking_command?(&1, tests?))
+      _ -> false
+    end
   end
+
+  defp looking_command?(%{words: []}, _tests?), do: false
+
+  defp looking_command?(%{words: [first | _] = words, redirects: redirects}, tests?) do
+    plain? = not (first.variable or first.glob or first.brace or first.substitution)
+
+    # A word that spells options through a glob or a brace is judged as what it expands to.
+    texts = Enum.flat_map(words, &spellings/1)
+    command = first.text
+
+    plain? and texts != [nil] and not Enum.member?(texts, nil) and
+      Enum.all?(redirects, &harmless_redirect?/1) and
+      not Enum.any?(words, & &1.substitution) and
+      not Enum.any?(tl(words), &risky_glob?(&1, command)) and
+      looking_part?(texts, tests?)
+  end
+
+  # Only away from everything: `2>/dev/null`, `2>&1`. Reading from a file is judged by
+  # where the file is (`reads_outside?/3`).
+  defp harmless_redirect?(%{op: "<"}), do: true
+  defp harmless_redirect?(%{op: ">&", target: target}) when target in ~w(1 2), do: true
+
+  defp harmless_redirect?(%{op: op, target: "/dev/null"})
+       when op in [">", ">>", "&>", "&>>", ">&"],
+       do: true
+
+  defp harmless_redirect?(_redirect), do: false
+
+  # `-*` may expand to a file named `-delete`, and so may a bare `*` for a command whose
+  # options write or run things. `lib/*` can't: every name starts with `lib/`.
+  defp risky_glob?(%{glob: true, text: text}, command),
+    do:
+      String.starts_with?(text, "-") or
+        (command in @option_sensitive and String.first(text) in ["*", "?", "["])
+
+  defp risky_glob?(_word, _command), do: false
+
+  defp spellings(%{brace: true, text: text}), do: Shell.expand_braces(text) || [nil]
+  defp spellings(%{text: text}), do: [text]
 
   # Whether `workdir` is inside the folder review clones go to.
   defp in_review_clone?(nil), do: false
 
   defp in_review_clone?(workdir) when is_binary(workdir),
     do: inside?(Path.expand(workdir), Path.expand(Factory.Repos.root()))
-
-  # The command without its comments, which run nothing and may say anything
-  # (`# 50 slots => 150s`): a `#` that starts a word outside quotes, to the end of the
-  # line, as in the shell. With a here-document or `$'…'`, whose quoting this doesn't
-  # follow, nothing is taken out.
-  defp without_comments(command) do
-    if String.contains?(command, ["<<", "$'"]),
-      do: command,
-      else: uncomment(command, nil, ?\n, [])
-  end
-
-  defp uncomment("", _quote, _before, acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
-
-  defp uncomment(<<?#, rest::binary>>, nil, before, acc) when before in [?\s, ?\t, ?\n] do
-    case String.split(rest, "\n", parts: 2) do
-      [_comment, after_it] -> uncomment("\n" <> after_it, nil, ?#, acc)
-      [_comment] -> uncomment("", nil, ?#, acc)
-    end
-  end
-
-  # An escaped character is part of the word, even a space: `a\ #b` is one word.
-  defp uncomment(<<?\\, c::utf8, rest::binary>>, quote, _before, acc) when quote != ?',
-    do: uncomment(rest, quote, ?\\, [<<c::utf8>>, ?\\ | acc])
-
-  defp uncomment(<<q, rest::binary>>, nil, _before, acc) when q in [?', ?"],
-    do: uncomment(rest, q, q, [q | acc])
-
-  defp uncomment(<<q, rest::binary>>, q, _before, acc), do: uncomment(rest, nil, q, [q | acc])
-
-  defp uncomment(<<c::utf8, rest::binary>>, quote, _before, acc),
-    do: uncomment(rest, quote, c, [<<c::utf8>> | acc])
-
-  defp uncomment(<<c, rest::binary>>, quote, _before, acc),
-    do: uncomment(rest, quote, c, [c | acc])
-
-  # The commands in a chain or pipeline.
-  # A pipe escaped for grep's alternation (`grep "a\|b"`) isn't one.
-  defp parts(text) do
-    text
-    |> String.split(~r/&&|\|\||;|(?<!\\)\||&|\R/)
-    |> Enum.map(&String.trim/1)
-    |> Enum.reject(&(&1 == ""))
-  end
 
   @doc """
   Whether a command runs the project's own code: its tests or a check that builds it
@@ -223,32 +233,88 @@ defmodule Factory.Kiro.Permission do
   def runs_project_code?(nil), do: false
 
   def runs_project_code?(command) when is_binary(command) do
-    command
-    |> parts()
-    |> Enum.any?(fn part ->
-      words = String.split(part)
-      Enum.any?(@tests, &List.starts_with?(words, &1))
-    end)
+    case Shell.parse(command) do
+      {:ok, commands} ->
+        Enum.any?(commands, fn %{words: words} ->
+          texts = Enum.map(words, & &1.text)
+          Enum.any?(@tests, &List.starts_with?(texts, &1))
+        end)
+
+      :error ->
+        false
+    end
   end
 
   @doc """
-  Whether a command reads outside `folder`: a path in it (or a folder it moves to,
-  or a glob's folder) that leads somewhere that exists outside the folder, through
-  `..`, the home folder or a symbolic link, with its quotes and escapes taken out
-  (`/et''c`). A pattern that only looks like a path (`grep /api/ lib`) exists nowhere,
-  so it doesn't count; a variable (`$HOME`) or `$'…'` always does, as it can't be told
-  where it leads.
+  Whether a command reads outside `folder`: a word in it (or a folder it moves to, or what
+  a glob or brace expands to) that leads somewhere that exists outside the folder, through
+  `..`, the home folder or a symbolic link. Each command is judged from where the `cd`s
+  before it put it. `from` is the folder it starts in, the project's unless Kiro's `cwd`
+  says otherwise. A pattern that only looks like a path (`grep /api/ lib`) exists nowhere,
+  so it doesn't count; a variable (`$HOME`) always does, as it can't be told where it
+  leads, and so does a command `Factory.Kiro.Shell` can't read.
   """
-  def reads_outside?(command, folder, roots \\ [])
-  def reads_outside?(nil, _folder, _roots), do: false
+  def reads_outside?(command, folder, roots \\ [], from \\ nil)
+  def reads_outside?(nil, _folder, _roots, _from), do: false
 
-  def reads_outside?(command, folder, roots) when is_binary(command) do
+  def reads_outside?(command, folder, roots, from) when is_binary(command) do
     folder = Path.expand(folder)
 
-    command
-    |> without_comments()
-    |> String.split(~r/[\s=:,<>|;&()]+/)
-    |> Enum.any?(&outside?(&1, folder, roots))
+    case Shell.parse(command) do
+      {:ok, commands} ->
+        commands
+        |> Enum.reduce_while(from || folder, fn parsed, at ->
+          case judged_at(parsed, at, folder, roots) do
+            :outside -> {:halt, :outside}
+            at -> {:cont, at}
+          end
+        end)
+        |> Kernel.==(:outside)
+
+      :error ->
+        true
+    end
+  end
+
+  # Where the next command runs, or `:outside`.
+  defp judged_at(%{words: [%{text: "cd"} | args]}, at, folder, roots) do
+    case args do
+      [%{variable: false, glob: false, brace: false, text: target}] when target != "-" ->
+        moved = absolute(target, at)
+
+        if allowed_path?(moved, folder, roots), do: moved, else: :outside
+
+      _ ->
+        :outside
+    end
+  end
+
+  defp judged_at(%{words: words, redirects: redirects}, at, folder, roots) do
+    read_from = for %{op: "<", target: target} <- redirects, do: plain_word(target)
+
+    if Enum.any?(Enum.drop(words, 1) ++ read_from, &word_outside?(&1, at, folder, roots)),
+      do: :outside,
+      else: at
+  end
+
+  defp plain_word(text),
+    do: %{text: text, variable: String.contains?(text, "$"), glob: false, brace: false}
+
+  defp word_outside?(%{variable: true}, _at, _folder, _roots), do: true
+
+  defp word_outside?(word, at, folder, roots) do
+    case spellings(word) do
+      [nil] ->
+        true
+
+      spelled ->
+        Enum.any?(spelled, fn text ->
+          # `--file=/etc/passwd`, `HEAD:lib/a.ex`, `a,b`: each piece may be a path.
+          text
+          |> String.split(~r/[=:,]/)
+          |> Enum.any?(&spelled_outside?(&1, word, at, folder, roots))
+        end)
+    end
   end
 
   @doc """
@@ -259,9 +325,21 @@ defmodule Factory.Kiro.Permission do
   def paths(params, known \\ %{}) do
     call = params["toolCall"] || %{}
 
-    (paths_of(call) ++ List.wrap(Map.get(known, call["toolCallId"])))
+    (paths_of(call) ++ List.wrap(Map.get(known, call["toolCallId"])) ++ consented(params))
     |> Enum.filter(&(is_binary(&1) and &1 != ""))
     |> Enum.uniq()
+  end
+
+  # Kiro says what it asks to touch, on the request itself, for its file tools.
+  defp consented(params) do
+    case get_in(params, ["_meta", "kiro", "consent"]) do
+      %{"capability" => capability, "resource" => resource}
+      when capability in ["fs_read", "fs_write"] ->
+        [resource]
+
+      _ ->
+        []
+    end
   end
 
   @doc """
@@ -301,8 +379,7 @@ defmodule Factory.Kiro.Permission do
 
   @doc """
   Whether `path`, relative to `workdir`, lies in `workdir` or one of `roots` (each a
-  folder: a troubleshooting run's attached files, an agent's sources), or in Kiro's own
-  working files. Paths are followed to where they really lead first, symbolic links
+  folder: a troubleshooting run's attached files, an agent's sources). Paths are followed to where they really lead first, symbolic links
   and `..` alike, so neither can step outside (a link in a pull request to `/etc`
   is judged as `/etc`), and a path that only shares a prefix with a root
   (`/home/me/project-2` for `/home/me/project`) isn't in it.
@@ -310,17 +387,22 @@ defmodule Factory.Kiro.Permission do
   def allowed_path?(path, workdir, roots) when is_binary(path) and is_binary(workdir) do
     full = real(path, workdir)
 
-    kiros_own?(full) or
-      Enum.any?([workdir | roots], fn root ->
-        is_binary(root) and root != "" and inside?(full, real(root, workdir))
-      end)
+    Enum.any?([workdir | roots], fn root ->
+      is_binary(root) and root != "" and inside?(full, real(root, workdir))
+    end)
   end
 
   def allowed_path?(_path, _workdir, _roots), do: false
 
-  # Where Kiro keeps what a tool gave it that was too big to hand over at once, to read
-  # back in pieces: its own working files, not the person's.
-  defp kiros_own?(full), do: inside?(full, real("~/.kiro/sessions", "/"))
+  @doc """
+  Where Kiro keeps what a tool gave this session that was too big to hand over at once, to
+  read back in pieces: its own working files. Only this session's: another session's holds
+  what other projects' tools returned.
+  """
+  def kiro_session_dirs(nil), do: []
+
+  def kiro_session_dirs(session_id) when is_binary(session_id),
+    do: Path.wildcard(Path.join([System.user_home!(), ".kiro/sessions/*", session_id]))
 
   # Where `path` (from `dir`) really leads: each symbolic link on the way followed, and
   # `..` taken after it, as the system does (`link/..` is the folder above the link's
@@ -364,17 +446,28 @@ defmodule Factory.Kiro.Permission do
   """
   def ask_first(kind, command, paths, folder, roots \\ [])
 
-  def ask_first("fetch", _command, _paths, _folder, _roots),
-    do: "wants to fetch a web page. What it has read could go along with the request."
+  def ask_first("fetch", command, _paths, _folder, _roots),
+    do:
+      "wants to fetch #{command || "a web page"}. What it has read could go along with " <>
+        "the request."
 
-  def ask_first("execute", command, _paths, folder, roots) do
+  def ask_first("execute", command, paths, folder, roots) do
+    elsewhere = outside_paths(paths, folder, roots)
+    from = List.first(paths)
+
     cond do
+      elsewhere != [] ->
+        "wants to run `#{command}` in #{Enum.join(elsewhere, ", ")}, outside the project folder."
+
       Factory.Repos.label(folder) != nil and runs_project_code?(command) ->
         "wants to run `#{command}` in a pull request cloned for review. " <>
           "That runs the pull request's own code."
 
-      reads_outside?(command, folder, roots) ->
+      reads_outside?(command, folder, roots, from && Path.expand(from, folder)) ->
         "wants to run `#{command}`, which reads outside the project folder."
+
+      foreign_repo?(command, folder) ->
+        "wants to run `#{command}`, which reads another repository."
 
       true ->
         nil
@@ -390,32 +483,58 @@ defmodule Factory.Kiro.Permission do
 
   def ask_first(_kind, _command, _paths, _folder, _roots), do: nil
 
-  defp outside?(word, folder, roots) do
-    # Quotes and escapes only join what they split: `/et''c/passwd`, `"/etc/"passwd`.
+  # Files that are outside any folder, and read nothing of anyone's.
+  @harmless ~w(/dev/null /dev/stdin /dev/stdout /dev/stderr)
+
+  defp spelled_outside?(text, word, at, folder, roots) do
     # An option may carry its path glued on: `-f/etc/passwd`.
-    plain =
-      word
-      |> String.replace(~r/["'\\]/, "")
-      |> String.replace(~r/^-+[A-Za-z0-9]*(?=[\/~])/, "")
+    plain = String.replace(text, ~r/^-+[A-Za-z0-9]*(?=[\/~])/, "")
 
     cond do
-      # `$HOME`, `${HOME}`, and `$'\x2fetc'`, which can spell any path; not a pattern's
-      # `foo$` or `'foo$'`.
-      Regex.match?(~r/\$(?:[A-Za-z_{]|["'](?!$))/, word) ->
-        true
-
       # `~root`: somebody else's home folder.
       Regex.match?(~r/^~[^\/]/, plain) ->
         true
 
-      plain == "" or String.starts_with?(plain, "-") ->
+      plain == "" or String.starts_with?(plain, "-") or plain in @harmless ->
         false
 
+      word[:glob] == true ->
+        glob_outside?(plain, at, folder, roots)
+
       true ->
-        # A glob reads what its folder holds: `~/.ssh/id_*` reads `~/.ssh`. A name
-        # that exists counts too, wherever it leads: a link to `/etc` is outside.
-        path = plain |> glob_folder() |> absolute(folder)
+        path = absolute(plain, at)
         File.exists?(path) and not allowed_path?(path, folder, roots)
+    end
+  end
+
+  # A glob reads what it expands to: `~/.ssh/id_*` reads `~/.ssh`, and `*/../../x` steps out
+  # whatever `*` is. What it finds is judged too: one name may be a link out.
+  defp glob_outside?(plain, at, folder, roots) do
+    base = plain |> glob_folder() |> absolute(at)
+
+    ".." in Path.split(plain) or (File.exists?(base) and not allowed_path?(base, folder, roots)) or
+      plain
+      |> absolute(at)
+      |> Path.wildcard(match_dot: true)
+      |> Enum.take(500)
+      |> Enum.any?(&(not allowed_path?(&1, folder, roots)))
+  end
+
+  # `gh pr view <link>` for a repository other than the one being reviewed.
+  defp foreign_repo?(command, folder) do
+    label = Factory.Repos.label(folder)
+
+    with true <- is_binary(command) and String.contains?(command, "gh "),
+         {:ok, commands} <- Shell.parse(command) do
+      Enum.any?(commands, fn %{words: words} ->
+        match?([%{text: "gh"} | _], words) and
+          Enum.any?(words, fn %{text: text} ->
+            Regex.match?(~r{^https?://}, text) and
+              not (label != nil and String.contains?(text, "/#{label}/"))
+          end)
+      end)
+    else
+      _ -> false
     end
   end
 
@@ -428,9 +547,7 @@ defmodule Factory.Kiro.Permission do
 
   defp inside?(path, folder), do: path == folder or String.starts_with?(path, folder <> "/")
 
-  defp looking_part?(part, tests?) do
-    words = String.split(part)
-
+  defp looking_part?(words, tests?) do
     # Settings before the command (GIT_EXTERNAL_DIFF, GIT_SSH_COMMAND…) can make it run
     # another program.
     sets? = Regex.match?(~r/^[A-Za-z_][A-Za-z0-9_]*=/, List.first(words, ""))
@@ -445,16 +562,25 @@ defmodule Factory.Kiro.Permission do
   # that runs another program.
   defp unsafe?([command | args]) do
     {options, letters} = Map.get(@unsafe, command, {[], ""})
+    long = Enum.filter(options, &String.starts_with?(&1, "--"))
 
     Enum.any?(args, fn arg ->
-      String.starts_with?(arg, "--output") or
-        Enum.any?(options, &(arg == &1 or String.starts_with?(arg, &1 <> "="))) or
+      name = arg |> String.split("=", parts: 2) |> hd()
+
+      String.starts_with?(arg, "--output") or shortened?(name, "--output") or name in options or
+        Enum.any?(long, &shortened?(name, &1)) or
         (letters != "" and Regex.match?(~r/^-[^-]/, arg) and
            String.contains?(arg, String.graphemes(letters)))
     end)
   end
 
   defp unsafe?([]), do: false
+
+  # GNU tools and git take a long option cut short, as long as it's unambiguous.
+  defp shortened?(name, option),
+    do:
+      byte_size(name) > 2 and String.starts_with?(name, "--") and
+        String.starts_with?(option, name)
 
   defp looking_words?([], _tests?), do: false
   defp looking_words?(["cd" | _], _tests?), do: true
@@ -463,7 +589,13 @@ defmodule Factory.Kiro.Permission do
     do: sub in @git or git_branch_list?(words)
 
   # GitHub's CLI, reading only: never merge, close, comment, review or edit.
-  defp looking_words?(["gh", area, action | _], _tests?), do: action in Map.get(@gh, area, [])
+  defp looking_words?(["gh", area, action | args], _tests?) do
+    action in Map.get(@gh, area, []) and
+      not Enum.any?(args, fn arg ->
+        name = arg |> String.split("=", parts: 2) |> hd()
+        name in ~w(-R --repo -w --web) or String.starts_with?(arg, "-R")
+      end)
+  end
 
   defp looking_words?(["find" | _], _tests?), do: true
 
@@ -490,7 +622,7 @@ defmodule Factory.Kiro.Permission do
 
   # `uniq in out` writes out.
   defp looking_words?(["uniq" | rest], _tests?),
-    do: Enum.count(rest, &(not String.starts_with?(&1, "-"))) < 2
+    do: Enum.count(rest, &(&1 == "-" or not String.starts_with?(&1, "-"))) < 2
 
   defp looking_words?([tool, "--version"], _tests?), do: not String.contains?(tool, "/")
 
@@ -531,6 +663,11 @@ defmodule Factory.Kiro.Permission do
     * `:mcp` - whether the request is for an MCP server of its own (Factory's tools),
       which checks for itself what the agent may do
     * `:folder` and `:roots` - the project folder, and folders that count as inside too
+    * `:own` - Kiro's working files for this session (`kiro_session_dirs/1`): reading them
+      isn't reading the project
+
+  An agent that builds may run commands, but one that can do real damage (`rm -r`, `git
+  push`, `curl`…) or that runs a pull request's own code goes to the person first.
   """
   def decide(kind, command, paths, who) do
     # Judged as anywhere else, not as in a review clone (`looking?/2`): the tests of a
@@ -545,11 +682,14 @@ defmodule Factory.Kiro.Permission do
         # One that searches the web freely works from what it's handed, not the project:
         # anything it reads here could go out with its next web request.
         who.web and who.reads_only and allow? and not who.mcp and
-            reads_project?(kind, paths, who.folder) ->
+            reads_project?(kind, paths, who) ->
           web_ask(kind, command)
 
         looking? ->
-          ask_first(kind, command, [], who.folder, who.roots)
+          ask_first(kind, command, paths, who.folder, who.roots)
+
+        kind == "execute" and "execute" in who.allowed and not who.mcp ->
+          risky_build(command, who.folder)
 
         who.reads_only and
             ((kind == "fetch" and not who.web) or (allow? and kind in ["read", "search"])) ->
@@ -560,20 +700,88 @@ defmodule Factory.Kiro.Permission do
       end
 
     cond do
-      ask -> {:ask, ask}
-      allow? -> :allow
-      true -> :reject
+      # An agent that fetches freely still can't reach this machine or a private network.
+      kind == "fetch" and who.web and is_binary(command) and
+          not Factory.Actions.safe_url?(command) ->
+        :reject
+
+      ask ->
+        {:ask, ask}
+
+      allow? ->
+        :allow
+
+      true ->
+        :reject
+    end
+  end
+
+  # By what each command really is: `grep -r curl lib` is only a search. A command that
+  # runs another one, or a script the shell reader gives up on, by its plain text.
+  @runs_others ~w(sh bash zsh dash xargs env timeout nohup time exec eval find parallel)
+
+  defp dangerous?(command) do
+    case Shell.parse(command) do
+      {:ok, commands} ->
+        Enum.any?(commands, fn %{words: words} ->
+          dangerous_words?(Enum.map(words, & &1.text), command)
+        end)
+
+      :error ->
+        Regex.match?(@dangerous, command)
+    end
+  end
+
+  defp dangerous_words?(["rm" | args], _command),
+    do: Enum.any?(args, &Regex.match?(~r/^(-[a-zA-Z]*[rR]|--recursive)/, &1))
+
+  # Trying the project's own server is ordinary work, as long as nothing is sent from a file.
+  defp dangerous_words?([name | args], _command) when name in ~w(curl wget),
+    do: not Enum.any?(args, &local_url?/1) or Enum.any?(args, &String.contains?(&1, "@"))
+
+  defp dangerous_words?([name | _], _command) when name in ~w(sudo ssh scp nc), do: true
+  defp dangerous_words?(["git", sub | _], _command) when sub in ~w(push clean), do: true
+  defp dangerous_words?(["git", "reset" | args], _command), do: "--hard" in args
+
+  defp dangerous_words?([name | _], command) when name in @runs_others,
+    do: Regex.match?(@dangerous, command)
+
+  defp dangerous_words?(_words, _command), do: false
+
+  defp local_url?(arg),
+    do: Regex.match?(~r{^(https?://)?(localhost|127\.0\.0\.1)(:\d+)?(/|$)}, arg)
+
+  defp risky_build(command, folder) do
+    cond do
+      not is_binary(command) ->
+        nil
+
+      Factory.Repos.label(folder) != nil and runs_project_code?(command) ->
+        "wants to run `#{command}` in a repository cloned for review. That runs its own code."
+
+      dangerous?(command) ->
+        "wants to run `#{command}`, which can delete, publish or send things."
+
+      true ->
+        nil
     end
   end
 
   # A command, or a read or search anywhere but Kiro's own working files (a search
   # without a path looks in the project).
-  defp reads_project?("execute", _paths, _folder), do: true
+  defp reads_project?("execute", _paths, _who), do: true
 
-  defp reads_project?(kind, paths, folder) when kind in ["read", "search"],
-    do: paths == [] or not Enum.all?(paths, &kiros_own?(real(&1, folder)))
+  defp reads_project?(kind, paths, who) when kind in ["read", "search"] do
+    own = Enum.map(who[:own] || [], &real(&1, who.folder))
 
-  defp reads_project?(_kind, _paths, _folder), do: false
+    paths == [] or
+      not Enum.all?(paths, fn path ->
+        full = real(path, who.folder)
+        Enum.any?(own, &inside?(full, &1))
+      end)
+  end
+
+  defp reads_project?(_kind, _paths, _who), do: false
 
   defp web_ask("execute", command),
     do:

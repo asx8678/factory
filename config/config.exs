@@ -22,6 +22,9 @@ config :factory, FactoryWeb.Endpoint,
   pubsub_server: Factory.PubSub,
   live_view: [signing_salt: "ftYdf3ib"]
 
+# What people type and tokens stay out of the logs.
+config :phoenix, :filter_parameters, ~w(password body token secret text)
+
 # Configure LiveView
 config :phoenix_live_view,
   # the attribute set on all root tags. Used for Phoenix.LiveView.ColocatedCSS.
@@ -50,11 +53,13 @@ config :factory, :kiro,
 config :factory, :sources_dir, Path.expand("../tmp/sources", __DIR__)
 
 # Deterministic context management (Factory.Context). A Kiro session compacts before its
-# next message once its context is this full (Kiro's own summarizer starts at 80%); the
+# next message once its context is this full (Kiro's own summarizer starts at 80%), or this
+# many tokens, as a window may hold a million; the
 # latest messages stay word for word within keep_recent_tokens. A run step's prompt is
 # kept within run_prompt_bytes.
 config :factory, :context,
   compact_at: 70,
+  compact_at_tokens: 200_000,
   keep_recent_tokens: 20_000,
   run_prompt_bytes: 256 * 1024
 

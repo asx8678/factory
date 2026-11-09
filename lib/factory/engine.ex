@@ -33,6 +33,11 @@ defmodule Factory.Engine do
 
   Progress is kept on the run (`progress`), so a paused or failed run resumes at the
   step it stopped at. A failed step pauses the run; `/resume` tries it again.
+
+  Work that's still wrong doesn't quietly go out. A task that fails its checks to the end,
+  or a step whose work was still being sent back at its last pass, is kept in
+  `progress["unresolved"]`: the run pauses before any action card, and goes on past it
+  only when someone says so, and the last message lists what's open.
   """
   require Logger
   alias Factory.{Actions, Agents, Kiro, Runs, Workflows}
@@ -152,6 +157,7 @@ defmodule Factory.Engine do
               |> Map.merge(run.progress || %{})
               |> Credits.from_now(run)
               |> Credits.allow_more(run)
+              |> allow_unresolved()
 
             {:ok, run} =
               Runs.update_run(run, %{status: "running", progress: Map.delete(progress, "error")})
@@ -193,11 +199,7 @@ defmodule Factory.Engine do
         walk(run, steps, rest)
 
       step ->
-        case verify_tasks(run, step, run.progress["outputs"][step.id] || "") do
-          {:again, run} -> walk(run, steps, [step | rest])
-          {:ok, run} -> walk(run, steps, rest)
-          :stopped -> nil
-        end
+        after_step(run, steps, step, rest, run.progress["outputs"][step.id] || "")
     end
   end
 
@@ -216,6 +218,9 @@ defmodule Factory.Engine do
 
       spent = step.kind != "action" && Credits.over(run) ->
         Credits.pause(run, step, spent)
+
+      step.kind == "action" and held_back?(run) ->
+        hold_back(run, step)
 
       true ->
         run_step(run, steps, step, rest)
@@ -296,38 +301,16 @@ defmodule Factory.Engine do
           progress =
             run.progress
             |> Map.update!("done", &(&1 ++ [step.id]))
-            |> Map.update!("outputs", &Map.put(&1, step.id, output))
+            |> Map.update!("outputs", &Map.put(&1, step.id, handed_over(run, step, output)))
+            |> Map.update("feedback", %{}, &Map.delete(&1, step.id))
+            |> Map.update("interrupted", [], &(&1 -- [step.id]))
             |> then(
               &if sent, do: put_in(&1, [Access.key("prompts", %{}), step.id], sent), else: &1
             )
             |> Map.delete("current")
 
           {:ok, run} = Runs.update_run(run, %{progress: progress})
-
-          # The tasks it finished are checked on another model before the run goes on;
-          # ones that fail go back to this step.
-          case verify_tasks(run, step, output) do
-            {:again, run} ->
-              walk(run, steps, [step | rest])
-
-            {:ok, run} ->
-              # Paused or cancelled while it verified: nothing more is written.
-              run = Runs.get_run(run.id)
-
-              if run.status == "running" do
-                case send_back(run, steps, step, output) do
-                  {:again, run, again} -> walk(run, steps, again)
-                  nil -> walk(run, steps, rest)
-                end
-              else
-                {:ok, run}
-              end
-
-            # Paused or cancelled while its tasks were verified: what was checked is
-            # kept, and nothing is opened again.
-            :stopped ->
-              nil
-          end
+          after_step(run, steps, step, rest, output)
 
         {:error, reason} ->
           fail(run, step, reason)
@@ -340,10 +323,49 @@ defmodule Factory.Engine do
     end
   end
 
-  # A step with an arrow back gives a verdict (the verdict tool, else its reply's last
-  # line: "Approved" or "Send back: <what to fix>"). Sent back, the work goes again
-  # from that earlier step, with the feedback, at most `max_rounds/0` times per step;
-  # after that the run carries on.
+  # What a step that just finished hands on. A pass made to fix what verification found
+  # adds to what it handed over before: the notes on the rest of its work still count.
+  defp handed_over(run, step, output) do
+    earlier = run.progress["outputs"][step.id]
+
+    case get_in(run.progress, ["feedback", step.id, "from"]) do
+      "Verification" when is_binary(earlier) and earlier != "" -> earlier <> "\n\n" <> output
+      _ -> output
+    end
+  end
+
+  # The tasks it finished are checked on another model before the run goes on; ones that
+  # fail go back to this step. Then, unless the run was paused or cancelled meanwhile, its
+  # verdict decides.
+  defp after_step(run, steps, step, rest, output) do
+    case verify_tasks(run, step, output) do
+      {:again, run} ->
+        walk(run, steps, [step | rest])
+
+      {:ok, run} ->
+        run = Runs.get_run(run.id)
+
+        if run.status == "running" do
+          case send_back(run, steps, step, output) do
+            {:again, run, again} -> walk(run, steps, again)
+            nil -> walk(Runs.get_run(run.id), steps, rest)
+          end
+        else
+          {:ok, run}
+        end
+
+      # Paused or cancelled while its tasks were verified: what was checked is kept, and
+      # nothing is opened again.
+      :stopped ->
+        nil
+    end
+  end
+
+  # A step with an arrow back gives a verdict (the verdict tool, else a line of its own:
+  # "Approved" or "Send back: <what to fix>"). Sent back, the work goes again from that
+  # earlier step, with the feedback, at most `max_rounds/0` times per step; a step still
+  # sending it back after that leaves the work unresolved. A step that gives no verdict
+  # is asked once, then the run pauses: silence doesn't approve anything.
 
   @doc "How many more passes a step may ask for: `config :factory, :max_loop_rounds` (default 2)."
   def max_rounds, do: Application.get_env(:factory, :max_loop_rounds, 2)
@@ -352,31 +374,39 @@ defmodule Factory.Engine do
     rounds = get_in(run.progress, ["rounds", step.id]) || 0
     to = Enum.find(steps, &(&1.id == target))
 
-    # The verdict tool's answer (`Factory.RunTools`), else the reply's last line.
-    fix =
+    # The verdict tool's answer (`Factory.RunTools`), else what the reply says.
+    decision =
       case get_in(run.progress, ["verdicts", step.id]) do
-        %{"decision" => "send_back", "fix" => fix} -> fix
-        %{"decision" => "approved"} -> nil
-        nil -> verdict(output)
+        %{"decision" => "send_back", "fix" => fix} -> {:send_back, fix}
+        %{"decision" => "approved"} -> :approved
+        _ -> verdict(output)
       end
 
     max_rounds = max_rounds()
 
-    case {fix, rounds < max_rounds} do
-      {nil, _} ->
+    case decision do
+      :approved ->
+        settle(run, "step:#{step.id}")
         nil
 
-      {_fix, false} ->
+      :none ->
+        no_verdict(run, steps, step)
+
+      {:send_back, fix} when rounds >= max_rounds ->
+        text = "#{step.name} still sends it back after #{max_rounds} more passes: #{fix}"
+        unresolved(run, "step:#{step.id}", text)
+
         Runs.post(
           run,
           "factory",
-          "#{step.name} sent it back again, but #{to.name} has had #{max_rounds} more passes. Carrying on.",
+          "#{step.name} sent it back again, but #{to.name} has had #{max_rounds} more passes. " <>
+            "Carrying on, and the run will stop before anything goes out.",
           meta: meta(step)
         )
 
         nil
 
-      {fix, true} ->
+      {:send_back, fix} ->
         again = steps |> Enum.drop_while(&(&1.id != target)) |> Enum.map(& &1.id)
 
         progress =
@@ -384,6 +414,8 @@ defmodule Factory.Engine do
           |> Map.update!("done", &(&1 -- again))
           |> put_in([Access.key("rounds", %{}), step.id], rounds + 1)
           |> put_in([Access.key("feedback", %{}), target], %{"from" => step.name, "text" => fix})
+          # The work changes, so what was verified of it no longer says anything.
+          |> Map.delete("verification")
 
         {:ok, run} = Runs.update_run(run, %{progress: progress})
 
@@ -399,6 +431,88 @@ defmodule Factory.Engine do
   end
 
   defp send_back(_run, _steps, _step, _output), do: nil
+
+  defp no_verdict(run, steps, step) do
+    asked = get_in(run.progress, ["verdict_asks", step.id]) || 0
+    again = steps |> Enum.drop_while(&(&1.id != step.id)) |> Enum.map(& &1.id)
+
+    progress =
+      run.progress
+      |> Map.update!("done", &(&1 -- [step.id]))
+      |> put_in([Access.key("verdict_asks", %{}), step.id], asked + 1)
+
+    if asked == 0 do
+      progress =
+        put_in(progress, [Access.key("feedback", %{}), step.id], %{
+          "from" => "Factory",
+          "text" =>
+            "You gave no verdict. Give it now, without redoing the work: the factory tool " <>
+              "verdict, or a line of its own saying `Approved` or `Send back: <what to fix>`."
+        })
+
+      {:ok, run} = Runs.update_run(run, %{progress: progress})
+      {:again, run, Enum.filter(steps, &(&1.id in again))}
+    else
+      {:ok, run} = Runs.update_run(run, %{progress: progress})
+      fail(run, step, "#{step.name} gave no verdict, so nothing says the work is good.")
+      nil
+    end
+  end
+
+  # Problems left open (`progress["unresolved"]`, by what they're about), which stop the
+  # run before anything goes out. Written under the run's lock: tools may write meanwhile.
+  defp unresolved(run, key, text) do
+    update_progress(run, &put_in(&1, [Access.key("unresolved", %{}), key], text))
+  end
+
+  defp settle(run, key) do
+    update_progress(run, fn progress ->
+      case progress["unresolved"] do
+        %{^key => _} -> Map.update!(progress, "unresolved", &Map.delete(&1, key))
+        _ -> progress
+      end
+    end)
+  end
+
+  defp update_progress(run, fun) do
+    {:ok, run} =
+      Runs.with_locked_run(run.id, fn run ->
+        Runs.update_run(run, %{progress: fun.(run.progress)})
+      end)
+
+    run
+  end
+
+  defp held_back?(run),
+    do: (run.progress["unresolved"] || %{}) != %{} and run.progress["unresolved_ok"] != true
+
+  # Paused like a person's pause: Continue says it may go out as it is.
+  defp hold_back(run, step) do
+    run =
+      update_progress(run, fn progress ->
+        Map.put(progress, "unresolved_pause", true)
+      end)
+
+    {:ok, run} = Runs.update_run(run, %{status: "paused"})
+    list = run.progress["unresolved"] |> Map.values() |> Enum.map_join("\n", &"- #{&1}")
+
+    Runs.post(
+      run,
+      "factory",
+      "Paused before #{step.name}, because these are still open:\n#{list}\n" <>
+        "Fix them, or Continue to let it go ahead anyway.",
+      actions: ["continue"],
+      meta: meta(step)
+    )
+
+    nil
+  end
+
+  defp allow_unresolved(%{"unresolved_pause" => true} = progress) do
+    progress |> Map.delete("unresolved_pause") |> Map.put("unresolved_ok", true)
+  end
+
+  defp allow_unresolved(progress), do: progress
 
   # Verification: after a step that builds, each task it marked done is checked on a
   # different model (`Factory.Verifier`), which reads the code and runs the task's
@@ -423,7 +537,11 @@ defmodule Factory.Engine do
          else: []
 
     if todo == [] do
-      {:ok, run}
+      {:ok,
+       if(run.progress["verifying"],
+         do: update_progress(run, &Map.delete(&1, "verifying")),
+         else: run
+       )}
     else
       # Marked while it checks, so a run paused meanwhile finishes the checks on resume.
       {:ok, run} = Runs.update_run(run, %{progress: Map.put(run.progress, "verifying", step.id)})
@@ -441,6 +559,25 @@ defmodule Factory.Engine do
   end
 
   defp verify_each(run, step, output, todo) do
+    case check_tasks(run, step, output, todo) do
+      :stopped ->
+        :stopped
+
+      {[], run} ->
+        set_activity(step.agent, "done", nil)
+        {:ok, run}
+
+      {failed, run} ->
+        set_activity(step.agent, "done", nil)
+        verify_failed(run, step, failed)
+    end
+  end
+
+  # Checks `todo`, tells the chat and records it: `{tasks that failed, run}`, or `:stopped`
+  # when the run was paused or cancelled, which takes effect between tasks, as it does
+  # while building. A verifier that couldn't say is asked once more, then the task is left
+  # unresolved: nobody has looked at it, so it can't go out as if somebody had.
+  defp check_tasks(run, step, output, todo) do
     model = Kiro.verify_model()
     dir = Kiro.workdir(run)
     name = Kiro.model_name(model)
@@ -452,26 +589,21 @@ defmodule Factory.Engine do
       meta: meta(step)
     )
 
-    # Pausing or cancelling takes effect between tasks, as it does while building.
     checked =
       todo
       |> Enum.reduce_while([], fn task, checked ->
-        if Runs.get_run(run.id).status == "running" do
-          block = Factory.Verifier.spec_task(run, task)
+        now = Runs.get_run(run.id)
 
-          result =
-            Factory.Verifier.verify(block, output, dir,
-              model: model,
-              usage: %{
-                source: "verify_task",
-                run_id: run.id,
-                agent_id: step.agent && step.agent.id
-              }
-            )
+        cond do
+          now.status != "running" ->
+            {:halt, checked}
 
-          {:cont, [{task, result} | checked]}
-        else
-          {:halt, checked}
+          spent = Credits.over(now) ->
+            Credits.pause(now, step, spent, "verifying #{step.name}'s work")
+            {:halt, checked}
+
+          true ->
+            {:cont, [{task, verified(run, step, task, output, dir, model)} | checked]}
         end
       end)
       |> Enum.reverse()
@@ -485,21 +617,47 @@ defmodule Factory.Engine do
 
     for {task, result} <- checked, do: say_verified(run, step, task, result, name)
 
+    run =
+      Enum.reduce(checked, run, fn
+        {task, {:error, reason}}, run ->
+          unresolved(
+            run,
+            "task:#{task.id}",
+            "Task #{Prompt.number(task)} couldn't be verified: #{reason}"
+          )
+
+        {task, {:ok, %{passed: true}}}, run ->
+          settle(run, "task:#{task.id}")
+
+        _other, run ->
+          run
+      end)
+
     failed = for {task, {:ok, %{passed: false} = r}} <- checked, do: {task, r}
 
-    cond do
-      # Stopped while the last one was checked, or before one: nothing goes back.
-      run.status != "running" ->
-        set_activity(step.agent, "idle", nil)
-        :stopped
+    # Stopped while the last one was checked, or before one: nothing goes back.
+    if run.status != "running" do
+      set_activity(step.agent, "idle", nil)
+      :stopped
+    else
+      {failed, run}
+    end
+  end
 
-      failed == [] ->
-        set_activity(step.agent, "done", nil)
-        {:ok, run}
+  defp verified(run, step, task, output, dir, model) do
+    block = Factory.Verifier.spec_task(run, task)
 
-      true ->
-        set_activity(step.agent, "done", nil)
-        verify_failed(run, step, failed)
+    check = fn ->
+      Factory.Verifier.verify(block, output, dir,
+        model: model,
+        abort: fn -> Runs.cancelled?(run.id) end,
+        usage: %{source: "verify_task", run_id: run.id, agent_id: step.agent && step.agent.id}
+      )
+    end
+
+    case check.() do
+      {:error, _reason} -> check.()
+      result -> result
     end
   end
 
@@ -531,7 +689,7 @@ defmodule Factory.Engine do
     Runs.post(
       run,
       "factory",
-      "#{name} couldn't verify task #{Prompt.number(task)}, so it stays done unchecked: #{reason}",
+      "#{name} couldn't verify task #{Prompt.number(task)}, so nobody has checked it: #{reason}",
       meta: meta(step)
     )
   end
@@ -567,6 +725,8 @@ defmodule Factory.Engine do
             fix <>
               "\n\nFix these, check them yourself, and mark the tasks done again with complete_tasks."
         })
+        # The fix may touch what passed: everything done is checked again afterwards.
+        |> Map.delete("verification")
 
       {:ok, run} = Runs.update_run(run, %{progress: progress})
 
@@ -579,10 +739,20 @@ defmodule Factory.Engine do
 
       {:again, run}
     else
+      run =
+        Enum.reduce(failed, run, fn {task, r}, run ->
+          unresolved(
+            run,
+            "task:#{task.id}",
+            "Task #{Prompt.number(task)}, #{task.title}, fails its checks: #{r.fix}"
+          )
+        end)
+
       Runs.post(
         run,
         "factory",
-        "Task #{which} still fails its checks after #{max_rounds} more passes, so it's left open. Carrying on.",
+        "Task #{which} still fails its checks after #{max_rounds} more passes, so it's left " <>
+          "open. Carrying on, and the run will stop before anything goes out.",
         meta: meta(step)
       )
 
@@ -591,18 +761,36 @@ defmodule Factory.Engine do
   end
 
   @doc """
-  "what to fix" when a reply's last line is "Send back: what to fix", else nil. "Send
-  back" must be the words on their own (not "Send backup…"), and "Send back: none" isn't
-  a send-back.
+  What a reply says about the work, without the verdict tool: `:approved`, `{:send_back,
+  what to fix}` or `:none`. The last line that says so counts, as a sign-off may follow it
+  and Factory's own "(Denied: …)" notes do. "Send back" must be the words on their own
+  (not "Send backup…"), and "Send back: none" isn't a send-back. A first line of "CHANGES
+  REQUESTED" or "APPROVE", which older prompts ask for, counts too.
   """
   def verdict(output) do
-    last =
-      output |> String.split("\n") |> Enum.reverse() |> Enum.find("", &(String.trim(&1) != ""))
+    lines =
+      output
+      |> String.split("\n")
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == "" or String.starts_with?(&1, "(Denied:")))
 
-    case Regex.run(~r/^\W*send back(?:\s*[:\-—–]\s*|\W*$)(.*?)\W*$/iu, String.trim(last)) do
-      [_, ""] -> String.trim(output)
-      [_, fix] -> if Regex.match?(~r/^(none|nothing|n\/?a)$/i, fix), do: nil, else: fix
-      nil -> nil
+    Enum.find_value(Enum.reverse(lines), :none, &line_verdict(&1, output))
+  end
+
+  defp line_verdict(line, output) do
+    case Regex.run(~r/^\W*send back(?:\s*[:\-—–]\s*|\W*$)(.*?)\W*$/iu, line) do
+      [_, ""] ->
+        {:send_back, String.trim(output)}
+
+      [_, fix] ->
+        if Regex.match?(~r/^(none|nothing|n\/?a)$/i, fix), do: :approved, else: {:send_back, fix}
+
+      nil ->
+        cond do
+          Regex.match?(~r/^\W*approved?\W*$/i, line) -> :approved
+          Regex.match?(~r/^\W*changes requested\W*$/i, line) -> {:send_back, String.trim(output)}
+          true -> nil
+        end
     end
   end
 
@@ -626,15 +814,24 @@ defmodule Factory.Engine do
     # What the agents wrote goes out (a pull request, a message): without any secret
     # one of them read and repeated.
     ctx = Actions.context(run) |> Map.put("summary", Factory.Redact.secrets(summary(run, step)))
+    sent = Actions.fingerprint(card, ctx)
 
     result =
-      case Actions.missing(card) do
-        [] -> Actions.run(card, ctx)
-        missing -> {:error, "#{step.name} isn't set up: #{Enum.join(missing, ", ")} missing."}
+      cond do
+        # The work went round again and this says just what it said: once is enough.
+        Actions.once?(card) and get_in(run.progress, ["actions_done", step.id]) == sent ->
+          {:ok, "Already done, with the same content, so it wasn't done again."}
+
+        (missing = Actions.missing(card)) != [] ->
+          {:error, "#{step.name} isn't set up: #{Enum.join(missing, ", ")} missing."}
+
+        true ->
+          Actions.run(card, ctx)
       end
 
     case result do
       {:ok, out} ->
+        update_progress(run, &put_in(&1, [Access.key("actions_done", %{}), step.id], sent))
         set_activity(card, "done", nil)
         say(run, step, if(out == "", do: "Done.", else: out))
         {:ok, out, nil}
@@ -689,7 +886,7 @@ defmodule Factory.Engine do
     opts =
       step_opts(run, step, prompt, model(run, step), activity, Prompt.marks_tasks?(run, step))
 
-    result = Kiro.run_step(step.agent, run.id, prompt.ask, opts)
+    result = run_turn(step.agent, run, prompt.ask, opts)
 
     case result do
       {:ok, reply} ->
@@ -741,15 +938,10 @@ defmodule Factory.Engine do
                 else: "Building task #{Prompt.number(task)} (#{n} of #{count}) of “#{run.title}”"
 
             set_activity(step.agent, "running", activity)
-            prompt = Prompt.fit(run, steps, step, {task, block})
 
-            case Kiro.run_step(
-                   step.agent,
-                   run.id,
-                   prompt.ask,
-                   step_opts(run, step, prompt, model, activity, true)
-                 ) do
-              {:ok, reply} -> {:cont, {[reply | outs], sent(prompt)}}
+            case build_task(run, steps, step, {task, block}, model, activity, 0) do
+              {:ok, reply, sent} -> {:cont, {[reply | outs], sent}}
+              :stopped -> {:halt, :stopped}
               {:error, reason} -> {:halt, {:error, reason}}
             end
         end
@@ -768,6 +960,166 @@ defmodule Factory.Engine do
         set_activity(step.agent, "done", nil)
         {:ok, outs |> Enum.reverse() |> Enum.join("\n\n"), sent}
     end
+  end
+
+  # A failure that passes by itself (throttling, no capacity for a moment) shouldn't stop a
+  # run nobody is watching: it's tried again, a little later each time. The session keeps
+  # the conversation, so a turn that got partway carries on.
+  @retries [5_000, 20_000, 60_000]
+  @transient ~r/throttl|too many requests|rate.?limit|insufficient.?model.?capacity|temporarily|overloaded|\b429\b|\b503\b/i
+
+  defp run_turn(agent, run, ask, opts, waits \\ nil) do
+    waits = waits || Application.get_env(:factory, :turn_retries, @retries)
+
+    case Kiro.run_step(agent, run.id, ask, opts) do
+      {:error, reason} when is_binary(reason) ->
+        retry? =
+          waits != [] and reason =~ @transient and not Kiro.usage_limited?(reason) and
+            Runs.get_run(run.id).status == "running"
+
+        if retry? do
+          [wait | rest] = waits
+          Runs.post(run, "factory", "#{agent.name}: #{reason} Trying again shortly.")
+          Process.sleep(wait)
+          run_turn(agent, run, ask, opts, rest)
+        else
+          {:error, reason}
+        end
+
+      other ->
+        other
+    end
+  end
+
+  # One task, until it's built and checked or has had its passes. It's checked as soon as
+  # it's finished, with what its turn said about it, while nothing later has touched the
+  # same files. Not marked done, it's asked about once: a model could otherwise skip the
+  # work by replying. What's still wrong after that is left unresolved.
+  defp build_task(run, steps, step, {task, block}, model, activity, pass) do
+    prompt = Prompt.fit(run, steps, step, {task, block})
+
+    case run_turn(
+           step.agent,
+           run,
+           prompt.ask,
+           step_opts(run, step, prompt, model, activity, true)
+         ) do
+      {:ok, reply} ->
+        run = Runs.get_run(run.id)
+        current = Enum.find(run.tasks, &(&1.id == task.id)) || task
+        checked = task_outcome(run, step, current, reply)
+
+        case checked do
+          :stopped ->
+            :stopped
+
+          {:ok, run} ->
+            run = clear_feedback(run, step)
+            settle(run, "task:#{task.id}")
+            {:ok, reply, sent(prompt)}
+
+          {:redo, run, why} ->
+            if pass < max_rounds() do
+              run = task_feedback(run, step, why)
+              build_task(run, steps, step, {task, block}, model, activity, pass + 1)
+            else
+              run = clear_feedback(run, step)
+              num = Prompt.number(task)
+              unresolved(run, "task:#{task.id}", "Task #{num}, #{task.title}: #{why}")
+
+              Runs.post(
+                run,
+                "factory",
+                "Task #{num} still isn't right after #{max_rounds()} more passes, so it's left " <>
+                  "open. Carrying on, and the run will stop before anything goes out.",
+                meta: meta(step)
+              )
+
+              {:ok, reply, sent(prompt)}
+            end
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp task_outcome(run, step, %{status: "done"} = task, reply) do
+    verifying? = Application.get_env(:factory, :verify_tasks, true)
+
+    if verifying? do
+      case check_tasks(run, step, reply, [task]) do
+        :stopped ->
+          :stopped
+
+        {[], run} ->
+          {:ok, run}
+
+        {[{task, r} | _], run} ->
+          misses =
+            for c <- r.checks, !c["passed"] do
+              "- #{c["check"]}" <> if(c["evidence"] != "", do: ": #{c["evidence"]}", else: "")
+            end
+
+          run = Runs.reopen_tasks(run, [task.id])
+          Runs.tasks_changed(run)
+
+          Runs.post(
+            run,
+            "factory",
+            "Task #{Prompt.number(task)} went back to #{step.name} to fix.",
+            meta: meta(step)
+          )
+
+          why =
+            Enum.join(
+              ["Task #{Prompt.number(task)}, #{task.title}: #{r.fix}" | misses] ++
+                ["Fix this, check it yourself, and mark the task done again with complete_tasks."],
+              "\n"
+            )
+
+          # The fix may touch what passed: the rest is checked again when the step ends.
+          {:redo, update_progress(run, &drop_other_results(&1, task.id)), why}
+      end
+    else
+      {:ok, run}
+    end
+  end
+
+  defp task_outcome(run, _step, task, _reply) do
+    if run.status == "running" do
+      {:redo, run,
+       "Task #{Prompt.number(task)} isn't marked done. If it's built and its checks pass, mark it " <>
+         "with the factory tool complete_tasks. If it isn't, finish it first."}
+    else
+      :stopped
+    end
+  end
+
+  defp drop_other_results(progress, task_id) do
+    case progress["verification"] do
+      %{} = results ->
+        Map.put(progress, "verification", Map.take(results, ["#{task_id}"]))
+
+      _ ->
+        progress
+    end
+  end
+
+  defp task_feedback(run, step, why) do
+    update_progress(
+      run,
+      &put_in(&1, [Access.key("feedback", %{}), step.id], %{
+        "from" => "Verification",
+        "text" => why
+      })
+    )
+  end
+
+  defp clear_feedback(run, step) do
+    update_progress(run, fn progress ->
+      Map.update(progress, "feedback", %{}, &Map.delete(&1, step.id))
+    end)
   end
 
   # The open tasks this agent builds: the ones the plan gives it by name, and, when it's
@@ -813,6 +1165,9 @@ defmodule Factory.Engine do
       source: "run_step",
       model: model,
       context: false,
+      reply: :closing,
+      # What the job is goes first: the log's summary keeps a message's first lines.
+      log_text: String.slice(run.description || run.title || "", 0, 400) <> "\n\n" <> prompt.ask,
       activity: activity,
       step: %{id: step.id, tasks: tasks?, verdict: Map.get(step, :loops, []) != []}
     ]
@@ -843,7 +1198,8 @@ defmodule Factory.Engine do
 
     case texts |> Enum.join("\n\n") |> String.trim() do
       "" -> "Factory run “#{run.title}”."
-      text -> String.slice(text, 0, 4000)
+      # The result comes last.
+      text -> Factory.Text.tail(text, 4000)
     end
   end
 
@@ -871,7 +1227,10 @@ defmodule Factory.Engine do
           run,
           "factory",
           ran_note(steps, run.progress["skipped"] || []) <>
-            tasks_note(run.tasks, steps) <> verified_note(run),
+            tasks_note(run.tasks, steps) <>
+            verified_note(run) <>
+            checks_note(run) <>
+            unresolved_note(run),
           # Troubleshooting ends with a report; Fix it starts a Fix a bug run on it.
           actions: if(incident?(run), do: ["fix_it"], else: [])
         )
@@ -937,10 +1296,54 @@ defmodule Factory.Engine do
     done = Enum.filter(run.tasks, &(&1.status == "done"))
     passed = Enum.count(done, &(get_in(results, ["#{&1.id}", "passed"]) == true))
 
+    failed = Enum.count(run.tasks, &(get_in(results, ["#{&1.id}", "passed"]) == false))
+
     cond do
-      done == [] or results == %{} -> ""
-      passed == length(done) -> " Every one passed verification."
-      true -> " #{passed} of #{length(done)} passed verification."
+      results == %{} ->
+        ""
+
+      done == [] and failed > 0 ->
+        " #{failed} failed verification."
+
+      done == [] ->
+        ""
+
+      passed == length(done) and failed == 0 ->
+        " Every one passed verification."
+
+      passed == length(done) ->
+        " Those passed verification; #{failed} failed it and stayed open."
+
+      failed == 0 ->
+        " #{passed} of #{length(done)} passed verification."
+
+      true ->
+        " #{passed} of #{length(done)} passed verification; #{failed} failed it and stayed open."
+    end
+  end
+
+  # A review reports which of its checks it did (`report_checks`), so one it skipped says so.
+  defp checks_note(run) do
+    case run.progress["checks"] do
+      %{} = checks when map_size(checks) > 0 ->
+        tasks = length(run.tasks)
+        done = Enum.count(checks, fn {_n, c} -> c["status"] == "checked" end)
+
+        not_done =
+          for {n, %{"status" => "uncheckable"} = c} <- checks,
+              do: "\n- Check #{n} not done: #{c["note"]}"
+
+        " #{done} of #{tasks} checks were done." <> Enum.join(not_done)
+
+      _ ->
+        ""
+    end
+  end
+
+  defp unresolved_note(run) do
+    case Map.values(run.progress["unresolved"] || %{}) do
+      [] -> ""
+      open -> "\nStill open:\n" <> Enum.map_join(open, "\n", &"- #{&1}")
     end
   end
 
@@ -958,6 +1361,7 @@ defmodule Factory.Engine do
       run.progress
       |> Map.put("error", reason)
       |> then(&if step[:id], do: Map.put(&1, "current", step.id), else: &1)
+      |> then(&if step[:id], do: mark_interrupted(&1, step.id), else: &1)
 
     {:ok, run} = Runs.update_run(run, %{status: "paused", progress: progress})
 
@@ -1018,9 +1422,19 @@ defmodule Factory.Engine do
 
   defp recover_locked(_run), do: {:ok, :unchanged}
 
+  # A step that stopped partway goes again with a fresh session: it's told to look first.
+  defp mark_interrupted(progress, step_id),
+    do: Map.update(progress, "interrupted", [step_id], &Enum.uniq(&1 ++ [step_id]))
+
   defp recover_now(run, status) do
     reason = "Factory restarted while this run was #{status}"
-    progress = Map.put(run.progress || %{}, "error", reason)
+    current = (run.progress || %{})["current"]
+
+    progress =
+      (run.progress || %{})
+      |> Map.put("error", reason)
+      |> then(&if current, do: mark_interrupted(&1, current), else: &1)
+
     {:ok, run} = Runs.update_run(run, %{status: "paused", progress: progress})
 
     # `{:error, :gone}` when the run went meanwhile: nothing more to say then.

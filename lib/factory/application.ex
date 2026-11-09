@@ -13,7 +13,9 @@ defmodule Factory.Application do
       {DNSCluster, query: Application.get_env(:factory, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Factory.PubSub},
       {Registry, keys: :unique, name: Factory.Kiro.Registry},
-      {DynamicSupervisor, name: Factory.Kiro.Supervisor, strategy: :one_for_one},
+      # Each session is a CLI of about 400 MB.
+      {DynamicSupervisor,
+       name: Factory.Kiro.Supervisor, strategy: :one_for_one, max_children: 30},
       {Task.Supervisor, name: Factory.TaskSupervisor},
       # Once, before any page is served (`Factory.Boot`).
       Factory.Boot,

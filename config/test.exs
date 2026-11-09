@@ -46,6 +46,7 @@ config :factory, :kiro,
   workspace: Path.expand("../tmp/test-workspace", __DIR__),
   log_dir: Path.expand("../tmp/test-kiro-logs", __DIR__),
   prompt_timeout: 5_000,
+  cancel_wait: 300,
   # The fake kiro-cli never says its tools are there.
   mcp_ready_timeout: 200
 
@@ -61,6 +62,9 @@ config :factory, :reset_on_boot, false
 
 # Kiro doesn't retitle chats in the background in tests; see Factory.Runs.TitlesTest.
 config :factory, :auto_titles, false
+
+# The fake CLI runs as it is; test/factory/sandbox_test.exs turns the sandbox on.
+config :factory, :sandbox, false
 
 # Tests don't ask the real Kiro which models it has.
 config :factory, :check_kiro_models, false

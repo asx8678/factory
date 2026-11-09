@@ -147,15 +147,16 @@ defmodule Factory.EngineTest do
     run = queued_run(w)
     Runs.subscribe(run.id)
 
-    assert {:ok, %{status: "done"} = run} = Engine.run(run.id)
+    Engine.run(run.id)
+    run = Runs.get_run(run.id)
 
     assert_received {:message,
-                     %{
-                       body:
-                         "Tester sent it back again, but Coder has had 0 more passes. Carrying on."
-                     }}
+                     %{body: "Tester sent it back again, but Coder has had 0 more" <> _}}
 
     refute run.progress["rounds"]
+    # Still rejected at its last pass: it stops before anything goes out.
+    assert run.status == "paused"
+    assert_received {:message, %{body: "Paused before Run a command, because" <> _}}
   end
 
   test "steps run on each agent's own Kiro session, which keeps the conversation" do
@@ -211,13 +212,27 @@ defmodule Factory.EngineTest do
   end
 
   test "a reply's last line says whether to send the work back" do
-    assert Engine.verdict("Looks good.\nApproved") == nil
+    assert Engine.verdict("Looks good.\nApproved") == :approved
 
     assert Engine.verdict("Two issues.\n\nSend back: fix the date parsing.\n") ==
-             "fix the date parsing"
+             {:send_back, "fix the date parsing"}
 
-    assert Engine.verdict("**Send back**") == "**Send back**"
-    assert Engine.verdict("Don't send back anything.\nApproved") == nil
+    assert Engine.verdict("**Send back**") == {:send_back, "**Send back**"}
+    assert Engine.verdict("Don't send back anything.\nApproved") == :approved
+
+    # Nothing said is nothing approved.
+    assert Engine.verdict("I looked at the work.") == :none
+    assert Engine.verdict("Send backup files first.") == :none
+    assert Engine.verdict("Send back: none") == :approved
+
+    # What may follow it doesn't hide it.
+    assert Engine.verdict("Send back: fix it\n(Denied: a tool. It can't change the project.)") ==
+             {:send_back, "fix it"}
+
+    assert Engine.verdict("Send back: fix it\n\nLet me know if you have questions.") ==
+             {:send_back, "fix it"}
+
+    assert {:send_back, _} = Engine.verdict("CHANGES REQUESTED\n\nThe migration loses data.\n")
   end
 
   test "an arrow's prompt goes to the agent it points to, only on that hand-off" do
@@ -281,7 +296,7 @@ defmodule Factory.EngineTest do
     assert prompt =~ "<job>\nAdd a dark mode toggle.\n</job>"
     assert prompt =~ "<spec>\n<!-- file: tasks.md -->\n- [ ] 1. Add the toggle\n</spec>"
     assert prompt =~ "Use British spelling."
-    assert prompt =~ "When you're done, reply with a short summary"
+    assert prompt =~ "Your last message, after your last tool call, is your hand-over"
     assert prompt == Engine.prompt(run, steps, step)
 
     assert {:ok, run} = Engine.run(run.id)
@@ -329,18 +344,19 @@ defmodule Factory.EngineTest do
       run = w |> queued_run() |> with_tasks(["Add the toggle", "Remember the choice"])
       Runs.subscribe(run.id)
 
-      assert {:ok, %{status: "done"} = run} = Engine.run(run.id)
-      assert [%{status: "done"}, %{status: "pending"}] = Runs.get_run(run.id).tasks
+      Engine.run(run.id)
+      run = Runs.get_run(run.id)
+      assert [%{status: "done"}, %{status: "pending"}] = run.tasks
 
       # The Coder saw the tools' answer; the Planner, which only reads, wasn't given them.
       assert run.progress["outputs"]["agent-#{coder.id}"] =~ "Marked done. Tasks (1 of 2 done)"
       refute run.progress["outputs"]["agent-#{planner.id}"] =~ "complete_tasks"
       assert_received {:run_updated, %{tasks: [%{status: "done"}, %{status: "pending"}]}}
 
-      assert Enum.any?(
-               Runs.list_messages(run.id),
-               &(&1.body =~ "1 of 2 tasks were marked done; check the others")
-             )
+      # Task 2 was asked about and never marked: nothing goes out until someone says so.
+      assert run.status == "paused"
+      assert run.progress["unresolved"] |> Map.values() |> hd() =~ "isn't marked done"
+      assert Enum.any?(Runs.list_messages(run.id), &(&1.body =~ "Paused before Run a command"))
     end
 
     test "a step with an arrow back gives its verdict with the tool" do
@@ -389,7 +405,7 @@ defmodule Factory.EngineTest do
     end
 
     test "a task that fails verification goes back to the step, then is left open" do
-      %{w: w, coder: coder} = workflow("true")
+      %{w: w, coder: coder, action: action} = workflow("true")
       {:ok, _} = Agents.update_agent(coder, %{prompt: "[test:complete]"})
       # One more pass rather than the default two, so the run gives up sooner.
       put_app_env(:max_loop_rounds, 1)
@@ -397,7 +413,8 @@ defmodule Factory.EngineTest do
       run = w |> queued_run() |> with_tasks(["Add the toggle [test:verify-fail]"])
       Runs.subscribe(run.id)
 
-      assert {:ok, %{status: "done"} = run} = Engine.run(run.id)
+      Engine.run(run.id)
+      run = Runs.get_run(run.id)
 
       # The chat has the verdict, the work going back, and the run giving up on it.
       assert_received {:message,
@@ -405,19 +422,21 @@ defmodule Factory.EngineTest do
 
       assert rest =~ "Make it do what the task says."
       assert rest =~ "✗ It does what the task says"
-      assert_received {:message, %{body: "Task 1 went back to Coder to fix (pass 1 of 1)."}}
-
-      assert_received {:message,
-                       %{body: "Task 1 still fails its checks after 1 more passes" <> _}}
+      assert_received {:message, %{body: "Task 1 went back to Coder to fix."}}
+      assert_received {:message, %{body: "Task 1 still isn't right after 1 more passes" <> _}}
 
       # The result is kept by task id, and the task is open again.
-      assert [%{status: "pending"} = task] = Runs.get_run(run.id).tasks
+      assert [%{status: "pending"} = task] = run.tasks
       result = run.progress["verification"]["#{task.id}"]
       assert result["passed"] == false
       assert result["fix"] == "Make it do what the task says."
       assert [%{"check" => "It does what the task says", "passed" => false}] = result["checks"]
-      assert run.progress["verify_rounds"] == %{"agent-#{coder.id}" => 1}
-      assert run.progress["feedback"]["agent-#{coder.id}"]["from"] == "Verification"
+      refute run.progress["feedback"]["agent-#{coder.id}"]
+
+      # And it doesn't go out as it is: the card waits for someone to say so.
+      assert run.status == "paused"
+      assert run.progress["unresolved"]["task:#{task.id}"] =~ "Make it do what the task says"
+      refute Map.has_key?(run.progress["outputs"], "agent-#{action.id}")
     end
   end
 

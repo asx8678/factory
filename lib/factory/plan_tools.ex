@@ -1,7 +1,7 @@
 defmodule Factory.PlanTools do
   @moduledoc """
   Tools a planner on Kiro uses to write a chat's plan as it works: it creates the plan
-  (a summary and its approach), then adds tasks to it a few at a time, and refines them
+  (a summary and its approach), then adds its tasks, and refines them
   on later messages. Kiro reaches them over MCP (`FactoryWeb.MCP`).
 
   Each planning request gets a token (`grant/3`) naming its run, the run's
@@ -79,7 +79,7 @@ defmodule Factory.PlanTools do
       name: "add_tasks",
       description:
         "Adds implementation tasks to the plan, in build order, at the end or after task " <>
-          "number `after` (0 for the start). Add a few at a time (2 to 5). Each task is one " <>
+          "number `after` (0 for the start). Send all you have in one call. Each task is one " <>
           "change that can be built and verified on its own: what's true when it's done " <>
           "(objective), the steps naming the files it changes (details), how to check it " <>
           "(verify) and the model to build it with. Titles are unique: one already taken " <>
@@ -144,6 +144,11 @@ defmodule Factory.PlanTools do
         type: "object",
         properties: %{
           number: %{type: "integer"},
+          expected_title: %{
+            type: "string",
+            description:
+              "The task's title now: numbers shift when another call adds or removes one."
+          },
           title: %{type: "string"},
           objective: %{type: "string"},
           details: %{type: "array", items: %{type: "string"}, description: "The steps."},
@@ -202,7 +207,7 @@ defmodule Factory.PlanTools do
   @suggest_tool %{
     name: "suggest_tasks",
     description:
-      "Adds suggested tasks to the list the person picks from, in build order, 3 to 6 at " <>
+      "Adds suggested tasks to the list the person picks from, in build order, 2 to 5 at " <>
         "a time. Each task is one small change that can be built and tested on its own, " <>
         "names the files it touches and has a size: S, M or L.",
     inputSchema: %{
@@ -527,7 +532,9 @@ defmodule Factory.PlanTools do
     send(pid, {:plan_tools, g, {:questions, questions}})
 
     {:ok,
-     "They didn't answer now; the questions are shown when your turn ends. End it now with a short message."}
+     "They didn't answer now; the questions are shown when your turn ends. Don't wait for " <>
+       "them: finish this turn's work (the report, or the plan with the options you " <>
+       "recommend), then end your turn. If the answers decide what gets built, just end it."}
   end
 
   defp after_answer(_answer, _questions, nil),
@@ -610,7 +617,7 @@ defmodule Factory.PlanTools do
   end
 
   defp apply_tool("get_plan", _args, run) do
-    with_spec(run, fn spec -> {:ok, {:read, describe(spec)}} end)
+    with_spec(run, fn spec -> {:ok, {:read, describe(spec, :full)}} end)
   end
 
   # While the run is planned, tasks approved on the Spec page are closed to the planner
@@ -639,7 +646,9 @@ defmodule Factory.PlanTools do
       else:
         {:ok,
          {{:questions, questions},
-          "They'll be shown when your turn ends. End it now with a short message."}}
+          "They'll be shown when your turn ends. Don't wait for them: finish this turn's work " <>
+            "(the report, or the plan with the options you recommend), then end your turn. If " <>
+            "the answers decide what gets built, just end it."}}
   end
 
   defp write_tool("create_plan", args, spec) do
@@ -656,7 +665,12 @@ defmodule Factory.PlanTools do
           do: Map.put(attrs, :design, design(summary, approach, Text.text(args["grilled"]))),
           else: attrs
 
-      write(spec, attrs, "Plan created. Now add its tasks with add_tasks.")
+      said =
+        if Map.has_key?(attrs, :design),
+          do: "Plan created.",
+          else: "Tasks cleared; the design stays the person's, so your approach wasn't saved."
+
+      write(spec, attrs, said <> " Now add its tasks with add_tasks.")
     end
   end
 
@@ -711,6 +725,11 @@ defmodule Factory.PlanTools do
     number = args["number"]
 
     case is_integer(number) && number >= 1 && Enum.at(blocks, number - 1) do
+      %{title: title}
+      when is_binary(:erlang.map_get("expected_title", args)) and
+             title != :erlang.map_get("expected_title", args) ->
+        {:error, "Task #{number} is now “#{title}”. #{task_titles(spec)}"}
+
       block when is_map(block) ->
         # Only what's given changes; the rest, maybe the person's edits, stays. Held to
         # what a new task may hold (`Planner.task/1`), on one line where it's one.
@@ -777,15 +796,19 @@ defmodule Factory.PlanTools do
   defp write(spec, attrs, done, renames \\ %{}) do
     with {:ok, spec} <- Specs.update_spec(spec, attrs),
          {:ok, spec} <- Specs.follow_tasks(spec, renames) do
-      {:ok, {:changed, done <> " " <> describe(spec)}}
+      # Only the titles: the design it knows, and all of it again on every write would
+      # stay in its context for the rest of the turn.
+      {:ok, {:changed, done <> " " <> task_titles(spec)}}
     else
       {:error, _} -> {:error, "Factory couldn't save that change."}
     end
   end
 
+  @design_room 16 * 1024
+
   @doc """
-  The plan in `spec` as the planner sees it: its approach, then its numbered tasks, by
-  title, or `:full` with their details as the spec has them.
+  The plan in `spec` as the planner sees it: its approach (at most 16 KB), then its
+  numbered tasks, by title, or `:full` with their details as the spec has them.
   """
   def describe(spec, detail \\ :titles) do
     tasks =
@@ -793,19 +816,29 @@ defmodule Factory.PlanTools do
         {{_, []}, _} ->
           "The plan has no tasks yet."
 
-        {{_, blocks}, :titles} ->
-          "The plan's tasks:\n" <>
-            (blocks
-             |> Enum.with_index(1)
-             |> Enum.map_join("\n", fn {b, i} -> "#{i}. #{b.title}" end))
+        {{_, _blocks}, :titles} ->
+          task_titles(spec)
 
         {{preamble, blocks}, :full} ->
           "The plan's tasks:\n" <> String.trim(Spec.render_blocks(preamble, blocks))
       end
 
     if planner_design?(spec.design) and String.trim(spec.design || "") != "",
-      do: String.trim(spec.design) <> "\n\n" <> tasks,
+      do: (spec.design |> String.trim() |> String.slice(0, @design_room)) <> "\n\n" <> tasks,
       else: tasks
+  end
+
+  defp task_titles(spec) do
+    case checklist(spec.tasks) do
+      {_, []} ->
+        "The plan has no tasks yet."
+
+      {_, blocks} ->
+        "The plan's tasks:\n" <>
+          (blocks
+           |> Enum.with_index(1)
+           |> Enum.map_join("\n", fn {b, i} -> "#{i}. #{b.title}" end))
+    end
   end
 
   # The tasks as checklist blocks. A plain numbered list (from an attached tasks.md) is

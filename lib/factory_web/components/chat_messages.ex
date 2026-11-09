@@ -66,7 +66,12 @@ defmodule FactoryWeb.ChatMessages do
 
   def message(%{message: %{author: author}} = assigns) when is_binary(author) do
     # A review's verdict (`Factory.ReviewVerdict`) is shown as a card, not as its line.
-    assigns = assign(assigns, :verdict, Factory.ReviewVerdict.split(assigns.message.body))
+    assigns =
+      assign(
+        assigns,
+        :verdict,
+        Factory.ReviewVerdict.split(assigns.message.body, assigns.message.meta["closing_at"])
+      )
 
     ~H"""
     <div id={@id}>

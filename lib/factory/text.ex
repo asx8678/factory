@@ -42,4 +42,11 @@ defmodule Factory.Text do
   end
 
   def first_heading(_markdown), do: nil
+
+  @doc "The last `count` characters of `text`, with a mark when anything was left out."
+  def tail(text, count) do
+    if String.length(text) <= count,
+      do: text,
+      else: "… " <> String.slice(text, -count, count)
+  end
 end

@@ -16,12 +16,14 @@ defmodule Factory.Context do
 
   Settings (`config :factory, :context`): `compact_at` (context use, in percent, that
   compacts a session before its next message; kept below Kiro's own 80% summarizer),
+  `compact_at_tokens` (the same, in tokens; a window may hold a million),
   `keep_recent_tokens`, `run_prompt_bytes`, `max_log_entries`, and `max_log_bytes`.
   """
   alias Factory.Context.{Bounds, Projections, Render}
 
   @defaults [
     compact_at: 70,
+    compact_at_tokens: nil,
     keep_recent_tokens: 20_000,
     run_prompt_bytes: 256 * 1024,
     max_log_entries: 2000,
