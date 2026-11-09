@@ -8,7 +8,7 @@ defmodule Factory.Kiro do
 
   # As offered by kiro-cli 2.24 (v3 engine) in session/new.
   @models ~w(auto claude-sonnet-4.5 claude-sonnet-4 claude-haiku-4.5 deepseek-3.2 minimax-m2.5 minimax-m2.1 glm-5 qwen3-coder-next)
-  @modes ~w(vibe spec quick-spec bug-fix plan autonomous semantic_reviewer kiro-fabric)
+  @modes ~w(vibe spec quick-spec bug-fix plan autonomous semantic_reviewer)
 
   @doc """
   The models this Kiro offers (see `Factory.Kiro.Catalog`), else the ones it shipped
@@ -458,7 +458,6 @@ defmodule Factory.Kiro do
         {:cd, workdir},
         {:env,
          [
-           {~c"KIRO_FABRIC_LAUNCH_WORKSPACE", ~c"#{workdir}"},
            {~c"KIRO_LOG", ~c"#{log}"}
          ] ++ ceiling(workdir) ++ for({name, value} <- env, do: {~c"#{name}", ~c"#{value}"})},
         {:args, ["-c", ~s(exec "$0" "$@" 2>"$KIRO_LOG"), cli | args]}
